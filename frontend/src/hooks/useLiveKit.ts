@@ -109,14 +109,42 @@ export function useLiveKit() {
       // Connect to LiveKit
       await newRoom.connect(getLiveKitUrl(), token);
 
-      // Enable camera and microphone
-      await newRoom.localParticipant.enableCameraAndMicrophone();
+      // Try to enable camera and microphone, but handle missing devices gracefully
+      let micEnabled = false;
+      let cameraEnabled = false;
+
+      // Try to enable microphone
+      try {
+        await newRoom.localParticipant.setMicrophoneEnabled(true);
+        micEnabled = true;
+      } catch (micError) {
+        console.warn('Could not enable microphone:', micError);
+        // Continue without microphone
+      }
+
+      // Try to enable camera
+      try {
+        await newRoom.localParticipant.setCameraEnabled(true);
+        cameraEnabled = true;
+      } catch (cameraError) {
+        console.warn('Could not enable camera:', cameraError);
+        // Continue without camera
+      }
+
+      // Notify user if devices are missing
+      if (!micEnabled && !cameraEnabled) {
+        toast('Joined without camera/microphone', { icon: '📺' });
+      } else if (!micEnabled) {
+        toast('No microphone detected', { icon: '🔇' });
+      } else if (!cameraEnabled) {
+        toast('No camera detected', { icon: '📷' });
+      }
 
       setRoom(newRoom);
       setLocalParticipant(newRoom.localParticipant);
       setRemoteParticipants(Array.from(newRoom.remoteParticipants.values()));
-      setMicEnabled(newRoom.localParticipant.isMicrophoneEnabled);
-      setCameraEnabled(newRoom.localParticipant.isCameraEnabled);
+      setMicEnabled(micEnabled);
+      setCameraEnabled(cameraEnabled);
       setView('room');
 
     } catch (error) {
@@ -126,8 +154,6 @@ export function useLiveKit() {
       if (error instanceof Error) {
         if (error.message.includes('Permission denied') || error.message.includes('NotAllowedError')) {
           toast.error('Camera/microphone permission denied. Please allow access and try again.');
-        } else if (error.message.includes('NotFoundError')) {
-          toast.error('No camera or microphone found.');
         } else {
           toast.error(error.message);
         }
