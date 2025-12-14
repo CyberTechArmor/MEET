@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import {
   Room,
   RoomEvent,
@@ -303,19 +303,10 @@ export function useLiveKit() {
     }
   }, [setScreenSharing]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (sharedRoomInstance) {
-        sharedRoomInstance.disconnect();
-        sharedRoomInstance = null;
-      }
-      if (roomRef.current) {
-        roomRef.current.disconnect();
-        roomRef.current = null;
-      }
-    };
-  }, []);
+  // Note: We intentionally don't disconnect on unmount since we use a singleton pattern.
+  // The room should only be disconnected explicitly via the disconnect() function.
+  // This prevents the room from disconnecting when components re-render or unmount
+  // during view transitions (e.g., JoinForm -> VideoRoom).
 
   return {
     connect,
