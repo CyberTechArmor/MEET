@@ -1,8 +1,9 @@
-import { useEffect, useRef, useCallback, useMemo } from 'react';
+import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { ConnectionState } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import VideoTile from './VideoTile';
 import ControlBar from './ControlBar';
+import SelfViewPip from './SelfViewPip';
 import { formatRoomCode } from '../lib/livekit';
 
 function VideoRoom() {
@@ -15,6 +16,9 @@ function VideoRoom() {
     controlsVisible,
     setControlsVisible,
   } = useRoomStore();
+
+  // PiP self-view state
+  const [isPipMinimized, setIsPipMinimized] = useState(false);
 
   const hideTimeoutRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -162,15 +166,24 @@ function VideoRoom() {
           />
         ))}
 
-        {/* Local participant - smaller if there are remote participants */}
-        {localParticipant && (
+        {/* Local participant in main grid if alone */}
+        {localParticipant && remoteParticipants.length === 0 && (
           <VideoTile
             participant={localParticipant}
             isLocal={true}
-            isSmall={remoteParticipants.length > 0}
+            isSmall={false}
           />
         )}
       </div>
+
+      {/* PiP Self View - shown when there are remote participants */}
+      {localParticipant && remoteParticipants.length > 0 && (
+        <SelfViewPip
+          participant={localParticipant}
+          isMinimized={isPipMinimized}
+          onToggleMinimize={() => setIsPipMinimized(!isPipMinimized)}
+        />
+      )}
 
       {/* Control Bar */}
       <div

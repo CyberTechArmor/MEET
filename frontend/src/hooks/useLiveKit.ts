@@ -68,6 +68,12 @@ export function useLiveKit() {
       if (publication.track?.kind === Track.Kind.Video) {
         if (publication.track.source === Track.Source.ScreenShare) {
           setScreenSharing(true);
+        } else if (publication.track.source === Track.Source.Camera) {
+          setCameraEnabled(true);
+        }
+      } else if (publication.track?.kind === Track.Kind.Audio) {
+        if (publication.track.source === Track.Source.Microphone) {
+          setMicEnabled(true);
         }
       }
     });
@@ -76,7 +82,30 @@ export function useLiveKit() {
       if (publication.track?.kind === Track.Kind.Video) {
         if (publication.track.source === Track.Source.ScreenShare) {
           setScreenSharing(false);
+        } else if (publication.track.source === Track.Source.Camera) {
+          setCameraEnabled(false);
         }
+      } else if (publication.track?.kind === Track.Kind.Audio) {
+        if (publication.track.source === Track.Source.Microphone) {
+          setMicEnabled(false);
+        }
+      }
+    });
+
+    // Handle local track mute/unmute to keep UI in sync
+    room.on(RoomEvent.TrackMuted, (publication) => {
+      if (publication.track?.source === Track.Source.Camera) {
+        setCameraEnabled(false);
+      } else if (publication.track?.source === Track.Source.Microphone) {
+        setMicEnabled(false);
+      }
+    });
+
+    room.on(RoomEvent.TrackUnmuted, (publication) => {
+      if (publication.track?.source === Track.Source.Camera) {
+        setCameraEnabled(true);
+      } else if (publication.track?.source === Track.Source.Microphone) {
+        setMicEnabled(true);
       }
     });
 
@@ -94,6 +123,8 @@ export function useLiveKit() {
     removeRemoteParticipant,
     setRemoteParticipants,
     setScreenSharing,
+    setMicEnabled,
+    setCameraEnabled,
   ]);
 
   // Connect to room

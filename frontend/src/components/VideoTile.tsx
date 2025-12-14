@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Participant, Track, ParticipantEvent } from 'livekit-client';
+import { Participant, Track, ParticipantEvent, LocalParticipant } from 'livekit-client';
 import ParticipantOverlay from './ParticipantOverlay';
 
 interface VideoTileProps {
@@ -28,6 +28,8 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
     participant.on(ParticipantEvent.TrackUnmuted, handleTrackChange);
     participant.on(ParticipantEvent.TrackPublished, handleTrackChange);
     participant.on(ParticipantEvent.TrackUnpublished, handleTrackChange);
+    participant.on(ParticipantEvent.LocalTrackPublished, handleTrackChange);
+    participant.on(ParticipantEvent.LocalTrackUnpublished, handleTrackChange);
 
     return () => {
       participant.off(ParticipantEvent.TrackSubscribed, handleTrackChange);
@@ -36,6 +38,8 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
       participant.off(ParticipantEvent.TrackUnmuted, handleTrackChange);
       participant.off(ParticipantEvent.TrackPublished, handleTrackChange);
       participant.off(ParticipantEvent.TrackUnpublished, handleTrackChange);
+      participant.off(ParticipantEvent.LocalTrackPublished, handleTrackChange);
+      participant.off(ParticipantEvent.LocalTrackUnpublished, handleTrackChange);
     };
   }, [participant, forceUpdate]);
 
@@ -50,14 +54,34 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
   // Get audio track for status
   const audioPublication = participant.getTrackPublication(Track.Source.Microphone);
 
-  // Check if camera is enabled
-  const isCameraEnabled = videoPublication?.isSubscribed && !videoPublication?.isMuted && !!videoTrack;
+  // Check if camera is enabled - different logic for local vs remote
+  const isCameraEnabled = useMemo(() => {
+    if (isLocal) {
+      // For local participant, check if camera is enabled via participant method
+      return (participant as LocalParticipant).isCameraEnabled;
+    } else {
+      // For remote participant, check subscription and track
+      return videoPublication?.isSubscribed && !videoPublication?.isMuted && !!videoTrack;
+    }
+  }, [isLocal, participant, videoPublication, videoTrack]);
 
   // Check if mic is enabled
-  const isMicEnabled = audioPublication?.isSubscribed && !audioPublication?.isMuted;
+  const isMicEnabled = useMemo(() => {
+    if (isLocal) {
+      return (participant as LocalParticipant).isMicrophoneEnabled;
+    } else {
+      return audioPublication?.isSubscribed && !audioPublication?.isMuted;
+    }
+  }, [isLocal, participant, audioPublication]);
 
   // Check if screen sharing
-  const isScreenSharing = screenSharePublication?.isSubscribed && !screenSharePublication?.isMuted && !!screenShareTrack;
+  const isScreenSharing = useMemo(() => {
+    if (isLocal) {
+      return (participant as LocalParticipant).isScreenShareEnabled;
+    } else {
+      return screenSharePublication?.isSubscribed && !screenSharePublication?.isMuted && !!screenShareTrack;
+    }
+  }, [isLocal, participant, screenSharePublication, screenShareTrack]);
 
   // Attach video track to element
   useEffect(() => {
