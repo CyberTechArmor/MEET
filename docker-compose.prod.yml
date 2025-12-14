@@ -1,0 +1,16 @@
+version: '3.8'
+
+# Production Docker Compose - Coming Soon
+# This file will include:
+# - SSL/TLS termination with Traefik/Nginx
+# - PostgreSQL database
+# - Redis for sessions
+# - TURN server (coturn)
+# - Full authentication service
+# - Admin dashboard
+
+services:
+  # Placeholder for production services
+  placeholder:
+    image: alpine:latest
+    command: echo "Production mode coming soon!"
