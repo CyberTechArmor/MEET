@@ -1,5 +1,5 @@
-import { useEffect, useRef, useMemo } from 'react';
-import { Participant, Track, TrackPublication } from 'livekit-client';
+import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { Participant, Track, TrackPublication, ParticipantEvent } from 'livekit-client';
 import ParticipantOverlay from './ParticipantOverlay';
 
 interface VideoTileProps {
@@ -12,39 +12,52 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
 
+  // Force re-render when tracks change
+  const [, setUpdateCounter] = useState(0);
+  const forceUpdate = useCallback(() => setUpdateCounter(c => c + 1), []);
+
+  // Subscribe to track events to trigger re-renders
+  useEffect(() => {
+    const handleTrackChange = () => {
+      forceUpdate();
+    };
+
+    participant.on(ParticipantEvent.TrackSubscribed, handleTrackChange);
+    participant.on(ParticipantEvent.TrackUnsubscribed, handleTrackChange);
+    participant.on(ParticipantEvent.TrackMuted, handleTrackChange);
+    participant.on(ParticipantEvent.TrackUnmuted, handleTrackChange);
+    participant.on(ParticipantEvent.TrackPublished, handleTrackChange);
+    participant.on(ParticipantEvent.TrackUnpublished, handleTrackChange);
+
+    return () => {
+      participant.off(ParticipantEvent.TrackSubscribed, handleTrackChange);
+      participant.off(ParticipantEvent.TrackUnsubscribed, handleTrackChange);
+      participant.off(ParticipantEvent.TrackMuted, handleTrackChange);
+      participant.off(ParticipantEvent.TrackUnmuted, handleTrackChange);
+      participant.off(ParticipantEvent.TrackPublished, handleTrackChange);
+      participant.off(ParticipantEvent.TrackUnpublished, handleTrackChange);
+    };
+  }, [participant, forceUpdate]);
+
   // Get video track (camera)
-  const videoTrack = useMemo(() => {
-    const publication = participant.getTrackPublication(Track.Source.Camera);
-    return publication?.track;
-  }, [participant]);
+  const videoPublication = participant.getTrackPublication(Track.Source.Camera);
+  const videoTrack = videoPublication?.track;
 
   // Get screen share track
-  const screenShareTrack = useMemo(() => {
-    const publication = participant.getTrackPublication(Track.Source.ScreenShare);
-    return publication?.track;
-  }, [participant]);
+  const screenSharePublication = participant.getTrackPublication(Track.Source.ScreenShare);
+  const screenShareTrack = screenSharePublication?.track;
 
   // Get audio track for status
-  const audioPublication = useMemo(() => {
-    return participant.getTrackPublication(Track.Source.Microphone);
-  }, [participant]);
+  const audioPublication = participant.getTrackPublication(Track.Source.Microphone);
 
   // Check if camera is enabled
-  const isCameraEnabled = useMemo(() => {
-    const pub = participant.getTrackPublication(Track.Source.Camera) as TrackPublication | undefined;
-    return pub?.isSubscribed && !pub?.isMuted;
-  }, [participant]);
+  const isCameraEnabled = videoPublication?.isSubscribed && !videoPublication?.isMuted && !!videoTrack;
 
   // Check if mic is enabled
-  const isMicEnabled = useMemo(() => {
-    return audioPublication?.isSubscribed && !audioPublication?.isMuted;
-  }, [audioPublication]);
+  const isMicEnabled = audioPublication?.isSubscribed && !audioPublication?.isMuted;
 
   // Check if screen sharing
-  const isScreenSharing = useMemo(() => {
-    const pub = participant.getTrackPublication(Track.Source.ScreenShare) as TrackPublication | undefined;
-    return pub?.isSubscribed && !pub?.isMuted;
-  }, [participant]);
+  const isScreenSharing = screenSharePublication?.isSubscribed && !screenSharePublication?.isMuted && !!screenShareTrack;
 
   // Attach video track to element
   useEffect(() => {

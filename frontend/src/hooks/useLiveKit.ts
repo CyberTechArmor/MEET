@@ -52,14 +52,17 @@ export function useLiveKit() {
       toast(`${participant.identity} left`, { icon: '👋' });
     });
 
-    room.on(RoomEvent.TrackSubscribed, () => {
-      // Force re-render when tracks change
+    // Handle track events to force UI updates
+    const updateParticipants = () => {
       setRemoteParticipants(Array.from(room.remoteParticipants.values()));
-    });
+    };
 
-    room.on(RoomEvent.TrackUnsubscribed, () => {
-      setRemoteParticipants(Array.from(room.remoteParticipants.values()));
-    });
+    room.on(RoomEvent.TrackSubscribed, updateParticipants);
+    room.on(RoomEvent.TrackUnsubscribed, updateParticipants);
+    room.on(RoomEvent.TrackMuted, updateParticipants);
+    room.on(RoomEvent.TrackUnmuted, updateParticipants);
+    room.on(RoomEvent.TrackPublished, updateParticipants);
+    room.on(RoomEvent.TrackUnpublished, updateParticipants);
 
     room.on(RoomEvent.LocalTrackPublished, (publication: LocalTrackPublication) => {
       if (publication.track?.kind === Track.Kind.Video) {
