@@ -1,17 +1,23 @@
 # MEET - Caddy Reverse Proxy Configuration
-# Automatic HTTPS with Let's Encrypt
+# Supports both domain names (Let's Encrypt) and IP addresses (self-signed)
 
 # Global options
 {
-    # Email for Let's Encrypt certificate notifications (required for production)
+    # Email for Let's Encrypt (used for domain-based SSL)
     email {$ACME_EMAIL:admin@example.com}
 
-    # For debugging SSL issues, uncomment:
+    # For debugging, uncomment:
     # debug
 }
 
 # Main site block
 {$MEET_DOMAIN:localhost} {
+    # TLS configuration:
+    # - For domains: Caddy auto-obtains Let's Encrypt certificates
+    # - For IPs: Set TLS_MODE=internal in .env for self-signed certs
+    # - For localhost: HTTP only (no TLS needed)
+    {$TLS_MODE:}
+
     # Enable compression
     encode gzip zstd
 

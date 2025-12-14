@@ -19,6 +19,7 @@ services:
     environment:
       - MEET_DOMAIN=${MEET_DOMAIN:-localhost}
       - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+      - TLS_MODE=${TLS_MODE:-}
     depends_on:
       - meet-frontend
       - meet-api

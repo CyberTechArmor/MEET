@@ -526,12 +526,24 @@ install_with_proxy() {
     read -p "  Domain [localhost]: " domain
     domain=${domain:-localhost}
 
-    # Get email for Let's Encrypt (only for non-localhost)
+    # Detect if input is an IP address
+    tls_mode=""
     acme_email="admin@example.com"
-    if [ "$domain" != "localhost" ]; then
+
+    if [ "$domain" = "localhost" ]; then
+        # Localhost - no TLS needed
+        tls_mode=""
+    elif [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # IP address - use self-signed certificate
+        echo ""
+        echo -e "${YELLOW}  Note: Using IP address with self-signed SSL certificate.${NC}"
+        echo "  Your browser will show a security warning - this is normal."
+        echo "  For trusted SSL, use a domain name instead."
+        tls_mode="tls internal"
+    else
+        # Domain name - use Let's Encrypt
         echo ""
         echo "  Enter your email for Let's Encrypt SSL certificate notifications."
-        echo "  This is required for automatic HTTPS certificates."
         echo ""
         read -p "  Email: " acme_email
         if [ -z "$acme_email" ]; then
@@ -540,32 +552,14 @@ install_with_proxy() {
         fi
     fi
 
-    # Create/update .env file
-    if [ -f .env ]; then
-        # Update existing .env
-        if grep -q "^MEET_DOMAIN=" .env; then
-            sed -i.bak "s/^MEET_DOMAIN=.*/MEET_DOMAIN=$domain/" .env
-        else
-            echo "MEET_DOMAIN=$domain" >> .env
-        fi
-        if grep -q "^ACME_EMAIL=" .env; then
-            sed -i.bak "s/^ACME_EMAIL=.*/ACME_EMAIL=$acme_email/" .env
-        else
-            echo "ACME_EMAIL=$acme_email" >> .env
-        fi
-    else
-        # Create new .env from example
-        if [ -f .env.example ]; then
-            cp .env.example .env
-            sed -i.bak "s/^MEET_DOMAIN=.*/MEET_DOMAIN=$domain/" .env
-        else
-            echo "MEET_DOMAIN=$domain" > .env
-            echo "ACME_EMAIL=$acme_email" >> .env
-            echo "LIVEKIT_API_KEY=devkey" >> .env
-            echo "LIVEKIT_API_SECRET=secret" >> .env
-        fi
-    fi
-    rm -f .env.bak 2>/dev/null
+    # Create .env file (overwrite to ensure clean state)
+    cat > .env << EOF
+MEET_DOMAIN=$domain
+ACME_EMAIL=$acme_email
+TLS_MODE=$tls_mode
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+EOF
 
     echo ""
     echo -e "${DIM}Configuration saved to .env${NC}"
