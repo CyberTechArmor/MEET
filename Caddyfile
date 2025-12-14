@@ -25,7 +25,20 @@
     # Proxies wss:// connections to LiveKit server
     handle /livekit/* {
         uri strip_prefix /livekit
-        reverse_proxy livekit:7880
+        reverse_proxy livekit:7880 {
+            # WebSocket support
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+            # Disable buffering for real-time WebSocket
+            flush_interval -1
+            # Transport settings for WebSocket
+            transport http {
+                keepalive 30s
+                keepalive_idle_conns 10
+            }
+        }
     }
 
     # API routes - proxy to backend
