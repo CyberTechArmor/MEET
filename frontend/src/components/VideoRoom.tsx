@@ -87,9 +87,12 @@ function VideoRoom() {
 
   // Determine grid layout based on participant count
   const gridClass = useMemo(() => {
-    const count = remoteParticipants.length + 1; // +1 for local
-    if (count === 1) return 'video-grid-1';
-    return 'video-grid-2';
+    const count = remoteParticipants.length + (remoteParticipants.length === 0 ? 1 : 0); // Count participants in grid
+    if (count <= 1) return 'video-grid-1';
+    if (count === 2) return 'video-grid-2';
+    if (count <= 4) return 'video-grid-4';
+    if (count <= 6) return 'video-grid-6';
+    return 'video-grid-9'; // 9+ will scroll
   }, [remoteParticipants.length]);
 
   // Connection states

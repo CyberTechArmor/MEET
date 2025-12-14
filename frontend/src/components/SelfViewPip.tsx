@@ -43,15 +43,16 @@ function SelfViewPip({ participant, isMinimized, onToggleMinimize }: SelfViewPip
   // Check if mic is enabled
   const isMicEnabled = participant.isMicrophoneEnabled;
 
-  // Attach video track to element
+  // Attach video track to element - runs when track or view changes
   useEffect(() => {
-    if (videoRef.current && videoTrack) {
-      videoTrack.attach(videoRef.current);
+    const videoElement = videoRef.current;
+    if (videoElement && videoTrack) {
+      videoTrack.attach(videoElement);
       return () => {
-        videoTrack.detach(videoRef.current!);
+        videoTrack.detach(videoElement);
       };
     }
-  }, [videoTrack]);
+  }, [videoTrack, isMinimized, isCameraEnabled]);
 
   // Generate avatar initials and color
   const initials = useMemo(() => {
