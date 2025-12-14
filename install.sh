@@ -603,24 +603,34 @@ install_with_proxy() {
         fi
     fi
 
-    # Resolve domain to IP for LiveKit (needed for WebRTC ICE)
+    # Detect server's public IP for LiveKit (needed for WebRTC ICE)
     livekit_ip=""
     if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         # Already an IP address
         livekit_ip="$domain"
     elif [ "$domain" != "localhost" ]; then
-        # Try to resolve domain to IP
-        echo -e "${DIM}Resolving $domain...${NC}"
-        livekit_ip=$(dig +short "$domain" 2>/dev/null | head -n1)
+        # Detect the server's actual public IP (not DNS resolution)
+        echo -e "${DIM}Detecting server's public IP...${NC}"
+
+        # Try multiple services in case one is down
+        livekit_ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null)
         if [ -z "$livekit_ip" ]; then
-            # Fallback to getent
-            livekit_ip=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -n1)
+            livekit_ip=$(curl -s --connect-timeout 5 icanhazip.com 2>/dev/null)
         fi
         if [ -z "$livekit_ip" ]; then
-            echo -e "${YELLOW}  Warning: Could not resolve $domain to IP${NC}"
-            echo "  WebRTC may not work correctly. Set LIVEKIT_NODE_IP manually in .env"
+            livekit_ip=$(curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null)
+        fi
+        if [ -z "$livekit_ip" ]; then
+            livekit_ip=$(curl -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+        fi
+
+        # Validate IP format
+        if [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo -e "${GREEN}✓${NC} Detected public IP: $livekit_ip"
         else
-            echo -e "${DIM}Resolved to: $livekit_ip${NC}"
+            echo -e "${YELLOW}  Warning: Could not detect server's public IP${NC}"
+            echo "  WebRTC may not work correctly. Set LIVEKIT_NODE_IP manually in .env"
+            livekit_ip=""
         fi
     fi
 
