@@ -552,11 +552,33 @@ install_with_proxy() {
         fi
     fi
 
+    # Resolve domain to IP for LiveKit (needed for WebRTC ICE)
+    livekit_ip=""
+    if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # Already an IP address
+        livekit_ip="$domain"
+    elif [ "$domain" != "localhost" ]; then
+        # Try to resolve domain to IP
+        echo -e "${DIM}Resolving $domain...${NC}"
+        livekit_ip=$(dig +short "$domain" 2>/dev/null | head -n1)
+        if [ -z "$livekit_ip" ]; then
+            # Fallback to getent
+            livekit_ip=$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -n1)
+        fi
+        if [ -z "$livekit_ip" ]; then
+            echo -e "${YELLOW}  Warning: Could not resolve $domain to IP${NC}"
+            echo "  WebRTC may not work correctly. Set LIVEKIT_NODE_IP manually in .env"
+        else
+            echo -e "${DIM}Resolved to: $livekit_ip${NC}"
+        fi
+    fi
+
     # Create .env file (overwrite to ensure clean state)
     cat > .env << EOF
 MEET_DOMAIN=$domain
 ACME_EMAIL=$acme_email
 TLS_MODE=$tls_mode
+LIVEKIT_NODE_IP=$livekit_ip
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 EOF

@@ -1,17 +1,22 @@
 # LiveKit Server Configuration
-# This config enables remote access by properly configuring ICE/WebRTC
+# Optimized for deployment behind reverse proxy
 
 port: 7880
+
 rtc:
-  # TCP port for WebRTC
+  # TCP port for WebRTC (fallback when UDP is blocked)
   tcp_port: 7881
   # UDP port range for WebRTC media
   port_range_start: 50000
-  port_range_end: 60000
-  # Use external IP detection via STUN for NAT traversal
+  port_range_end: 50100
+  # Use external IP detection via STUN
   use_external_ip: true
-  # Enable ICE over TCP as fallback
+  # Enable ICE over TCP as fallback (important for restrictive networks)
   enable_loopback_candidate: false
+  # STUN servers for ICE candidate gathering
+  stun_servers:
+    - stun:stun.l.google.com:19302
+    - stun:stun1.l.google.com:19302
 
 # Development keys (change these in production!)
 keys:
