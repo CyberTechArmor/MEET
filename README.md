@@ -32,7 +32,15 @@ cd MEET
 - Docker
 - Docker Compose
 
-That's it! No external accounts, API keys, or complex configuration needed.
+That's it! The installer will automatically install missing dependencies.
+
+### Installation Modes
+
+The installer offers three modes:
+
+1. **Demo Mode** - Quick local development (http://localhost:3000)
+2. **Demo + Reverse Proxy** - Deployment with Caddy for automatic HTTPS
+3. **Production Mode** - Full deployment (coming soon)
 
 ## Features
 
@@ -63,6 +71,7 @@ That's it! No external accounts, API keys, or complex configuration needed.
 
 ## Architecture
 
+### Demo Mode
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         Docker                               │
@@ -71,6 +80,23 @@ That's it! No external accounts, API keys, or complex configuration needed.
 │  │   (React)   │  │  (Express)  │  │     (WebRTC)        │  │
 │  │   :3000     │  │   :8080     │  │  :7880/:7881/:7882  │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### With Reverse Proxy (Caddy)
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Docker                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              Caddy (Reverse Proxy)                   │    │
+│  │              :80 / :443 (HTTPS)                      │    │
+│  └────────────────────┬────────────────────────────────┘    │
+│           ┌───────────┴───────────┐                          │
+│  ┌────────▼────┐  ┌───────▼──────┐  ┌─────────────────────┐ │
+│  │   Frontend  │  │     API      │  │   LiveKit Server    │ │
+│  │   (React)   │  │  (Express)   │  │     (WebRTC)        │ │
+│  └─────────────┘  └──────────────┘  │  :7880/:7881/:7882  │ │
+│                                      └─────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -116,11 +142,11 @@ That's it! No external accounts, API keys, or complex configuration needed.
 
 ## Development
 
-### Local Development
+### Demo Mode (Local Development)
 
 ```bash
 # Start the stack
-docker compose up -d
+docker compose up -d --build
 
 # View logs
 docker compose logs -f
@@ -128,6 +154,27 @@ docker compose logs -f
 # Stop the stack
 docker compose down
 ```
+
+### With Reverse Proxy (Caddy)
+
+For deployment with automatic HTTPS:
+
+```bash
+# Configure your domain
+cp .env.example .env
+# Edit .env and set MEET_DOMAIN=your.domain.com
+
+# Start with reverse proxy
+docker compose -f docker-compose.proxy.yml up -d --build
+
+# View logs
+docker compose -f docker-compose.proxy.yml logs -f
+
+# Stop
+docker compose -f docker-compose.proxy.yml down
+```
+
+Caddy will automatically obtain Let's Encrypt SSL certificates for your domain.
 
 ### Frontend Only
 
@@ -166,9 +213,12 @@ CORS_ORIGIN=http://localhost:3000
 
 ```
 meet/
-├── install.sh              # One-line installer
-├── docker-compose.yml      # Demo orchestration
+├── install.sh              # One-line installer (auto-installs dependencies)
+├── docker-compose.yml      # Demo mode orchestration
+├── docker-compose.proxy.yml # With Caddy reverse proxy
 ├── docker-compose.prod.yml # Production (placeholder)
+├── Caddyfile               # Caddy configuration
+├── .env.example            # Environment template
 ├── frontend/
 │   ├── Dockerfile
 │   ├── nginx.conf

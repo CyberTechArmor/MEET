@@ -512,6 +512,107 @@ install_demo() {
     fi
 }
 
+# Reverse proxy mode installation
+install_with_proxy() {
+    echo -e "${BOLD}Starting MEET with Reverse Proxy (Caddy)...${NC}"
+    echo ""
+
+    # Get domain configuration
+    echo -e "${BOLD}Domain Configuration${NC}"
+    echo ""
+    echo "  Enter your domain name for HTTPS/SSL certificates."
+    echo "  Use 'localhost' for local development (HTTP only)."
+    echo ""
+    read -p "  Domain [localhost]: " domain
+    domain=${domain:-localhost}
+
+    # Create/update .env file
+    if [ -f .env ]; then
+        # Update existing .env
+        if grep -q "^MEET_DOMAIN=" .env; then
+            sed -i.bak "s/^MEET_DOMAIN=.*/MEET_DOMAIN=$domain/" .env
+        else
+            echo "MEET_DOMAIN=$domain" >> .env
+        fi
+    else
+        # Create new .env from example
+        if [ -f .env.example ]; then
+            cp .env.example .env
+            sed -i.bak "s/^MEET_DOMAIN=.*/MEET_DOMAIN=$domain/" .env
+        else
+            echo "MEET_DOMAIN=$domain" > .env
+            echo "LIVEKIT_API_KEY=devkey" >> .env
+            echo "LIVEKIT_API_SECRET=secret" >> .env
+        fi
+    fi
+    rm -f .env.bak 2>/dev/null
+
+    echo ""
+    echo -e "${DIM}Configuration saved to .env${NC}"
+    echo ""
+
+    # Check if containers are already running
+    if docker compose -f docker-compose.proxy.yml ps 2>/dev/null | grep -q "meet\|caddy"; then
+        echo -e "${YELLOW}! MEET containers already exist${NC}"
+        read -p "  Stop and rebuild? [y/N]: " rebuild
+        if [[ "$rebuild" =~ ^[Yy]$ ]]; then
+            docker compose -f docker-compose.proxy.yml down --remove-orphans
+        else
+            echo ""
+            echo -e "${GREEN}✓ MEET is already running!${NC}"
+            if [ "$domain" = "localhost" ]; then
+                echo -e "  ${BOLD}→ Open ${CYAN}http://localhost${NC}"
+            else
+                echo -e "  ${BOLD}→ Open ${CYAN}https://$domain${NC}"
+            fi
+            exit 0
+        fi
+    fi
+
+    echo "Building and starting containers with reverse proxy..."
+    echo ""
+
+    # Build and start with proxy config
+    if docker compose -f docker-compose.proxy.yml up -d --build; then
+        echo ""
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo -e "${GREEN}  ✓ MEET is running with Caddy reverse proxy!${NC}"
+        echo ""
+        echo -e "  ${BOLD}Open your browser:${NC}"
+        if [ "$domain" = "localhost" ]; then
+            echo -e "    → ${CYAN}http://localhost${NC}"
+        else
+            echo -e "    → ${CYAN}https://$domain${NC}"
+            echo ""
+            echo -e "  ${BOLD}SSL/TLS:${NC}"
+            echo "    Caddy will automatically obtain Let's Encrypt certificates"
+            echo "    Ensure your domain points to this server's IP address"
+        fi
+        echo ""
+        echo -e "  ${BOLD}Quick start:${NC}"
+        echo -e "    1. Enter your name"
+        echo -e "    2. Create or join a room"
+        echo -e "    3. Share the room code with others"
+        echo ""
+        echo -e "  ${BOLD}Commands:${NC}"
+        echo -e "    Stop:    ${YELLOW}docker compose -f docker-compose.proxy.yml down${NC}"
+        echo -e "    Logs:    ${YELLOW}docker compose -f docker-compose.proxy.yml logs -f${NC}"
+        echo -e "    Restart: ${YELLOW}docker compose -f docker-compose.proxy.yml restart${NC}"
+        echo ""
+        echo -e "  ${BOLD}Configuration:${NC}"
+        echo -e "    Edit ${YELLOW}.env${NC} to change domain or settings"
+        echo -e "    Edit ${YELLOW}Caddyfile${NC} for advanced proxy configuration"
+        echo ""
+        echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    else
+        echo ""
+        echo -e "${RED}✗ Failed to start MEET${NC}"
+        echo "  Check logs with: docker compose -f docker-compose.proxy.yml logs"
+        exit 1
+    fi
+}
+
 # Production mode placeholder
 install_production() {
     echo ""
@@ -519,7 +620,7 @@ install_production() {
     echo ""
     echo -e "${BOLD}  Production Mode${NC}"
     echo ""
-    echo "  Production mode includes:"
+    echo "  Full production deployment includes:"
     echo "    • SSL/TLS with automatic certificates"
     echo "    • Custom domain configuration"
     echo "    • PostgreSQL for room/user persistence"
@@ -528,7 +629,11 @@ install_production() {
     echo "    • User authentication (OAuth/email)"
     echo "    • Admin dashboard"
     echo ""
-    echo -e "${YELLOW}  Coming soon! Use Demo mode for now.${NC}"
+    echo -e "${YELLOW}  Coming soon!${NC}"
+    echo ""
+    echo "  For now, use:"
+    echo "    • Demo Mode - for local testing"
+    echo "    • Demo + Proxy Mode - for deployment with SSL"
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -544,10 +649,14 @@ main() {
     echo ""
     echo -e "  ${CYAN}[1]${NC} Demo Mode"
     echo "      Quick start for local development and testing"
-    echo "      No external accounts or API keys required"
+    echo "      Access via http://localhost:3000"
     echo ""
-    echo -e "  ${CYAN}[2]${NC} Production Mode"
-    echo "      Full deployment with SSL, persistence, auth"
+    echo -e "  ${CYAN}[2]${NC} Demo + Reverse Proxy (Caddy)"
+    echo "      Includes Caddy for automatic HTTPS"
+    echo "      Perfect for deployment with custom domain"
+    echo ""
+    echo -e "  ${CYAN}[3]${NC} Production Mode"
+    echo "      Full deployment with persistence, auth, etc."
     echo -e "      ${YELLOW}(Coming soon)${NC}"
     echo ""
     read -p "Enter choice [1]: " choice
@@ -560,6 +669,9 @@ main() {
             install_demo
             ;;
         2)
+            install_with_proxy
+            ;;
+        3)
             install_production
             ;;
         *)
