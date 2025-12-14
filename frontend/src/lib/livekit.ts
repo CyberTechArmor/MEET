@@ -31,8 +31,16 @@ function getLiveKitWsUrl(): string {
   // Otherwise, derive from current location for dynamic hostname support
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const hostname = window.location.hostname;
+  const port = window.location.port;
 
-  // LiveKit runs on port 7880
+  // If running behind reverse proxy (port 80/443), use proxied path through Caddy
+  // This ensures WebSocket goes through SSL on the same port
+  if (port === '' || port === '80' || port === '443') {
+    // Use /livekit path which Caddy proxies to LiveKit server
+    return `${wsProtocol}//${hostname}/livekit`;
+  }
+
+  // Demo mode: LiveKit runs on port 7880 on same host
   return `${wsProtocol}//${hostname}:7880`;
 }
 

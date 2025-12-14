@@ -18,8 +18,15 @@
     # - For localhost: HTTP only (no TLS needed)
     {$TLS_MODE:}
 
-    # Enable compression
+    # Enable compression (but not for WebSocket)
     encode gzip zstd
+
+    # LiveKit WebSocket - must come before other handlers
+    # Proxies wss:// connections to LiveKit server
+    handle /livekit/* {
+        uri strip_prefix /livekit
+        reverse_proxy livekit:7880
+    }
 
     # API routes - proxy to backend
     handle /api/* {
