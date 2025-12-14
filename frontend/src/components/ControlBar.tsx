@@ -3,7 +3,7 @@ import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 
 function ControlBar() {
-  const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost } = useRoomStore();
+  const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost, controlsPinned, setControlsPinned } = useRoomStore();
   const { toggleMic, toggleCamera, toggleScreenShare, disconnect, endMeeting } = useLiveKit();
 
   const [isLeaving, setIsLeaving] = useState(false);
@@ -123,6 +123,27 @@ function ControlBar() {
           )}
           {isScreenSharing && (
             <div className="absolute -top-1 -right-1 w-3 h-3 bg-meet-success rounded-full animate-pulse" />
+          )}
+        </button>
+
+        {/* Pin Controls Toggle */}
+        <button
+          onClick={() => setControlsPinned(!controlsPinned)}
+          className={`relative p-4 rounded-xl transition-smooth ${
+            controlsPinned
+              ? 'bg-meet-accent hover:bg-meet-accent-dark text-meet-bg'
+              : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
+          }`}
+          title={controlsPinned ? 'Unpin controls' : 'Pin controls'}
+        >
+          {controlsPinned ? (
+            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+            </svg>
+          ) : (
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+            </svg>
           )}
         </button>
 

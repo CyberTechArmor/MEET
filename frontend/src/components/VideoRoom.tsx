@@ -16,6 +16,7 @@ function VideoRoom() {
     isScreenSharing,
     controlsVisible,
     setControlsVisible,
+    controlsPinned,
   } = useRoomStore();
 
   // PiP self-view state
@@ -24,7 +25,7 @@ function VideoRoom() {
   const hideTimeoutRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Auto-hide controls after inactivity
+  // Auto-hide controls after inactivity (unless pinned)
   const resetHideTimer = useCallback(() => {
     setControlsVisible(true);
 
@@ -32,10 +33,13 @@ function VideoRoom() {
       clearTimeout(hideTimeoutRef.current);
     }
 
+    // Don't auto-hide if controls are pinned
+    if (controlsPinned) return;
+
     hideTimeoutRef.current = window.setTimeout(() => {
       setControlsVisible(false);
     }, 3000);
-  }, [setControlsVisible]);
+  }, [setControlsVisible, controlsPinned]);
 
   // Show controls on mouse movement
   const handleMouseMove = useCallback(() => {
@@ -50,10 +54,12 @@ function VideoRoom() {
     }
   }, [setControlsVisible]);
 
-  // Start hide timer when mouse leaves
+  // Start hide timer when mouse leaves (unless pinned)
   const handleMouseLeave = useCallback(() => {
-    resetHideTimer();
-  }, [resetHideTimer]);
+    if (!controlsPinned) {
+      resetHideTimer();
+    }
+  }, [resetHideTimer, controlsPinned]);
 
   useEffect(() => {
     resetHideTimer();

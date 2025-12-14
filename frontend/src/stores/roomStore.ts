@@ -43,6 +43,8 @@ interface RoomState {
   // UI state
   controlsVisible: boolean;
   setControlsVisible: (visible: boolean) => void;
+  controlsPinned: boolean;
+  setControlsPinned: (pinned: boolean) => void;
 
   // Reset state
   reset: () => void;
@@ -61,6 +63,7 @@ const initialState = {
   isScreenSharing: false,
   isHost: false,
   controlsVisible: true,
+  controlsPinned: false,
 };
 
 export const useRoomStore = create<RoomState>((set) => ({
@@ -92,6 +95,7 @@ export const useRoomStore = create<RoomState>((set) => ({
   setIsHost: (isHost) => set({ isHost }),
 
   setControlsVisible: (controlsVisible) => set({ controlsVisible }),
+  setControlsPinned: (controlsPinned) => set({ controlsPinned }),
 
   reset: () => set(initialState),
 }));
