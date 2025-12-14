@@ -321,6 +321,57 @@ install_git() {
     echo -e "${GREEN}✓${NC} git installed"
 }
 
+# Repository URL
+MEET_REPO="https://github.com/CyberTechArmor/MEET.git"
+MEET_DIR="MEET"
+
+# Setup repository - clone if needed, ensure we're in the right directory
+setup_repository() {
+    # Check if we're already in the MEET directory with required files
+    if [ -f "docker-compose.yml" ] && [ -f "docker-compose.proxy.yml" ] && [ -f "Caddyfile" ]; then
+        echo -e "${GREEN}✓${NC} Already in MEET directory"
+        # Pull latest changes if it's a git repo
+        if [ -d ".git" ]; then
+            echo -e "${DIM}Pulling latest changes...${NC}"
+            git fetch origin 2>/dev/null || true
+            git pull 2>/dev/null || true
+        fi
+        # Remove any stale .env to ensure fresh config
+        rm -f .env 2>/dev/null || true
+        return 0
+    fi
+
+    # Check if MEET directory exists in current location
+    if [ -d "$MEET_DIR" ] && [ -f "$MEET_DIR/docker-compose.yml" ]; then
+        echo -e "${DIM}Found existing MEET directory, switching to it...${NC}"
+        cd "$MEET_DIR"
+        # Pull latest changes
+        if [ -d ".git" ]; then
+            echo -e "${DIM}Pulling latest changes...${NC}"
+            git fetch origin 2>/dev/null || true
+            git pull 2>/dev/null || true
+        fi
+        # Remove any stale .env to ensure fresh config
+        rm -f .env 2>/dev/null || true
+        return 0
+    fi
+
+    # Clone the repository
+    echo -e "${BOLD}Cloning MEET repository...${NC}"
+    echo ""
+
+    if git clone "$MEET_REPO" "$MEET_DIR"; then
+        cd "$MEET_DIR"
+        echo -e "${GREEN}✓${NC} Repository cloned successfully"
+        echo ""
+    else
+        echo -e "${RED}✗ Failed to clone repository${NC}"
+        echo "  Please check your internet connection and try again."
+        echo "  Or manually clone: git clone $MEET_REPO"
+        exit 1
+    fi
+}
+
 # Add current user to docker group
 setup_docker_group() {
     if [ "$OS" = "linux" ] && [ "$EUID" -ne 0 ]; then
@@ -680,6 +731,7 @@ install_production() {
 main() {
     print_banner
     check_and_install_dependencies
+    setup_repository
 
     echo -e "${BOLD}Select installation mode:${NC}"
     echo ""
