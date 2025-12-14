@@ -603,33 +603,37 @@ install_with_proxy() {
         fi
     fi
 
-    # Detect server's public IP for LiveKit (needed for WebRTC ICE)
+    # Detect server's public IPv4 for LiveKit (needed for WebRTC ICE)
     livekit_ip=""
     if [[ "$domain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         # Already an IP address
         livekit_ip="$domain"
     elif [ "$domain" != "localhost" ]; then
-        # Detect the server's actual public IP (not DNS resolution)
-        echo -e "${DIM}Detecting server's public IP...${NC}"
+        # Detect the server's actual public IPv4 (not DNS resolution)
+        # Use -4 flag to force IPv4 (WebRTC works best with IPv4)
+        echo -e "${DIM}Detecting server's public IPv4...${NC}"
 
-        # Try multiple services in case one is down
-        livekit_ip=$(curl -s --connect-timeout 5 ifconfig.me 2>/dev/null)
-        if [ -z "$livekit_ip" ]; then
-            livekit_ip=$(curl -s --connect-timeout 5 icanhazip.com 2>/dev/null)
+        # Try multiple services in case one is down (all force IPv4)
+        livekit_ip=$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null)
+        if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            livekit_ip=$(curl -4 -s --connect-timeout 5 icanhazip.com 2>/dev/null)
         fi
-        if [ -z "$livekit_ip" ]; then
-            livekit_ip=$(curl -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null)
+        if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            livekit_ip=$(curl -4 -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null)
         fi
-        if [ -z "$livekit_ip" ]; then
-            livekit_ip=$(curl -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+        if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            livekit_ip=$(curl -4 -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+        fi
+        if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            livekit_ip=$(curl -4 -s --connect-timeout 5 checkip.amazonaws.com 2>/dev/null | tr -d '\n')
         fi
 
-        # Validate IP format
+        # Validate IPv4 format
         if [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo -e "${GREEN}✓${NC} Detected public IP: $livekit_ip"
+            echo -e "${GREEN}✓${NC} Detected public IPv4: $livekit_ip"
         else
-            echo -e "${YELLOW}  Warning: Could not detect server's public IP${NC}"
-            echo "  WebRTC may not work correctly. Set LIVEKIT_NODE_IP manually in .env"
+            echo -e "${YELLOW}  Warning: Could not detect server's public IPv4${NC}"
+            echo "  LiveKit will attempt auto-detection. If WebRTC fails, set LIVEKIT_NODE_IP manually in .env"
             livekit_ip=""
         fi
     fi
