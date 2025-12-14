@@ -1,5 +1,6 @@
 import { useEffect, useRef, useMemo, useState, useCallback } from 'react';
 import { LocalParticipant, Track, ParticipantEvent } from 'livekit-client';
+import { useRoomStore } from '../stores/roomStore';
 
 interface SelfViewPipProps {
   participant: LocalParticipant;
@@ -9,6 +10,10 @@ interface SelfViewPipProps {
 
 function SelfViewPip({ participant, isMinimized, onToggleMinimize }: SelfViewPipProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const { controlsVisible, controlsPinned } = useRoomStore();
+
+  // Determine if we need extra bottom spacing (on mobile when controls are visible)
+  const needsExtraSpace = controlsVisible || controlsPinned;
 
   // Force re-render when tracks change
   const [, setUpdateCounter] = useState(0);
@@ -86,7 +91,9 @@ function SelfViewPip({ participant, isMinimized, onToggleMinimize }: SelfViewPip
     return (
       <button
         onClick={onToggleMinimize}
-        className="absolute bottom-24 right-4 z-10 w-14 h-14 rounded-full overflow-hidden shadow-lg border-2 border-meet-accent animate-fade-in hover:scale-110 transition-transform"
+        className={`absolute right-4 z-10 w-14 h-14 rounded-full overflow-hidden shadow-lg border-2 border-meet-accent animate-fade-in hover:scale-110 transition-all duration-300 ${
+          needsExtraSpace ? 'bottom-28 sm:bottom-24' : 'bottom-24'
+        }`}
         title="Show self view"
       >
         {isCameraEnabled && videoTrack ? (
@@ -114,7 +121,9 @@ function SelfViewPip({ participant, isMinimized, onToggleMinimize }: SelfViewPip
 
   // Expanded PiP view
   return (
-    <div className="absolute bottom-24 right-4 z-10 w-56 aspect-video rounded-xl overflow-hidden shadow-lg border border-meet-border animate-fade-in group">
+    <div className={`absolute right-4 z-10 w-56 aspect-video rounded-xl overflow-hidden shadow-lg border border-meet-border animate-fade-in group transition-all duration-300 ${
+      needsExtraSpace ? 'bottom-28 sm:bottom-24' : 'bottom-24'
+    }`}>
       {isCameraEnabled && videoTrack ? (
         <video
           ref={videoRef}

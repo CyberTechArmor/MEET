@@ -16,6 +16,14 @@ function ControlBar() {
 
   const handleEndMeeting = useCallback(async () => {
     if (!isHost) return;
+
+    // Show confirmation dialog
+    const confirmed = window.confirm(
+      'Are you sure you want to end this meeting for all participants?\n\nThis will disconnect everyone from the call.'
+    );
+
+    if (!confirmed) return;
+
     setIsEnding(true);
     await endMeeting();
     setIsEnding(false);

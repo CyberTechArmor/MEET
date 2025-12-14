@@ -48,6 +48,7 @@ interface RoomState {
 
   // Reset state
   reset: () => void;
+  resetKeepingName: () => void;
 }
 
 const initialState = {
@@ -98,4 +99,5 @@ export const useRoomStore = create<RoomState>((set) => ({
   setControlsPinned: (controlsPinned) => set({ controlsPinned }),
 
   reset: () => set(initialState),
+  resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),
 }));

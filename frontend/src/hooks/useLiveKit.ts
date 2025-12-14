@@ -32,7 +32,7 @@ export function useLiveKit() {
     setIsHost,
     setRoomCode,
     setView,
-    reset,
+    resetKeepingName,
     roomCode: storedRoomCode,
     isHost,
     localParticipant,
@@ -130,6 +130,11 @@ export function useLiveKit() {
 
     room.on(RoomEvent.Disconnected, () => {
       setConnectionState(ConnectionState.Disconnected);
+      // Clear session and reset state, keeping the display name
+      clearSession();
+      sharedRoomInstance = null;
+      resetKeepingName();
+      setView('join');
     });
 
     room.on(RoomEvent.MediaDevicesError, (error: Error) => {
@@ -144,6 +149,8 @@ export function useLiveKit() {
     setScreenSharing,
     setMicEnabled,
     setCameraEnabled,
+    resetKeepingName,
+    setView,
   ]);
 
   // Connect to room
@@ -249,9 +256,10 @@ export function useLiveKit() {
     if (roomRef.current) {
       roomRef.current = null;
     }
-    reset();
+    // Keep the display name so it's prefilled on the join form
+    resetKeepingName();
     setView('join');
-  }, [reset, setView]);
+  }, [resetKeepingName, setView]);
 
   // Toggle microphone
   const toggleMic = useCallback(async () => {
