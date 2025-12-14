@@ -62,6 +62,8 @@ services:
   livekit:
     image: livekit/livekit-server:latest
     command: --config /etc/livekit.yaml --node-ip ${LIVEKIT_NODE_IP:-}
+    expose:
+      - "7880"  # Expose to Docker network for Caddy
     ports:
       - "7880:7880"       # WebSocket / HTTP API
       - "7881:7881"       # RTC over TCP
