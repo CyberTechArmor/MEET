@@ -18,6 +18,7 @@ services:
       - caddy_config:/config
     environment:
       - MEET_DOMAIN=${MEET_DOMAIN:-localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
     depends_on:
       - meet-frontend
       - meet-api

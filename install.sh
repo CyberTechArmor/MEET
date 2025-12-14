@@ -526,6 +526,20 @@ install_with_proxy() {
     read -p "  Domain [localhost]: " domain
     domain=${domain:-localhost}
 
+    # Get email for Let's Encrypt (only for non-localhost)
+    acme_email="admin@example.com"
+    if [ "$domain" != "localhost" ]; then
+        echo ""
+        echo "  Enter your email for Let's Encrypt SSL certificate notifications."
+        echo "  This is required for automatic HTTPS certificates."
+        echo ""
+        read -p "  Email: " acme_email
+        if [ -z "$acme_email" ]; then
+            echo -e "${RED}  Email is required for SSL certificates.${NC}"
+            exit 1
+        fi
+    fi
+
     # Create/update .env file
     if [ -f .env ]; then
         # Update existing .env
@@ -534,6 +548,11 @@ install_with_proxy() {
         else
             echo "MEET_DOMAIN=$domain" >> .env
         fi
+        if grep -q "^ACME_EMAIL=" .env; then
+            sed -i.bak "s/^ACME_EMAIL=.*/ACME_EMAIL=$acme_email/" .env
+        else
+            echo "ACME_EMAIL=$acme_email" >> .env
+        fi
     else
         # Create new .env from example
         if [ -f .env.example ]; then
@@ -541,6 +560,7 @@ install_with_proxy() {
             sed -i.bak "s/^MEET_DOMAIN=.*/MEET_DOMAIN=$domain/" .env
         else
             echo "MEET_DOMAIN=$domain" > .env
+            echo "ACME_EMAIL=$acme_email" >> .env
             echo "LIVEKIT_API_KEY=devkey" >> .env
             echo "LIVEKIT_API_SECRET=secret" >> .env
         fi

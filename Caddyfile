@@ -1,11 +1,21 @@
 # MEET - Caddy Reverse Proxy Configuration
 # Automatic HTTPS with Let's Encrypt
 
+# Global options
+{
+    # Email for Let's Encrypt certificate notifications (required for production)
+    email {$ACME_EMAIL:admin@example.com}
+
+    # For debugging SSL issues, uncomment:
+    # debug
+}
+
+# Main site block
 {$MEET_DOMAIN:localhost} {
     # Enable compression
     encode gzip zstd
 
-    # API routes - proxy to backend (keep /api prefix, API expects it)
+    # API routes - proxy to backend
     handle /api/* {
         reverse_proxy meet-api:8080
     }
