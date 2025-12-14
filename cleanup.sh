@@ -236,6 +236,11 @@ quick_cleanup() {
     cleanup_images
     cleanup_networks
 
+    # Also clear build cache to prevent stale code issues
+    echo -e "${BOLD}Clearing build cache...${NC}"
+    docker builder prune -f 2>/dev/null || true
+    echo -e "${GREEN}✓${NC} Build cache cleared"
+
     echo ""
     echo -e "${GREEN}✓ Quick cleanup complete!${NC}"
     echo ""

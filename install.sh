@@ -483,8 +483,8 @@ install_demo() {
     echo "Building and starting containers..."
     echo ""
 
-    # Build and start
-    if docker compose up -d --build; then
+    # Build and start (use --no-cache to ensure fresh build with latest code)
+    if docker compose build --no-cache && docker compose up -d; then
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
@@ -572,8 +572,8 @@ install_with_proxy() {
     echo "Building and starting containers with reverse proxy..."
     echo ""
 
-    # Build and start with proxy config
-    if docker compose -f docker-compose.proxy.yml up -d --build; then
+    # Build and start with proxy config (use --no-cache to ensure fresh build with latest code)
+    if docker compose -f docker-compose.proxy.yml build --no-cache && docker compose -f docker-compose.proxy.yml up -d; then
         echo ""
         echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
