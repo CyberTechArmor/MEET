@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Participant, Track, TrackPublication, ParticipantEvent } from 'livekit-client';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Participant, Track, ParticipantEvent } from 'livekit-client';
 import ParticipantOverlay from './ParticipantOverlay';
 
 interface VideoTileProps {
