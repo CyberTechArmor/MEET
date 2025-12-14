@@ -1,4 +1,5 @@
 import { useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 
 interface ConfirmModalProps {
   isOpen: boolean;
@@ -52,8 +53,8 @@ function ConfirmModal({
     primary: 'bg-meet-accent hover:bg-meet-accent-dark',
   }[confirmVariant];
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in">
+  const modalContent = (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 animate-fade-in">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
@@ -61,7 +62,7 @@ function ConfirmModal({
       />
 
       {/* Modal */}
-      <div className="relative glass rounded-2xl p-6 max-w-md w-full mx-4 shadow-xl animate-scale-in">
+      <div className="relative glass rounded-2xl p-6 max-w-md w-full shadow-xl animate-scale-in">
         {/* Icon */}
         <div className="flex justify-center mb-4">
           <div
@@ -133,6 +134,9 @@ function ConfirmModal({
       </div>
     </div>
   );
+
+  // Use portal to render modal at document body level
+  return createPortal(modalContent, document.body);
 }
 
 export default ConfirmModal;
