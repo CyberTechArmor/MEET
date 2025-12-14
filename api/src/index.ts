@@ -8,13 +8,22 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
-const CORS_ORIGIN = process.env.CORS_ORIGIN || 'http://localhost:3000';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+
+// CORS configuration - supports '*' for all origins or comma-separated list
+const corsOptions: cors.CorsOptions = {
+  origin: CORS_ORIGIN === '*'
+    ? true  // Allow all origins
+    : CORS_ORIGIN.includes(',')
+      ? CORS_ORIGIN.split(',').map(o => o.trim())  // Multiple origins
+      : CORS_ORIGIN,  // Single origin
+  credentials: CORS_ORIGIN !== '*',  // Only send credentials for specific origins
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
 
 // Middleware
-app.use(cors({
-  origin: CORS_ORIGIN,
-  credentials: true,
-}));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // Health check endpoint

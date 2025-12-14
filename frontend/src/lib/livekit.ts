@@ -1,8 +1,41 @@
 import { Room, RoomOptions, VideoPresets } from 'livekit-client';
 
-// API configuration
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080';
-const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL || 'ws://localhost:7880';
+// API configuration - dynamically determine URLs based on current hostname
+function getApiUrl(): string {
+  // If explicitly set via env var, use that
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+
+  // Otherwise, derive from current location
+  const protocol = window.location.protocol;
+  const hostname = window.location.hostname;
+
+  // If running behind reverse proxy (port 80/443), use relative URL
+  if (window.location.port === '' || window.location.port === '80' || window.location.port === '443') {
+    return '';  // Use relative URLs - Caddy will proxy /api/* to the API server
+  }
+
+  // Demo mode: API runs on port 8080 on same host
+  return `${protocol}//${hostname}:8080`;
+}
+
+function getLiveKitWsUrl(): string {
+  // If explicitly set via env var, use that
+  if (import.meta.env.VITE_LIVEKIT_URL) {
+    return import.meta.env.VITE_LIVEKIT_URL;
+  }
+
+  // Otherwise, derive from current location
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const hostname = window.location.hostname;
+
+  // LiveKit runs on port 7880
+  return `${wsProtocol}//${hostname}:7880`;
+}
+
+const API_URL = getApiUrl();
+const LIVEKIT_URL = getLiveKitWsUrl();
 
 export interface TokenResponse {
   token: string;

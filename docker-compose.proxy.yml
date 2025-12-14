@@ -26,13 +26,11 @@ services:
       - meet-network
 
   # Frontend - React + Vite application
+  # Note: Frontend auto-detects API and LiveKit URLs based on browser location
   meet-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      args:
-        - VITE_LIVEKIT_URL=${LIVEKIT_WS_URL:-wss://${MEET_DOMAIN:-localhost}:7880}
-        - VITE_API_URL=${API_URL:-https://${MEET_DOMAIN:-localhost}}
     expose:
       - "80"
     restart: unless-stopped
@@ -51,7 +49,7 @@ services:
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       - LIVEKIT_URL=http://livekit:7880
       - PORT=8080
-      - CORS_ORIGIN=${CORS_ORIGIN:-https://${MEET_DOMAIN:-localhost}}
+      - CORS_ORIGIN=*
     depends_on:
       - livekit
     restart: unless-stopped

@@ -2,15 +2,13 @@ version: '3.8'
 
 services:
   # Frontend - React + Vite application
+  # Note: Frontend auto-detects API and LiveKit URLs based on browser location
   meet-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
       - "3000:80"
-    environment:
-      - VITE_LIVEKIT_URL=ws://localhost:7880
-      - VITE_API_URL=http://localhost:8080
     depends_on:
       - meet-api
       - livekit
@@ -30,7 +28,7 @@ services:
       - LIVEKIT_API_SECRET=secret
       - LIVEKIT_URL=http://livekit:7880
       - PORT=8080
-      - CORS_ORIGIN=http://localhost:3000
+      - CORS_ORIGIN=*
     depends_on:
       - livekit
     restart: unless-stopped
