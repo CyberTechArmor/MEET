@@ -59,11 +59,13 @@ services:
   # LiveKit Server - WebRTC backend
   livekit:
     image: livekit/livekit-server:latest
-    command: --dev --bind 0.0.0.0
+    command: --config /etc/livekit.yaml
     ports:
-      - "7880:7880"   # WebSocket / HTTP (needs to be exposed for WebRTC)
-      - "7881:7881"   # RTC over TCP
-      - "7882:7882/udp"  # RTC over UDP
+      - "7880:7880"       # WebSocket / HTTP API
+      - "7881:7881"       # RTC over TCP
+      - "50000-50100:50000-50100/udp"  # RTC over UDP (media)
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
     restart: unless-stopped
     networks:
       - meet-network

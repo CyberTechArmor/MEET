@@ -1,0 +1,22 @@
+# LiveKit Server Configuration
+# This config enables remote access by properly configuring ICE/WebRTC
+
+port: 7880
+rtc:
+  # TCP port for WebRTC
+  tcp_port: 7881
+  # UDP port range for WebRTC media
+  port_range_start: 50000
+  port_range_end: 60000
+  # Use external IP detection via STUN for NAT traversal
+  use_external_ip: true
+  # Enable ICE over TCP as fallback
+  enable_loopback_candidate: false
+
+# Development keys (change these in production!)
+keys:
+  devkey: secret
+
+# Logging
+logging:
+  level: info
