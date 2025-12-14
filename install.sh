@@ -12,6 +12,13 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
+DIM='\033[2m'
+
+# Detect if we need sudo
+SUDO=""
+if [ "$EUID" -ne 0 ]; then
+    SUDO="sudo"
+fi
 
 # ASCII Banner
 print_banner() {
@@ -32,24 +39,425 @@ EOF
     echo -e "${NC}"
 }
 
-# Check dependencies
-check_dependencies() {
+# Detect OS and distribution
+detect_os() {
+    OS=""
+    DISTRO=""
+    PKG_MANAGER=""
+
+    case "$(uname -s)" in
+        Linux*)
+            OS="linux"
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                DISTRO="$ID"
+                case "$ID" in
+                    ubuntu|debian|linuxmint|pop|elementary|zorin|kali)
+                        PKG_MANAGER="apt"
+                        ;;
+                    fedora)
+                        PKG_MANAGER="dnf"
+                        ;;
+                    centos|rhel|rocky|almalinux|ol)
+                        if command -v dnf &> /dev/null; then
+                            PKG_MANAGER="dnf"
+                        else
+                            PKG_MANAGER="yum"
+                        fi
+                        ;;
+                    arch|manjaro|endeavouros)
+                        PKG_MANAGER="pacman"
+                        ;;
+                    opensuse*|sles)
+                        PKG_MANAGER="zypper"
+                        ;;
+                    alpine)
+                        PKG_MANAGER="apk"
+                        ;;
+                    *)
+                        # Try to detect package manager
+                        if command -v apt &> /dev/null; then
+                            PKG_MANAGER="apt"
+                        elif command -v dnf &> /dev/null; then
+                            PKG_MANAGER="dnf"
+                        elif command -v yum &> /dev/null; then
+                            PKG_MANAGER="yum"
+                        elif command -v pacman &> /dev/null; then
+                            PKG_MANAGER="pacman"
+                        elif command -v zypper &> /dev/null; then
+                            PKG_MANAGER="zypper"
+                        elif command -v apk &> /dev/null; then
+                            PKG_MANAGER="apk"
+                        fi
+                        ;;
+                esac
+            fi
+            ;;
+        Darwin*)
+            OS="macos"
+            DISTRO="macos"
+            if command -v brew &> /dev/null; then
+                PKG_MANAGER="brew"
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            OS="windows"
+            DISTRO="windows"
+            ;;
+        *)
+            OS="unknown"
+            ;;
+    esac
+
+    echo -e "${DIM}Detected: $OS ($DISTRO)${NC}"
+}
+
+# Install Docker on various platforms
+install_docker() {
+    echo -e "${YELLOW}Installing Docker...${NC}"
+    echo ""
+
+    case "$PKG_MANAGER" in
+        apt)
+            # Ubuntu/Debian
+            echo -e "${DIM}Updating package index...${NC}"
+            $SUDO apt-get update -qq
+
+            echo -e "${DIM}Installing prerequisites...${NC}"
+            $SUDO apt-get install -y -qq \
+                ca-certificates \
+                curl \
+                gnupg \
+                lsb-release > /dev/null
+
+            echo -e "${DIM}Adding Docker GPG key...${NC}"
+            $SUDO install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$DISTRO/gpg | $SUDO gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+            $SUDO chmod a+r /etc/apt/keyrings/docker.gpg
+
+            echo -e "${DIM}Adding Docker repository...${NC}"
+            echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$DISTRO \
+                $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+                $SUDO tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            echo -e "${DIM}Installing Docker packages...${NC}"
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null
+            ;;
+
+        dnf)
+            # Fedora/CentOS 8+/RHEL 8+
+            echo -e "${DIM}Installing prerequisites...${NC}"
+            $SUDO dnf -y install dnf-plugins-core > /dev/null 2>&1
+
+            echo -e "${DIM}Adding Docker repository...${NC}"
+            $SUDO dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo 2>/dev/null || \
+            $SUDO dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null
+
+            echo -e "${DIM}Installing Docker packages...${NC}"
+            $SUDO dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null 2>&1
+            ;;
+
+        yum)
+            # CentOS 7/RHEL 7
+            echo -e "${DIM}Installing prerequisites...${NC}"
+            $SUDO yum install -y yum-utils > /dev/null 2>&1
+
+            echo -e "${DIM}Adding Docker repository...${NC}"
+            $SUDO yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo > /dev/null 2>&1
+
+            echo -e "${DIM}Installing Docker packages...${NC}"
+            $SUDO yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null 2>&1
+            ;;
+
+        pacman)
+            # Arch Linux
+            echo -e "${DIM}Installing Docker...${NC}"
+            $SUDO pacman -Sy --noconfirm docker docker-compose > /dev/null 2>&1
+            ;;
+
+        zypper)
+            # openSUSE
+            echo -e "${DIM}Installing Docker...${NC}"
+            $SUDO zypper install -y docker docker-compose > /dev/null 2>&1
+            ;;
+
+        apk)
+            # Alpine
+            echo -e "${DIM}Installing Docker...${NC}"
+            $SUDO apk add --no-cache docker docker-compose > /dev/null 2>&1
+            ;;
+
+        brew)
+            # macOS
+            echo -e "${DIM}Installing Docker Desktop via Homebrew...${NC}"
+            brew install --cask docker
+            echo ""
+            echo -e "${YELLOW}! Docker Desktop installed${NC}"
+            echo -e "  Please open Docker Desktop from Applications and wait for it to start."
+            echo -e "  Then run this installer again."
+            echo ""
+            read -p "Press Enter after Docker Desktop is running..."
+            ;;
+
+        *)
+            echo -e "${RED}✗ Unsupported package manager${NC}"
+            echo ""
+            echo "  Please install Docker manually:"
+            echo "  https://docs.docker.com/get-docker/"
+            echo ""
+            exit 1
+            ;;
+    esac
+
+    # Start and enable Docker service (Linux only)
+    if [ "$OS" = "linux" ]; then
+        echo -e "${DIM}Starting Docker service...${NC}"
+        $SUDO systemctl start docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
+        $SUDO systemctl enable docker 2>/dev/null || true
+    fi
+
+    echo -e "${GREEN}✓${NC} Docker installed successfully"
+}
+
+# Install Docker Compose (standalone, if plugin not available)
+install_docker_compose() {
+    echo -e "${YELLOW}Installing Docker Compose...${NC}"
+
+    # Try to install as plugin first
+    case "$PKG_MANAGER" in
+        apt)
+            $SUDO apt-get install -y -qq docker-compose-plugin > /dev/null 2>&1 && return 0
+            ;;
+        dnf)
+            $SUDO dnf install -y docker-compose-plugin > /dev/null 2>&1 && return 0
+            ;;
+        yum)
+            $SUDO yum install -y docker-compose-plugin > /dev/null 2>&1 && return 0
+            ;;
+    esac
+
+    # Install standalone docker-compose
+    echo -e "${DIM}Installing standalone Docker Compose...${NC}"
+
+    COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [ -z "$COMPOSE_VERSION" ]; then
+        COMPOSE_VERSION="v2.24.0"  # Fallback version
+    fi
+
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64) ARCH="x86_64" ;;
+        aarch64|arm64) ARCH="aarch64" ;;
+        armv7l) ARCH="armv7" ;;
+    esac
+
+    $SUDO curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-${ARCH}" -o /usr/local/bin/docker-compose
+    $SUDO chmod +x /usr/local/bin/docker-compose
+
+    echo -e "${GREEN}✓${NC} Docker Compose installed successfully"
+}
+
+# Install curl if not present
+install_curl() {
+    echo -e "${YELLOW}Installing curl...${NC}"
+
+    case "$PKG_MANAGER" in
+        apt)
+            $SUDO apt-get update -qq && $SUDO apt-get install -y -qq curl > /dev/null
+            ;;
+        dnf)
+            $SUDO dnf install -y curl > /dev/null 2>&1
+            ;;
+        yum)
+            $SUDO yum install -y curl > /dev/null 2>&1
+            ;;
+        pacman)
+            $SUDO pacman -Sy --noconfirm curl > /dev/null 2>&1
+            ;;
+        zypper)
+            $SUDO zypper install -y curl > /dev/null 2>&1
+            ;;
+        apk)
+            $SUDO apk add --no-cache curl > /dev/null 2>&1
+            ;;
+        brew)
+            brew install curl > /dev/null 2>&1
+            ;;
+    esac
+
+    echo -e "${GREEN}✓${NC} curl installed"
+}
+
+# Install git if not present
+install_git() {
+    echo -e "${YELLOW}Installing git...${NC}"
+
+    case "$PKG_MANAGER" in
+        apt)
+            $SUDO apt-get update -qq && $SUDO apt-get install -y -qq git > /dev/null
+            ;;
+        dnf)
+            $SUDO dnf install -y git > /dev/null 2>&1
+            ;;
+        yum)
+            $SUDO yum install -y git > /dev/null 2>&1
+            ;;
+        pacman)
+            $SUDO pacman -Sy --noconfirm git > /dev/null 2>&1
+            ;;
+        zypper)
+            $SUDO zypper install -y git > /dev/null 2>&1
+            ;;
+        apk)
+            $SUDO apk add --no-cache git > /dev/null 2>&1
+            ;;
+        brew)
+            brew install git > /dev/null 2>&1
+            ;;
+    esac
+
+    echo -e "${GREEN}✓${NC} git installed"
+}
+
+# Add current user to docker group
+setup_docker_group() {
+    if [ "$OS" = "linux" ] && [ "$EUID" -ne 0 ]; then
+        if ! groups | grep -q docker; then
+            echo -e "${DIM}Adding user to docker group...${NC}"
+            $SUDO usermod -aG docker "$USER" 2>/dev/null || true
+
+            echo ""
+            echo -e "${YELLOW}! User added to docker group${NC}"
+            echo -e "  You may need to log out and back in for this to take effect."
+            echo -e "  Alternatively, run: ${CYAN}newgrp docker${NC}"
+            echo ""
+        fi
+    fi
+}
+
+# Check and install dependencies
+check_and_install_dependencies() {
     echo -e "${BOLD}Checking dependencies...${NC}"
+    echo ""
 
+    # Detect OS first
+    detect_os
+    echo ""
+
+    local NEED_RESTART=false
+
+    # Check curl
+    if ! command -v curl &> /dev/null; then
+        echo -e "${YELLOW}!${NC} curl not found"
+        install_curl
+    else
+        echo -e "${GREEN}✓${NC} curl found"
+    fi
+
+    # Check git (optional but useful)
+    if ! command -v git &> /dev/null; then
+        echo -e "${YELLOW}!${NC} git not found"
+        install_git
+    else
+        echo -e "${GREEN}✓${NC} git found"
+    fi
+
+    # Check Docker
     if ! command -v docker &> /dev/null; then
-        echo -e "${RED}✗ Docker is not installed${NC}"
-        echo "  Please install Docker: https://docs.docker.com/get-docker/"
-        exit 1
-    fi
-    echo -e "${GREEN}✓${NC} Docker found"
+        echo -e "${YELLOW}!${NC} Docker not found"
 
-    if ! command -v docker compose &> /dev/null && ! command -v docker-compose &> /dev/null; then
-        echo -e "${RED}✗ Docker Compose is not installed${NC}"
-        echo "  Please install Docker Compose: https://docs.docker.com/compose/install/"
-        exit 1
-    fi
-    echo -e "${GREEN}✓${NC} Docker Compose found"
+        if [ "$OS" = "windows" ]; then
+            echo ""
+            echo -e "${RED}✗ Automatic Docker installation not supported on Windows${NC}"
+            echo ""
+            echo "  Please install Docker Desktop manually:"
+            echo "  https://docs.docker.com/desktop/install/windows-install/"
+            echo ""
+            exit 1
+        fi
 
+        if [ -z "$PKG_MANAGER" ]; then
+            echo ""
+            echo -e "${RED}✗ Could not detect package manager${NC}"
+            echo ""
+            echo "  Please install Docker manually:"
+            echo "  https://docs.docker.com/get-docker/"
+            echo ""
+            exit 1
+        fi
+
+        read -p "  Install Docker automatically? [Y/n]: " install_docker_choice
+        install_docker_choice=${install_docker_choice:-Y}
+
+        if [[ "$install_docker_choice" =~ ^[Yy]$ ]]; then
+            install_docker
+            NEED_RESTART=true
+        else
+            echo ""
+            echo "  Please install Docker manually:"
+            echo "  https://docs.docker.com/get-docker/"
+            echo ""
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✓${NC} Docker found ($(docker --version | cut -d' ' -f3 | tr -d ','))"
+    fi
+
+    # Check Docker Compose
+    if ! docker compose version &> /dev/null && ! command -v docker-compose &> /dev/null; then
+        echo -e "${YELLOW}!${NC} Docker Compose not found"
+
+        read -p "  Install Docker Compose automatically? [Y/n]: " install_compose_choice
+        install_compose_choice=${install_compose_choice:-Y}
+
+        if [[ "$install_compose_choice" =~ ^[Yy]$ ]]; then
+            install_docker_compose
+        else
+            echo ""
+            echo "  Please install Docker Compose manually:"
+            echo "  https://docs.docker.com/compose/install/"
+            echo ""
+            exit 1
+        fi
+    else
+        if docker compose version &> /dev/null; then
+            echo -e "${GREEN}✓${NC} Docker Compose found ($(docker compose version --short 2>/dev/null || echo 'plugin'))"
+        else
+            echo -e "${GREEN}✓${NC} Docker Compose found ($(docker-compose --version | cut -d' ' -f4 2>/dev/null || echo 'standalone'))"
+        fi
+    fi
+
+    # Check if Docker daemon is running
+    if ! docker info &> /dev/null; then
+        echo ""
+        echo -e "${YELLOW}! Docker daemon is not running${NC}"
+
+        if [ "$OS" = "linux" ]; then
+            echo -e "${DIM}Starting Docker service...${NC}"
+            $SUDO systemctl start docker 2>/dev/null || $SUDO service docker start 2>/dev/null || true
+            sleep 2
+
+            if ! docker info &> /dev/null; then
+                setup_docker_group
+                echo ""
+                echo -e "${YELLOW}Please start Docker and run this script again.${NC}"
+                exit 1
+            fi
+        elif [ "$OS" = "macos" ]; then
+            echo "  Please start Docker Desktop and run this script again."
+            exit 1
+        fi
+    fi
+
+    # Setup docker group for non-root users
+    if [ "$NEED_RESTART" = true ]; then
+        setup_docker_group
+    fi
+
+    echo ""
+    echo -e "${GREEN}All dependencies satisfied!${NC}"
     echo ""
 }
 
@@ -130,7 +538,7 @@ install_production() {
 # Main
 main() {
     print_banner
-    check_dependencies
+    check_and_install_dependencies
 
     echo -e "${BOLD}Select installation mode:${NC}"
     echo ""
