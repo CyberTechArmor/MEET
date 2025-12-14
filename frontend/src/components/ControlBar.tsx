@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useMemo } from 'react';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 import ConfirmModal from './ConfirmModal';
@@ -11,6 +11,13 @@ function ControlBar() {
   const [isEnding, setIsEnding] = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+
+  // Check if screen sharing is supported (not available on mobile browsers)
+  const isScreenShareSupported = useMemo(() => {
+    return typeof navigator !== 'undefined' &&
+           navigator.mediaDevices &&
+           typeof navigator.mediaDevices.getDisplayMedia === 'function';
+  }, []);
 
   const handleLeaveClick = useCallback(() => {
     setShowLeaveConfirm(true);
@@ -105,39 +112,41 @@ function ControlBar() {
           )}
         </button>
 
-        {/* Screen Share Toggle */}
-        <button
-          onClick={toggleScreenShare}
-          className={`relative p-4 rounded-xl transition-smooth ${
-            isScreenSharing
-              ? 'bg-meet-success hover:bg-meet-success/80 text-white'
-              : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
-          }`}
-          title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
-        >
-          {isScreenSharing ? (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-              />
-            </svg>
-          ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-              />
-            </svg>
-          )}
-          {isScreenSharing && (
-            <div className="absolute -top-1 -right-1 w-3 h-3 bg-meet-success rounded-full animate-pulse" />
-          )}
-        </button>
+        {/* Screen Share Toggle - only shown on devices that support it */}
+        {isScreenShareSupported && (
+          <button
+            onClick={toggleScreenShare}
+            className={`relative p-4 rounded-xl transition-smooth ${
+              isScreenSharing
+                ? 'bg-meet-success hover:bg-meet-success/80 text-white'
+                : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
+            }`}
+            title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
+          >
+            {isScreenSharing ? (
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                />
+              </svg>
+            ) : (
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
+                />
+              </svg>
+            )}
+            {isScreenSharing && (
+              <div className="absolute -top-1 -right-1 w-3 h-3 bg-meet-success rounded-full animate-pulse" />
+            )}
+          </button>
+        )}
 
         {/* Pin Controls Toggle */}
         <button
