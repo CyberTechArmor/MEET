@@ -71,16 +71,18 @@ export interface SessionData {
   roomCode: string;
   displayName: string;
   timestamp: number;
+  isHost?: boolean;
 }
 
 /**
  * Save session for auto-rejoin on refresh
  */
-export function saveSession(roomCode: string, displayName: string): void {
+export function saveSession(roomCode: string, displayName: string, isHost: boolean = false): void {
   const session: SessionData = {
     roomCode,
     displayName,
     timestamp: Date.now(),
+    isHost,
   };
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
 }
@@ -120,6 +122,7 @@ export interface TokenResponse {
   roomName: string;
   participantName: string;
   participantIdentity: string;
+  isHost: boolean;
 }
 
 export interface RoomCodeResponse {
@@ -212,4 +215,25 @@ export function formatRoomCode(code: string): string {
  */
 export function parseRoomCode(input: string): string {
   return input.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 6);
+}
+
+/**
+ * End meeting for all participants (host only)
+ */
+export async function endMeetingForAll(roomName: string, participantIdentity: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/end-meeting`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      roomName,
+      participantIdentity,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to end meeting' }));
+    throw new Error(error.error || 'Failed to end meeting');
+  }
 }

@@ -12,7 +12,7 @@ import {
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
@@ -29,8 +29,13 @@ export function useLiveKit() {
     setMicEnabled,
     setCameraEnabled,
     setScreenSharing,
+    setIsHost,
+    setRoomCode,
     setView,
     reset,
+    roomCode: storedRoomCode,
+    isHost,
+    localParticipant,
   } = useRoomStore();
 
   // Initialize room event handlers
@@ -147,7 +152,11 @@ export function useLiveKit() {
       setConnectionState(ConnectionState.Connecting);
 
       // Get token from API
-      const { token } = await getToken(roomCode, displayName);
+      const { token, isHost: hostStatus } = await getToken(roomCode, displayName);
+
+      // Set host status and room code
+      setIsHost(hostStatus);
+      setRoomCode(roomCode);
 
       // Create room and setup events
       const newRoom = createRoom();
@@ -197,7 +206,7 @@ export function useLiveKit() {
       setView('room');
 
       // Save session for auto-rejoin on refresh
-      saveSession(roomCode, displayName);
+      saveSession(roomCode, displayName, hostStatus);
 
     } catch (error) {
       console.error('Failed to connect:', error);
@@ -223,6 +232,8 @@ export function useLiveKit() {
     setRemoteParticipants,
     setMicEnabled,
     setCameraEnabled,
+    setIsHost,
+    setRoomCode,
     setView,
   ]);
 
@@ -311,6 +322,28 @@ export function useLiveKit() {
     }
   }, [setScreenSharing]);
 
+  // End meeting for all participants (host only)
+  const endMeeting = useCallback(async () => {
+    if (!isHost) {
+      toast.error('Only the host can end the meeting');
+      return;
+    }
+
+    if (!storedRoomCode || !localParticipant) {
+      toast.error('Unable to end meeting');
+      return;
+    }
+
+    try {
+      await endMeetingForAll(storedRoomCode, localParticipant.identity);
+      toast.success('Meeting ended for all participants');
+      // The room disconnect event will handle cleanup
+    } catch (error) {
+      console.error('Failed to end meeting:', error);
+      toast.error('Failed to end meeting');
+    }
+  }, [isHost, storedRoomCode, localParticipant]);
+
   // Note: We intentionally don't disconnect on unmount since we use a singleton pattern.
   // The room should only be disconnected explicitly via the disconnect() function.
   // This prevents the room from disconnecting when components re-render or unmount
@@ -322,5 +355,6 @@ export function useLiveKit() {
     toggleMic,
     toggleCamera,
     toggleScreenShare,
+    endMeeting,
   };
 }

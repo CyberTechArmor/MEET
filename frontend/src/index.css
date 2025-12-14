@@ -63,10 +63,7 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* Video element styles */
-video {
-  object-fit: cover;
-}
+/* Video element styles - object-fit is set per-video in components */
 
 /* Transition utilities */
 .transition-smooth {
@@ -119,10 +116,17 @@ video {
   overflow: hidden;
 }
 
-/* 1 participant - centered, max 80% width */
+/* 1 participant - fill viewport */
+.video-grid-1 {
+  padding: 0;
+  padding-bottom: 80px; /* Space for controls */
+}
+
 .video-grid-1 > * {
-  width: min(80%, 900px);
-  max-height: calc(100vh - 200px);
+  width: 100%;
+  height: calc(100vh - 80px);
+  max-height: none;
+  border-radius: 0;
 }
 
 /* 2 participants - side by side */

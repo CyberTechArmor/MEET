@@ -156,7 +156,7 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
             autoPlay
             playsInline
             muted={isLocal}
-            className={`w-full h-full object-cover ${isLocal ? 'transform scale-x-[-1]' : ''}`}
+            className={`w-full h-full object-contain bg-black ${isLocal ? 'transform scale-x-[-1]' : ''}`}
           />
         ) : (
           <div className="w-full h-full bg-meet-bg-elevated flex items-center justify-center">
@@ -208,7 +208,7 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
           autoPlay
           playsInline
           muted={isLocal}
-          className={`w-full h-full object-cover ${isLocal ? 'transform scale-x-[-1]' : ''}`}
+          className={`w-full h-full object-contain bg-black ${isLocal ? 'transform scale-x-[-1]' : ''}`}
         />
       ) : (
         <div className="w-full h-full flex items-center justify-center bg-meet-bg-secondary">

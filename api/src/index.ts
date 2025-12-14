@@ -1,6 +1,6 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
-import { AccessToken } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 
 const app = express();
 
@@ -8,7 +8,11 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || 'devkey';
 const LIVEKIT_API_SECRET = process.env.LIVEKIT_API_SECRET || 'secret';
+const LIVEKIT_URL = process.env.LIVEKIT_URL || 'http://localhost:7880';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+
+// Initialize RoomServiceClient for room management
+const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
 
 // CORS configuration - supports '*' for all origins or comma-separated list
 const corsOptions: cors.CorsOptions = {
@@ -70,6 +74,18 @@ app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response)
       ? `${sanitizedParticipantName}_${sanitizedDeviceId}`
       : `${sanitizedParticipantName}_${Date.now()}`;
 
+    // Check if room exists to determine if this user is the host
+    let isHost = false;
+    try {
+      const rooms = await roomService.listRooms([sanitizedRoomName]);
+      // If room doesn't exist or has no participants, this user is the host
+      isHost = rooms.length === 0 || (rooms[0]?.numParticipants ?? 0) === 0;
+    } catch (err) {
+      // If we can't check, assume they're the host if room doesn't exist
+      console.warn('Could not check room status:', err);
+      isHost = true;
+    }
+
     // Create access token
     const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
       identity: participantIdentity,
@@ -77,12 +93,14 @@ app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response)
     });
 
     // Grant permissions for the room
+    // Host gets room admin permission to end the meeting
     token.addGrant({
       room: sanitizedRoomName,
       roomJoin: true,
       canPublish: true,
       canSubscribe: true,
       canPublishData: true,
+      roomAdmin: isHost, // Host can administrate the room
     });
 
     // Generate JWT token
@@ -93,6 +111,7 @@ app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response)
       roomName: sanitizedRoomName,
       participantName: sanitizedParticipantName,
       participantIdentity: participantIdentity,
+      isHost: isHost,
     });
 
   } catch (error) {
@@ -109,6 +128,41 @@ app.get('/api/room-code', (_req: Request, res: Response) => {
     code += characters.charAt(Math.floor(Math.random() * characters.length));
   }
   res.json({ roomCode: code });
+});
+
+// End meeting for all participants (host only)
+interface EndMeetingRequest {
+  roomName: string;
+  participantIdentity: string;
+}
+
+app.post('/api/end-meeting', async (req: Request<{}, {}, EndMeetingRequest>, res: Response) => {
+  try {
+    const { roomName, participantIdentity } = req.body;
+
+    if (!roomName || typeof roomName !== 'string') {
+      res.status(400).json({ error: 'roomName is required' });
+      return;
+    }
+
+    if (!participantIdentity || typeof participantIdentity !== 'string') {
+      res.status(400).json({ error: 'participantIdentity is required' });
+      return;
+    }
+
+    const sanitizedRoomName = roomName.replace(/[^a-zA-Z0-9-_]/g, '').slice(0, 50);
+
+    // Delete the room - this will disconnect all participants
+    await roomService.deleteRoom(sanitizedRoomName);
+
+    console.log(`Room ${sanitizedRoomName} ended by ${participantIdentity}`);
+
+    res.json({ success: true, message: 'Meeting ended for all participants' });
+
+  } catch (error) {
+    console.error('End meeting error:', error);
+    res.status(500).json({ error: 'Failed to end meeting' });
+  }
 });
 
 // Start server

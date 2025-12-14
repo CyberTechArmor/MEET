@@ -3,15 +3,23 @@ import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 
 function ControlBar() {
-  const { isMicEnabled, isCameraEnabled, isScreenSharing } = useRoomStore();
-  const { toggleMic, toggleCamera, toggleScreenShare, disconnect } = useLiveKit();
+  const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost } = useRoomStore();
+  const { toggleMic, toggleCamera, toggleScreenShare, disconnect, endMeeting } = useLiveKit();
 
   const [isLeaving, setIsLeaving] = useState(false);
+  const [isEnding, setIsEnding] = useState(false);
 
   const handleLeave = useCallback(async () => {
     setIsLeaving(true);
     await disconnect();
   }, [disconnect]);
+
+  const handleEndMeeting = useCallback(async () => {
+    if (!isHost) return;
+    setIsEnding(true);
+    await endMeeting();
+    setIsEnding(false);
+  }, [isHost, endMeeting]);
 
   return (
     <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30">
@@ -156,6 +164,44 @@ function ControlBar() {
             </svg>
           )}
         </button>
+
+        {/* End Meeting for All (Host only) */}
+        {isHost && (
+          <button
+            onClick={handleEndMeeting}
+            disabled={isEnding}
+            className="p-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
+            title="End meeting for all"
+          >
+            {isEnding ? (
+              <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                  fill="none"
+                />
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                />
+              </svg>
+            ) : (
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
+                />
+              </svg>
+            )}
+          </button>
+        )}
       </div>
     </div>
   );

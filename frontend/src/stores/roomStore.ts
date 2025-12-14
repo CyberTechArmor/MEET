@@ -36,6 +36,10 @@ interface RoomState {
   isScreenSharing: boolean;
   setScreenSharing: (sharing: boolean) => void;
 
+  // Host state
+  isHost: boolean;
+  setIsHost: (isHost: boolean) => void;
+
   // UI state
   controlsVisible: boolean;
   setControlsVisible: (visible: boolean) => void;
@@ -55,6 +59,7 @@ const initialState = {
   isMicEnabled: true,
   isCameraEnabled: true,
   isScreenSharing: false,
+  isHost: false,
   controlsVisible: true,
 };
 
@@ -83,6 +88,8 @@ export const useRoomStore = create<RoomState>((set) => ({
   setMicEnabled: (isMicEnabled) => set({ isMicEnabled }),
   setCameraEnabled: (isCameraEnabled) => set({ isCameraEnabled }),
   setScreenSharing: (isScreenSharing) => set({ isScreenSharing }),
+
+  setIsHost: (isHost) => set({ isHost }),
 
   setControlsVisible: (controlsVisible) => set({ controlsVisible }),
 
