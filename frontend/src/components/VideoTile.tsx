@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Participant, Track, ParticipantEvent } from 'livekit-client';
 import ParticipantOverlay from './ParticipantOverlay';
 
