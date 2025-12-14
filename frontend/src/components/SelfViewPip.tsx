@@ -1,5 +1,5 @@
-import { useEffect, useRef, useMemo } from 'react';
-import { LocalParticipant, Track } from 'livekit-client';
+import { useEffect, useRef, useMemo, useState, useCallback } from 'react';
+import { LocalParticipant, Track, ParticipantEvent } from 'livekit-client';
 
 interface SelfViewPipProps {
   participant: LocalParticipant;
@@ -9,6 +9,29 @@ interface SelfViewPipProps {
 
 function SelfViewPip({ participant, isMinimized, onToggleMinimize }: SelfViewPipProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Force re-render when tracks change
+  const [, setUpdateCounter] = useState(0);
+  const forceUpdate = useCallback(() => setUpdateCounter(c => c + 1), []);
+
+  // Subscribe to track events to trigger re-renders
+  useEffect(() => {
+    const handleTrackChange = () => {
+      forceUpdate();
+    };
+
+    participant.on(ParticipantEvent.LocalTrackPublished, handleTrackChange);
+    participant.on(ParticipantEvent.LocalTrackUnpublished, handleTrackChange);
+    participant.on(ParticipantEvent.TrackMuted, handleTrackChange);
+    participant.on(ParticipantEvent.TrackUnmuted, handleTrackChange);
+
+    return () => {
+      participant.off(ParticipantEvent.LocalTrackPublished, handleTrackChange);
+      participant.off(ParticipantEvent.LocalTrackUnpublished, handleTrackChange);
+      participant.off(ParticipantEvent.TrackMuted, handleTrackChange);
+      participant.off(ParticipantEvent.TrackUnmuted, handleTrackChange);
+    };
+  }, [participant, forceUpdate]);
 
   // Get video track (camera)
   const videoPublication = participant.getTrackPublication(Track.Source.Camera);

@@ -35,11 +35,12 @@ app.get('/health', (_req: Request, res: Response) => {
 interface TokenRequest {
   roomName: string;
   participantName: string;
+  deviceId?: string;
 }
 
 app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response) => {
   try {
-    const { roomName, participantName } = req.body;
+    const { roomName, participantName, deviceId } = req.body;
 
     // Validate input
     if (!roomName || typeof roomName !== 'string') {
@@ -61,10 +62,18 @@ app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response)
       return;
     }
 
+    // Generate unique identity using deviceId if provided
+    // This allows multiple people with the same display name to join
+    // and allows the same user on multiple devices
+    const sanitizedDeviceId = deviceId ? deviceId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30) : '';
+    const participantIdentity = sanitizedDeviceId
+      ? `${sanitizedParticipantName}_${sanitizedDeviceId}`
+      : `${sanitizedParticipantName}_${Date.now()}`;
+
     // Create access token
     const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
-      identity: sanitizedParticipantName,
-      name: sanitizedParticipantName,
+      identity: participantIdentity,
+      name: sanitizedParticipantName, // Display name shown to others
     });
 
     // Grant permissions for the room
@@ -83,6 +92,7 @@ app.post('/api/token', async (req: Request<{}, {}, TokenRequest>, res: Response)
       token: jwt,
       roomName: sanitizedRoomName,
       participantName: sanitizedParticipantName,
+      participantIdentity: participantIdentity,
     });
 
   } catch (error) {

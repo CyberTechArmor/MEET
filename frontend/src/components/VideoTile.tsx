@@ -11,6 +11,7 @@ interface VideoTileProps {
 function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const screenShareRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   // Force re-render when tracks change
   const [, setUpdateCounter] = useState(0);
@@ -51,8 +52,9 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
   const screenSharePublication = participant.getTrackPublication(Track.Source.ScreenShare);
   const screenShareTrack = screenSharePublication?.track;
 
-  // Get audio track for status
+  // Get audio track
   const audioPublication = participant.getTrackPublication(Track.Source.Microphone);
+  const audioTrack = audioPublication?.track;
 
   // Check if camera is enabled - different logic for local vs remote
   const isCameraEnabled = useMemo(() => {
@@ -103,6 +105,17 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
     }
   }, [screenShareTrack]);
 
+  // Attach audio track for remote participants
+  useEffect(() => {
+    // Only attach audio for remote participants (don't play our own audio)
+    if (!isLocal && audioRef.current && audioTrack) {
+      audioTrack.attach(audioRef.current);
+      return () => {
+        audioTrack.detach(audioRef.current!);
+      };
+    }
+  }, [isLocal, audioTrack]);
+
   // Generate avatar initials and color
   const initials = useMemo(() => {
     const name = participant.name || participant.identity;
@@ -134,6 +147,9 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
   if (isSmall) {
     return (
       <div className="relative w-full h-full bg-meet-bg-secondary rounded-xl overflow-hidden animate-fade-in">
+        {/* Hidden audio element for remote participant audio playback */}
+        {!isLocal && <audio ref={audioRef} autoPlay />}
+
         {isCameraEnabled && videoTrack ? (
           <video
             ref={videoRef}
@@ -174,6 +190,9 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
 
   return (
     <div className="relative rounded-2xl overflow-hidden bg-meet-bg-secondary animate-fade-in">
+      {/* Hidden audio element for remote participant audio playback */}
+      {!isLocal && <audio ref={audioRef} autoPlay />}
+
       {/* Screen share takes priority */}
       {isScreenSharing && screenShareTrack ? (
         <video

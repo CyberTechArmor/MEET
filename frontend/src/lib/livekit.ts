@@ -47,10 +47,79 @@ function getLiveKitWsUrl(): string {
 const API_URL = getApiUrl();
 const LIVEKIT_URL = getLiveKitWsUrl();
 
+// Device ID for unique participant identification
+const DEVICE_ID_KEY = 'meet_device_id';
+const SESSION_KEY = 'meet_session';
+
+/**
+ * Get or generate a unique device ID
+ */
+export function getDeviceId(): string {
+  let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+  if (!deviceId) {
+    // Generate a random device ID
+    deviceId = `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 9)}`;
+    localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  }
+  return deviceId;
+}
+
+/**
+ * Session data for auto-rejoin
+ */
+export interface SessionData {
+  roomCode: string;
+  displayName: string;
+  timestamp: number;
+}
+
+/**
+ * Save session for auto-rejoin on refresh
+ */
+export function saveSession(roomCode: string, displayName: string): void {
+  const session: SessionData = {
+    roomCode,
+    displayName,
+    timestamp: Date.now(),
+  };
+  sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+}
+
+/**
+ * Get saved session if valid (not older than 1 hour)
+ */
+export function getSavedSession(): SessionData | null {
+  try {
+    const data = sessionStorage.getItem(SESSION_KEY);
+    if (!data) return null;
+
+    const session: SessionData = JSON.parse(data);
+    const oneHour = 60 * 60 * 1000;
+
+    // Session expires after 1 hour
+    if (Date.now() - session.timestamp > oneHour) {
+      clearSession();
+      return null;
+    }
+
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clear saved session
+ */
+export function clearSession(): void {
+  sessionStorage.removeItem(SESSION_KEY);
+}
+
 export interface TokenResponse {
   token: string;
   roomName: string;
   participantName: string;
+  participantIdentity: string;
 }
 
 export interface RoomCodeResponse {
@@ -59,14 +128,21 @@ export interface RoomCodeResponse {
 
 /**
  * Fetch a token for joining a LiveKit room
+ * Uses deviceId for unique identity while keeping displayName for the visible name
  */
 export async function getToken(roomName: string, participantName: string): Promise<TokenResponse> {
+  const deviceId = getDeviceId();
+
   const response = await fetch(`${API_URL}/api/token`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ roomName, participantName }),
+    body: JSON.stringify({
+      roomName,
+      participantName,
+      deviceId,
+    }),
   });
 
   if (!response.ok) {

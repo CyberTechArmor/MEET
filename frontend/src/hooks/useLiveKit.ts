@@ -12,7 +12,7 @@ import {
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
@@ -49,12 +49,14 @@ export function useLiveKit() {
 
     room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
       addRemoteParticipant(participant);
-      toast.success(`${participant.identity} joined`);
+      const displayName = participant.name || participant.identity;
+      toast.success(`${displayName} joined`);
     });
 
     room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
       removeRemoteParticipant(participant.identity);
-      toast(`${participant.identity} left`, { icon: '👋' });
+      const displayName = participant.name || participant.identity;
+      toast(`${displayName} left`, { icon: '👋' });
     });
 
     // Handle track events to force UI updates
@@ -194,6 +196,9 @@ export function useLiveKit() {
       setCameraEnabled(cameraEnabled);
       setView('room');
 
+      // Save session for auto-rejoin on refresh
+      saveSession(roomCode, displayName);
+
     } catch (error) {
       console.error('Failed to connect:', error);
       setConnectionState(ConnectionState.Disconnected);
@@ -223,6 +228,9 @@ export function useLiveKit() {
 
   // Disconnect from room
   const disconnect = useCallback(async () => {
+    // Clear saved session
+    clearSession();
+
     if (sharedRoomInstance) {
       await sharedRoomInstance.disconnect();
       sharedRoomInstance = null;
