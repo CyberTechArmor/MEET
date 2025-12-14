@@ -3,7 +3,6 @@ import {
   Room,
   RoomEvent,
   ConnectionState,
-  LocalParticipant,
   RemoteParticipant,
   Track,
   LocalTrackPublication,

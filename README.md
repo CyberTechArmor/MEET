@@ -214,6 +214,7 @@ CORS_ORIGIN=http://localhost:3000
 ```
 meet/
 ├── install.sh              # One-line installer (auto-installs dependencies)
+├── cleanup.sh              # Cleanup script for fresh installs
 ├── docker-compose.yml      # Demo mode orchestration
 ├── docker-compose.proxy.yml # With Caddy reverse proxy
 ├── docker-compose.prod.yml # Production (placeholder)
@@ -249,6 +250,29 @@ meet/
 │       └── index.ts
 └── README.md
 ```
+
+## Cleanup
+
+To remove all MEET containers, images, and configuration for a fresh install:
+
+```bash
+# Interactive cleanup (with prompts)
+./cleanup.sh
+
+# Quick cleanup (containers and images only)
+./cleanup.sh --quick
+
+# Force cleanup (no prompts)
+./cleanup.sh --force
+```
+
+The cleanup script removes:
+- All MEET Docker containers
+- All MEET Docker images
+- Docker volumes (Caddy certificates, etc.)
+- Docker networks
+- Configuration files (.env)
+- Build cache (optional)
 
 ## Troubleshooting
 
