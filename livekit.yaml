@@ -13,10 +13,10 @@ rtc:
   use_external_ip: true
   # Enable ICE over TCP as fallback (important for restrictive networks)
   enable_loopback_candidate: false
-  # STUN servers for ICE candidate gathering
+  # STUN servers for ICE candidate gathering (host:port format, no stun: prefix)
   stun_servers:
-    - stun:stun.l.google.com:19302
-    - stun:stun1.l.google.com:19302
+    - stun.l.google.com:19302
+    - stun1.l.google.com:19302
 
 # Development keys (change these in production!)
 keys:
