@@ -4,17 +4,22 @@ import {
   RoomEvent,
   ConnectionState,
   RemoteParticipant,
+  LocalParticipant,
   Track,
   LocalTrackPublication,
+  TrackPublication,
+  Participant,
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
 import { createRoom, getToken, getLiveKitUrl } from '../lib/livekit';
 
+// Singleton room instance shared across all hook instances
+let sharedRoomInstance: Room | null = null;
+
 export function useLiveKit() {
   const roomRef = useRef<Room | null>(null);
   const {
-    room,
     setRoom,
     setConnectionState,
     setLocalParticipant,
@@ -93,19 +98,26 @@ export function useLiveKit() {
     });
 
     // Handle local track mute/unmute to keep UI in sync
-    room.on(RoomEvent.TrackMuted, (publication) => {
-      if (publication.track?.source === Track.Source.Camera) {
-        setCameraEnabled(false);
-      } else if (publication.track?.source === Track.Source.Microphone) {
-        setMicEnabled(false);
+    // Only respond to local participant track events
+    room.on(RoomEvent.TrackMuted, (publication: TrackPublication, participant: Participant) => {
+      // Only update state for local participant
+      if (participant instanceof LocalParticipant) {
+        if (publication.track?.source === Track.Source.Camera) {
+          setCameraEnabled(false);
+        } else if (publication.track?.source === Track.Source.Microphone) {
+          setMicEnabled(false);
+        }
       }
     });
 
-    room.on(RoomEvent.TrackUnmuted, (publication) => {
-      if (publication.track?.source === Track.Source.Camera) {
-        setCameraEnabled(true);
-      } else if (publication.track?.source === Track.Source.Microphone) {
-        setMicEnabled(true);
+    room.on(RoomEvent.TrackUnmuted, (publication: TrackPublication, participant: Participant) => {
+      // Only update state for local participant
+      if (participant instanceof LocalParticipant) {
+        if (publication.track?.source === Track.Source.Camera) {
+          setCameraEnabled(true);
+        } else if (publication.track?.source === Track.Source.Microphone) {
+          setMicEnabled(true);
+        }
       }
     });
 
@@ -138,6 +150,7 @@ export function useLiveKit() {
       // Create room and setup events
       const newRoom = createRoom();
       roomRef.current = newRoom;
+      sharedRoomInstance = newRoom; // Store in singleton for cross-component access
       setupRoomEvents(newRoom);
 
       // Connect to LiveKit
@@ -210,8 +223,11 @@ export function useLiveKit() {
 
   // Disconnect from room
   const disconnect = useCallback(async () => {
+    if (sharedRoomInstance) {
+      await sharedRoomInstance.disconnect();
+      sharedRoomInstance = null;
+    }
     if (roomRef.current) {
-      await roomRef.current.disconnect();
       roomRef.current = null;
     }
     reset();
@@ -220,51 +236,83 @@ export function useLiveKit() {
 
   // Toggle microphone
   const toggleMic = useCallback(async () => {
-    if (!room?.localParticipant) return;
+    const currentRoom = sharedRoomInstance;
+    if (!currentRoom?.localParticipant) {
+      console.warn('toggleMic: No room or local participant available');
+      return;
+    }
 
-    const newState = !room.localParticipant.isMicrophoneEnabled;
-    await room.localParticipant.setMicrophoneEnabled(newState);
-    setMicEnabled(newState);
-  }, [room, setMicEnabled]);
+    try {
+      const newState = !currentRoom.localParticipant.isMicrophoneEnabled;
+      console.log('toggleMic: Setting mic to', newState);
+      await currentRoom.localParticipant.setMicrophoneEnabled(newState);
+      setMicEnabled(newState);
+    } catch (error) {
+      console.error('Failed to toggle microphone:', error);
+      toast.error('Failed to toggle microphone');
+    }
+  }, [setMicEnabled]);
 
   // Toggle camera
   const toggleCamera = useCallback(async () => {
-    if (!room?.localParticipant) return;
+    const currentRoom = sharedRoomInstance;
+    if (!currentRoom?.localParticipant) {
+      console.warn('toggleCamera: No room or local participant available');
+      return;
+    }
 
-    const newState = !room.localParticipant.isCameraEnabled;
-    await room.localParticipant.setCameraEnabled(newState);
-    setCameraEnabled(newState);
-  }, [room, setCameraEnabled]);
+    try {
+      const newState = !currentRoom.localParticipant.isCameraEnabled;
+      console.log('toggleCamera: Setting camera to', newState);
+      await currentRoom.localParticipant.setCameraEnabled(newState);
+      setCameraEnabled(newState);
+    } catch (error) {
+      console.error('Failed to toggle camera:', error);
+      toast.error('Failed to toggle camera');
+    }
+  }, [setCameraEnabled]);
 
   // Toggle screen share
   const toggleScreenShare = useCallback(async () => {
-    if (!room?.localParticipant) return;
+    const currentRoom = sharedRoomInstance;
+    if (!currentRoom?.localParticipant) {
+      console.warn('toggleScreenShare: No room or local participant available');
+      return;
+    }
 
-    const isCurrentlySharing = room.localParticipant.isScreenShareEnabled;
+    const isCurrentlySharing = currentRoom.localParticipant.isScreenShareEnabled;
 
-    if (isCurrentlySharing) {
-      await room.localParticipant.setScreenShareEnabled(false);
-      setScreenSharing(false);
-    } else {
-      try {
-        await room.localParticipant.setScreenShareEnabled(true);
+    try {
+      if (isCurrentlySharing) {
+        console.log('toggleScreenShare: Stopping screen share');
+        await currentRoom.localParticipant.setScreenShareEnabled(false);
+        setScreenSharing(false);
+      } else {
+        console.log('toggleScreenShare: Starting screen share');
+        await currentRoom.localParticipant.setScreenShareEnabled(true);
         setScreenSharing(true);
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('Permission denied')) {
-          // User cancelled screen share picker
-          console.log('Screen share cancelled');
-        } else {
-          toast.error('Failed to start screen share');
-        }
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Permission denied')) {
+        // User cancelled screen share picker
+        console.log('Screen share cancelled by user');
+      } else {
+        console.error('Failed to toggle screen share:', error);
+        toast.error('Failed to toggle screen share');
       }
     }
-  }, [room, setScreenSharing]);
+  }, [setScreenSharing]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (sharedRoomInstance) {
+        sharedRoomInstance.disconnect();
+        sharedRoomInstance = null;
+      }
       if (roomRef.current) {
         roomRef.current.disconnect();
+        roomRef.current = null;
       }
     };
   }, []);

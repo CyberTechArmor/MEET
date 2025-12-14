@@ -1,7 +1,8 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
-import { ConnectionState } from 'livekit-client';
+import { ConnectionState, Track, Participant } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import VideoTile from './VideoTile';
+import ScreenShareView from './ScreenShareView';
 import ControlBar from './ControlBar';
 import SelfViewPip from './SelfViewPip';
 import { formatRoomCode } from '../lib/livekit';
@@ -62,6 +63,27 @@ function VideoRoom() {
       }
     };
   }, [resetHideTimer]);
+
+  // Find participant who is screen sharing (if any)
+  const screenShareParticipant = useMemo((): { participant: Participant; isLocal: boolean } | null => {
+    // Check if local participant is sharing
+    if (localParticipant) {
+      const localScreenShare = localParticipant.getTrackPublication(Track.Source.ScreenShare);
+      if (localScreenShare?.track && !localScreenShare.isMuted) {
+        return { participant: localParticipant, isLocal: true };
+      }
+    }
+
+    // Check remote participants
+    for (const remote of remoteParticipants) {
+      const remoteScreenShare = remote.getTrackPublication(Track.Source.ScreenShare);
+      if (remoteScreenShare?.track && !remoteScreenShare.isMuted && remoteScreenShare.isSubscribed) {
+        return { participant: remote, isLocal: false };
+      }
+    }
+
+    return null;
+  }, [localParticipant, remoteParticipants, isScreenSharing]);
 
   // Determine grid layout based on participant count
   const gridClass = useMemo(() => {
@@ -125,12 +147,14 @@ function VideoRoom() {
       </div>
 
       {/* Screen Share Indicator */}
-      {isScreenSharing && (
+      {screenShareParticipant && (
         <div className="absolute top-4 right-4 z-20">
           <div className="bg-meet-success/20 border border-meet-success/50 rounded-lg px-4 py-2 flex items-center gap-2 pulse-glow">
             <div className="w-2 h-2 rounded-full bg-meet-success animate-pulse" />
             <span className="text-meet-success text-sm font-medium">
-              Sharing your screen
+              {screenShareParticipant.isLocal
+                ? 'Sharing your screen'
+                : `${screenShareParticipant.participant.name || screenShareParticipant.participant.identity} is sharing`}
             </span>
           </div>
         </div>
@@ -155,34 +179,74 @@ function VideoRoom() {
         </div>
       )}
 
-      {/* Video Grid */}
-      <div className={`video-grid ${gridClass} h-full`}>
-        {/* Remote participants */}
-        {remoteParticipants.map((participant) => (
-          <VideoTile
-            key={participant.identity}
-            participant={participant}
-            isLocal={false}
-          />
-        ))}
+      {/* Screen Share Layout or Regular Video Grid */}
+      {screenShareParticipant ? (
+        // Screen share layout - main screen share with participant strip
+        <div className="h-full flex flex-col">
+          {/* Main screen share area */}
+          <div className="flex-1 p-4 pb-2">
+            <ScreenShareView
+              participant={screenShareParticipant.participant}
+              isLocal={screenShareParticipant.isLocal}
+            />
+          </div>
 
-        {/* Local participant in main grid if alone */}
-        {localParticipant && remoteParticipants.length === 0 && (
-          <VideoTile
-            participant={localParticipant}
-            isLocal={true}
-            isSmall={false}
-          />
-        )}
-      </div>
+          {/* Participant strip at bottom */}
+          <div className="h-32 px-4 pb-4 flex gap-2 overflow-x-auto">
+            {/* Local participant */}
+            {localParticipant && (
+              <div className="h-full aspect-video flex-shrink-0 rounded-xl overflow-hidden">
+                <VideoTile
+                  participant={localParticipant}
+                  isLocal={true}
+                  isSmall={true}
+                />
+              </div>
+            )}
+            {/* Remote participants */}
+            {remoteParticipants.map((participant) => (
+              <div key={participant.identity} className="h-full aspect-video flex-shrink-0 rounded-xl overflow-hidden">
+                <VideoTile
+                  participant={participant}
+                  isLocal={false}
+                  isSmall={true}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        // Regular video grid
+        <>
+          <div className={`video-grid ${gridClass} h-full`}>
+            {/* Remote participants */}
+            {remoteParticipants.map((participant) => (
+              <VideoTile
+                key={participant.identity}
+                participant={participant}
+                isLocal={false}
+              />
+            ))}
 
-      {/* PiP Self View - shown when there are remote participants */}
-      {localParticipant && remoteParticipants.length > 0 && (
-        <SelfViewPip
-          participant={localParticipant}
-          isMinimized={isPipMinimized}
-          onToggleMinimize={() => setIsPipMinimized(!isPipMinimized)}
-        />
+            {/* Local participant in main grid if alone */}
+            {localParticipant && remoteParticipants.length === 0 && (
+              <VideoTile
+                participant={localParticipant}
+                isLocal={true}
+                isSmall={false}
+              />
+            )}
+          </div>
+
+          {/* PiP Self View - shown when there are remote participants and no screen share */}
+          {localParticipant && remoteParticipants.length > 0 && (
+            <SelfViewPip
+              participant={localParticipant}
+              isMinimized={isPipMinimized}
+              onToggleMinimize={() => setIsPipMinimized(!isPipMinimized)}
+            />
+          )}
+        </>
       )}
 
       {/* Control Bar */}

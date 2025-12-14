@@ -130,36 +130,36 @@ function VideoTile({ participant, isLocal, isSmall = false }: VideoTileProps) {
     return colors[hash % colors.length];
   }, [participant.identity]);
 
-  // Small pip style for local video when in call
-  if (isSmall && isLocal) {
+  // Small style for participant strip (during screen share)
+  if (isSmall) {
     return (
-      <div className="absolute bottom-24 right-4 z-10 w-48 aspect-video rounded-xl overflow-hidden shadow-soft border border-meet-border animate-fade-in">
+      <div className="relative w-full h-full bg-meet-bg-secondary rounded-xl overflow-hidden animate-fade-in">
         {isCameraEnabled && videoTrack ? (
           <video
             ref={videoRef}
             autoPlay
             playsInline
             muted={isLocal}
-            className="w-full h-full object-cover transform scale-x-[-1]"
+            className={`w-full h-full object-cover ${isLocal ? 'transform scale-x-[-1]' : ''}`}
           />
         ) : (
           <div className="w-full h-full bg-meet-bg-elevated flex items-center justify-center">
-            <div className={`${avatarColor} w-12 h-12 rounded-full flex items-center justify-center`}>
-              <span className="text-white font-semibold text-sm">{initials}</span>
+            <div className={`${avatarColor} w-10 h-10 rounded-full flex items-center justify-center`}>
+              <span className="text-white font-semibold text-xs">{initials}</span>
             </div>
           </div>
         )}
 
         {/* Small overlay */}
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-1.5">
           <div className="flex items-center justify-between">
             <span className="text-white text-xs font-medium truncate">
-              You
+              {isLocal ? 'You' : (participant.name || participant.identity)}
             </span>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5">
               {!isMicEnabled && (
-                <div className="bg-meet-error/80 rounded-full p-1">
-                  <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="bg-meet-error/80 rounded-full p-0.5">
+                  <svg className="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" />
                   </svg>
