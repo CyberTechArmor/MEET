@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
+import ConfirmModal from './ConfirmModal';
 
 function ControlBar() {
   const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost, controlsPinned, setControlsPinned } = useRoomStore();
@@ -8,26 +9,30 @@ function ControlBar() {
 
   const [isLeaving, setIsLeaving] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
 
-  const handleLeave = useCallback(async () => {
+  const handleLeaveClick = useCallback(() => {
+    setShowLeaveConfirm(true);
+  }, []);
+
+  const handleLeaveConfirm = useCallback(async () => {
+    setShowLeaveConfirm(false);
     setIsLeaving(true);
     await disconnect();
   }, [disconnect]);
 
-  const handleEndMeeting = useCallback(async () => {
+  const handleEndClick = useCallback(() => {
     if (!isHost) return;
+    setShowEndConfirm(true);
+  }, [isHost]);
 
-    // Show confirmation dialog
-    const confirmed = window.confirm(
-      'Are you sure you want to end this meeting for all participants?\n\nThis will disconnect everyone from the call.'
-    );
-
-    if (!confirmed) return;
-
+  const handleEndConfirm = useCallback(async () => {
+    setShowEndConfirm(false);
     setIsEnding(true);
     await endMeeting();
     setIsEnding(false);
-  }, [isHost, endMeeting]);
+  }, [endMeeting]);
 
   return (
     <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30">
@@ -160,7 +165,7 @@ function ControlBar() {
 
         {/* Leave Call */}
         <button
-          onClick={handleLeave}
+          onClick={handleLeaveClick}
           disabled={isLeaving}
           className="p-4 rounded-xl bg-meet-error hover:bg-meet-error/80 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
           title="Leave call"
@@ -197,7 +202,7 @@ function ControlBar() {
         {/* End Meeting for All (Host only) */}
         {isHost && (
           <button
-            onClick={handleEndMeeting}
+            onClick={handleEndClick}
             disabled={isEnding}
             className="p-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
             title="End meeting for all"
@@ -232,6 +237,30 @@ function ControlBar() {
           </button>
         )}
       </div>
+
+      {/* Leave Call Confirmation Modal */}
+      <ConfirmModal
+        isOpen={showLeaveConfirm}
+        title="Leave Call"
+        message="Are you sure you want to leave this call?"
+        confirmText="Leave"
+        cancelText="Stay"
+        confirmVariant="danger"
+        onConfirm={handleLeaveConfirm}
+        onCancel={() => setShowLeaveConfirm(false)}
+      />
+
+      {/* End Meeting Confirmation Modal (Host only) */}
+      <ConfirmModal
+        isOpen={showEndConfirm}
+        title="End Meeting for All"
+        message="Are you sure you want to end this meeting? This will disconnect all participants from the call."
+        confirmText="End Meeting"
+        cancelText="Cancel"
+        confirmVariant="warning"
+        onConfirm={handleEndConfirm}
+        onCancel={() => setShowEndConfirm(false)}
+      />
     </div>
   );
 }

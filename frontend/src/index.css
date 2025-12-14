@@ -84,6 +84,22 @@ body {
   animation: pulse-glow 2s infinite;
 }
 
+/* Modal animations */
+@keyframes scale-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-scale-in {
+  animation: scale-in 200ms ease-out;
+}
+
 /* Hide controls animation */
 .controls-container {
   transition: opacity 300ms ease, transform 300ms ease;
