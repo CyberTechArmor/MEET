@@ -2,12 +2,13 @@ import { Room, RoomOptions, VideoPresets } from 'livekit-client';
 
 // API configuration - dynamically determine URLs based on current hostname
 function getApiUrl(): string {
-  // If explicitly set via env var, use that
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
+  // If explicitly set via env var (non-empty), use that
+  const envUrl = import.meta.env.VITE_API_URL;
+  if (envUrl && envUrl.trim() !== '') {
+    return envUrl;
   }
 
-  // Otherwise, derive from current location
+  // Otherwise, derive from current location for dynamic hostname support
   const protocol = window.location.protocol;
   const hostname = window.location.hostname;
 
@@ -21,12 +22,13 @@ function getApiUrl(): string {
 }
 
 function getLiveKitWsUrl(): string {
-  // If explicitly set via env var, use that
-  if (import.meta.env.VITE_LIVEKIT_URL) {
-    return import.meta.env.VITE_LIVEKIT_URL;
+  // If explicitly set via env var (non-empty), use that
+  const envUrl = import.meta.env.VITE_LIVEKIT_URL;
+  if (envUrl && envUrl.trim() !== '') {
+    return envUrl;
   }
 
-  // Otherwise, derive from current location
+  // Otherwise, derive from current location for dynamic hostname support
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const hostname = window.location.hostname;
 

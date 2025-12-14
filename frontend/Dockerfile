@@ -12,9 +12,10 @@ RUN npm install
 # Copy source code
 COPY . .
 
-# Set environment variables for build
-ARG VITE_LIVEKIT_URL=ws://localhost:7880
-ARG VITE_API_URL=http://localhost:8080
+# Build environment variables - leave empty to enable dynamic URL detection at runtime
+# Only set these if you want to override the automatic detection
+ARG VITE_LIVEKIT_URL=
+ARG VITE_API_URL=
 ENV VITE_LIVEKIT_URL=$VITE_LIVEKIT_URL
 ENV VITE_API_URL=$VITE_API_URL
 
