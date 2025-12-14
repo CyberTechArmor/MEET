@@ -5,7 +5,7 @@
     # Enable compression
     encode gzip zstd
 
-    # API routes
+    # API routes - proxy to backend (keep /api prefix, API expects it)
     handle /api/* {
         reverse_proxy meet-api:8080
     }
@@ -32,22 +32,5 @@
     log {
         output stdout
         format console
-    }
-}
-
-# Local development (HTTP only for localhost)
-:80 {
-    @localhost host localhost 127.0.0.1
-
-    handle @localhost {
-        encode gzip
-
-        handle /api/* {
-            reverse_proxy meet-api:8080
-        }
-
-        handle {
-            reverse_proxy meet-frontend:80
-        }
     }
 }
