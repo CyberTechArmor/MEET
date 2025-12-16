@@ -191,17 +191,17 @@ function VideoRoom() {
       {/* Screen Share Layout or Regular Video Grid */}
       {screenShareParticipant ? (
         // Screen share layout - main screen share with participant strip
-        <div className="h-full flex flex-col">
+        <div className="screen-share-layout h-full">
           {/* Main screen share area */}
-          <div className="flex-1 p-4 pb-2">
+          <div className="screen-share-main flex-1 p-4 pb-2 min-h-0">
             <ScreenShareView
               participant={screenShareParticipant.participant}
               isLocal={screenShareParticipant.isLocal}
             />
           </div>
 
-          {/* Participant strip at bottom */}
-          <div className="h-32 px-4 pb-4 flex gap-2 overflow-x-auto">
+          {/* Participant strip at bottom (or side in landscape) */}
+          <div className="screen-share-strip h-32 px-4 pb-24 flex gap-2 overflow-x-auto">
             {/* Local participant */}
             {localParticipant && (
               <div className="h-full aspect-video flex-shrink-0 rounded-xl overflow-hidden">

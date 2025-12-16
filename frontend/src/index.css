@@ -306,6 +306,153 @@ body {
   }
 }
 
+/* Mobile landscape orientation - optimized for screen sharing */
+@media (max-height: 500px) and (orientation: landscape) {
+  .video-grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    padding: 8px;
+    padding-bottom: 70px;
+    overflow: hidden;
+    gap: 8px;
+  }
+
+  .video-grid > * {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    max-height: calc(100vh - 78px);
+  }
+
+  /* 1 participant in landscape - fill screen */
+  .video-grid-1 {
+    padding: 0;
+    padding-bottom: 60px;
+  }
+
+  .video-grid-1 > * {
+    width: 100% !important;
+    height: calc(100vh - 60px) !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+  }
+
+  /* 2 participants in landscape - side by side */
+  .video-grid-2 {
+    flex-direction: row !important;
+    padding-bottom: 70px;
+  }
+
+  .video-grid-2 > * {
+    flex: 1;
+    height: calc(100vh - 78px);
+    max-height: calc(100vh - 78px);
+  }
+
+  /* 3-4 participants in landscape - 2x2 grid */
+  .video-grid-4 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    max-width: none;
+    max-height: calc(100vh - 70px);
+    height: calc(100vh - 70px);
+    padding-bottom: 0;
+    margin-bottom: 70px;
+  }
+
+  /* 5-6 participants in landscape - 3x2 grid */
+  .video-grid-6 {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: 1fr 1fr;
+    max-width: none;
+    max-height: calc(100vh - 70px);
+    height: calc(100vh - 70px);
+    padding-bottom: 0;
+    margin-bottom: 70px;
+  }
+
+  /* 7+ participants in landscape - 4x2 grid */
+  .video-grid-9 {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: 1fr 1fr;
+    max-width: none;
+    max-height: calc(100vh - 70px);
+    height: calc(100vh - 70px);
+    padding-bottom: 0;
+    margin-bottom: 70px;
+    overflow: hidden;
+  }
+
+  /* Smaller controls in landscape */
+  .controls-container {
+    transform-origin: bottom center;
+  }
+
+  /* PiP adjustments for landscape */
+  .pip-container {
+    bottom: 70px !important;
+  }
+}
+
+/* Screen share layout classes for landscape */
+.screen-share-layout {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.screen-share-main {
+  flex: 1;
+  min-height: 0;
+}
+
+.screen-share-strip {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px;
+}
+
+/* Screen share in landscape - side panel layout */
+@media (max-height: 500px) and (orientation: landscape) {
+  .screen-share-layout {
+    flex-direction: row !important;
+  }
+
+  .screen-share-main {
+    flex: 1;
+    height: 100%;
+    padding: 8px;
+    padding-right: 4px;
+  }
+
+  .screen-share-strip {
+    flex-direction: column !important;
+    width: 140px !important;
+    min-width: 140px;
+    height: calc(100vh - 70px) !important;
+    overflow-y: auto !important;
+    overflow-x: hidden !important;
+    padding: 8px;
+    padding-left: 4px;
+    padding-bottom: 70px;
+  }
+
+  .screen-share-strip > * {
+    width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 16 / 9;
+    flex-shrink: 0;
+  }
+}
+
 /* Tooltip styles */
 .tooltip {
   position: relative;
