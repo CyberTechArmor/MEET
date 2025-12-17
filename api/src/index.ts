@@ -925,10 +925,11 @@ app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: R
 
 const wss = new WebSocketServer({ server, path: '/ws/admin' });
 
-// Store authenticated WebSocket connections
-interface AuthenticatedWs extends WebSocket {
-  isAuthenticated?: boolean;
-  token?: string;
+// Store authenticated WebSocket connections with custom properties
+interface AuthenticatedWs {
+  ws: WebSocket;
+  isAuthenticated: boolean;
+  token: string | null;
 }
 
 const authenticatedClients = new Set<AuthenticatedWs>();
@@ -937,8 +938,8 @@ const authenticatedClients = new Set<AuthenticatedWs>();
 function broadcastToAdmins(type: string, data: unknown): void {
   const message = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
   authenticatedClients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN && client.isAuthenticated) {
-      client.send(message);
+    if (client.ws.readyState === WebSocket.OPEN && client.isAuthenticated) {
+      client.ws.send(message);
     }
   });
 }
@@ -1039,10 +1040,15 @@ async function getAdminData(): Promise<{
 }
 
 // WebSocket connection handler
-wss.on('connection', (ws: AuthenticatedWs) => {
-  console.log('WebSocket client connected');
+wss.on('connection', (ws: WebSocket) => {
+  // Create client wrapper
+  const client: AuthenticatedWs = {
+    ws,
+    isAuthenticated: false,
+    token: null,
+  };
 
-  ws.on('message', async (messageData) => {
+  ws.on('message', async (messageData: Buffer) => {
     try {
       const message = JSON.parse(messageData.toString());
 
@@ -1053,23 +1059,21 @@ wss.on('connection', (ws: AuthenticatedWs) => {
         // Check if it's a valid session token
         const session = adminSessions.get(token);
         if (session && session.expiresAt > new Date()) {
-          ws.isAuthenticated = true;
-          ws.token = token;
-          authenticatedClients.add(ws);
+          client.isAuthenticated = true;
+          client.token = token;
+          authenticatedClients.add(client);
 
-          // Send initial data
+          // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-          console.log('WebSocket client authenticated');
         } else if (adminPassword && token === adminPassword) {
-          ws.isAuthenticated = true;
-          ws.token = token;
-          authenticatedClients.add(ws);
+          client.isAuthenticated = true;
+          client.token = token;
+          authenticatedClients.add(client);
 
-          // Send initial data
+          // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-          console.log('WebSocket client authenticated via password');
         } else {
           ws.send(JSON.stringify({ type: 'error', error: 'Invalid token' }));
           ws.close();
@@ -1077,24 +1081,21 @@ wss.on('connection', (ws: AuthenticatedWs) => {
       }
 
       // Handle refresh request
-      if (message.type === 'refresh' && ws.isAuthenticated) {
+      if (message.type === 'refresh' && client.isAuthenticated) {
         const data = await getAdminData();
         ws.send(JSON.stringify({ type: 'update', data, timestamp: new Date().toISOString() }));
       }
-    } catch (error) {
-      console.error('WebSocket message error:', error);
+    } catch {
       ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
     }
   });
 
   ws.on('close', () => {
-    authenticatedClients.delete(ws);
-    console.log('WebSocket client disconnected');
+    authenticatedClients.delete(client);
   });
 
-  ws.on('error', (error) => {
-    console.error('WebSocket error:', error);
-    authenticatedClients.delete(ws);
+  ws.on('error', () => {
+    authenticatedClients.delete(client);
   });
 
   // Send authentication required message

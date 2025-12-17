@@ -91,7 +91,10 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     }
   }, [isAuthenticated, isSessionValid, logout]);
 
-  // Load data via REST API (fallback)
+  // Initial data loaded flag
+  const [initialDataLoaded, setInitialDataLoaded] = useState(false);
+
+  // Load data via REST API (primary method for initial load)
   const loadData = useCallback(async (showLoading = true) => {
     if (!token) return;
 
@@ -112,16 +115,15 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setRooms(roomsData.rooms);
       setApiKeys(keysData.apiKeys);
       setWebhooks(webhooksData.webhooks);
+      setInitialDataLoaded(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
-      if (showLoading) {
-        setLoading(false);
-      }
+      setLoading(false);
     }
   }, [token, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
 
-  // WebSocket connection for real-time updates
+  // WebSocket connection for real-time updates only (not initial load)
   const connectWebSocket = useCallback(() => {
     if (!token || wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -143,18 +145,20 @@ function AdminPanel({ onClose }: AdminPanelProps) {
         if (message.type === 'auth_required') {
           // Server is ready for auth
           ws.send(JSON.stringify({ type: 'auth', token }));
-        } else if (message.type === 'init' || message.type === 'update') {
-          // Update data from WebSocket
+        } else if (message.type === 'init') {
+          // WebSocket authenticated, just mark as connected
+          // Initial data already loaded via REST API
+          setWsState('connected');
+        } else if (message.type === 'update') {
+          // Real-time update from server - update data
           const { data } = message;
           if (data.stats) setStats(data.stats);
           if (data.rooms) setRooms(data.rooms);
           if (data.apiKeys) setApiKeys(data.apiKeys);
           if (data.webhooks) setWebhooks(data.webhooks);
-          setWsState('connected');
-          setLoading(false);
         } else if (message.type === 'error') {
           console.error('WebSocket error:', message.error);
-          setError(message.error);
+          // Don't set error state for WebSocket issues - REST API is primary
         }
       } catch (err) {
         console.error('WebSocket message parse error:', err);
@@ -166,11 +170,11 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setWsState('disconnected');
       wsRef.current = null;
 
-      // Attempt to reconnect after 3 seconds
-      if (token && isAuthenticated) {
+      // Attempt to reconnect after 5 seconds (only if still authenticated)
+      if (token && isAuthenticated && initialDataLoaded) {
         reconnectTimeoutRef.current = setTimeout(() => {
           connectWebSocket();
-        }, 3000);
+        }, 5000);
       }
     };
 
@@ -178,12 +182,18 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       console.error('WebSocket error:', err);
       setWsState('disconnected');
     };
-  }, [token, isAuthenticated, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
+  }, [token, isAuthenticated, initialDataLoaded, setStats, setRooms, setApiKeys, setWebhooks]);
 
-  // Connect WebSocket when authenticated
+  // Load initial data via REST API when authenticated
   useEffect(() => {
-    if (isAuthenticated && token) {
-      setLoading(true);
+    if (isAuthenticated && token && !initialDataLoaded) {
+      loadData(true);
+    }
+  }, [isAuthenticated, token, initialDataLoaded, loadData]);
+
+  // Connect WebSocket for real-time updates after initial data is loaded
+  useEffect(() => {
+    if (isAuthenticated && token && initialDataLoaded) {
       connectWebSocket();
     }
 
@@ -198,7 +208,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
         reconnectTimeoutRef.current = null;
       }
     };
-  }, [isAuthenticated, token, connectWebSocket]);
+  }, [isAuthenticated, token, initialDataLoaded, connectWebSocket]);
 
   // Request refresh via WebSocket
   const requestRefresh = useCallback(() => {
@@ -239,6 +249,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     if (token) {
       await adminLogout(token);
     }
+    setInitialDataLoaded(false);
     logout();
   };
 
@@ -945,10 +956,63 @@ function AdminPanel({ onClose }: AdminPanelProps) {
               <div className="space-y-6">
                 <div className="glass rounded-xl overflow-hidden" style={{ height: 'calc(100vh - 250px)' }}>
                   <iframe
-                    src={`https://petstore.swagger.io/?url=${encodeURIComponent(getOpenApiUrl())}`}
+                    srcDoc={`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MEET API Documentation</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.10.0/swagger-ui.css" />
+  <style>
+    body { margin: 0; padding: 0; background: #1a1a1a; }
+    .swagger-ui { background: #1a1a1a; }
+    .swagger-ui .topbar { display: none; }
+    .swagger-ui .info .title { color: #fff; }
+    .swagger-ui .info .description { color: #ccc; }
+    .swagger-ui .opblock-tag { color: #fff; border-bottom-color: #444; }
+    .swagger-ui .opblock .opblock-summary-operation-id, .swagger-ui .opblock .opblock-summary-path, .swagger-ui .opblock .opblock-summary-path__deprecated { color: #ccc; }
+    .swagger-ui .scheme-container { background: #2d2d2d; box-shadow: none; }
+    .swagger-ui section.models { border-color: #444; }
+    .swagger-ui section.models h4 { color: #fff; }
+    .swagger-ui .model-title { color: #fff; }
+    .swagger-ui .model { color: #ccc; }
+    .swagger-ui .prop-type { color: #86b300; }
+    .swagger-ui table thead tr th { color: #ccc; border-bottom-color: #444; }
+    .swagger-ui table tbody tr td { color: #ccc; }
+    .swagger-ui .responses-inner h4, .swagger-ui .responses-inner h5 { color: #fff; }
+    .swagger-ui .response-col_status { color: #86b300; }
+    .swagger-ui .parameter__name { color: #fff; }
+    .swagger-ui .parameter__type { color: #86b300; }
+    .swagger-ui .tab li { color: #ccc; }
+    .swagger-ui .opblock-description-wrapper p { color: #ccc; }
+    .swagger-ui .btn { border-color: #555; color: #fff; }
+    .swagger-ui select { background: #2d2d2d; color: #fff; border-color: #555; }
+    .swagger-ui input[type=text], .swagger-ui textarea { background: #2d2d2d; color: #fff; border-color: #555; }
+    .swagger-ui .markdown p, .swagger-ui .markdown pre { color: #ccc; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5.10.0/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = () => {
+      SwaggerUIBundle({
+        url: '${getOpenApiUrl()}',
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        layout: 'BaseLayout',
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 1,
+        docExpansion: 'list',
+        filter: true,
+        tryItOutEnabled: true,
+      });
+    };
+  </script>
+</body>
+</html>`}
                     title="API Documentation"
                     className="w-full h-full border-0"
-                    sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
                   />
                 </div>
                 <div className="glass rounded-xl p-4">
