@@ -78,6 +78,47 @@ const webhooks: Map<string, Webhook> = new Map();
 const adminSessions: Map<string, AdminSession> = new Map();
 const roomMetadata: Map<string, RoomMetadata> = new Map();
 
+// Server settings
+interface ServerSettings {
+  publicAccessEnabled: boolean;
+  maxParticipantsPerMeeting: number; // 0 = unlimited
+  maxConcurrentMeetings: number; // 0 = unlimited
+  recommendedMaxParticipants: number;
+  recommendedMaxMeetings: number;
+}
+
+// Calculate recommended limits based on available resources
+function getRecommendedLimits(): { participants: number; meetings: number } {
+  // Estimate based on typical server resources
+  // Each participant uses ~2-5 Mbps bandwidth and ~100MB RAM
+  // These are conservative estimates for a typical cloud VM
+  const estimatedRAMGB = 4; // Assume 4GB available for meetings
+  const estimatedBandwidthMbps = 100; // Assume 100 Mbps
+
+  // ~100MB per participant, so 4GB = ~40 participants total
+  // ~3 Mbps per participant (average), so 100 Mbps = ~33 participants total
+  const byRAM = Math.floor(estimatedRAMGB * 1024 / 100);
+  const byBandwidth = Math.floor(estimatedBandwidthMbps / 3);
+
+  const recommendedParticipants = Math.min(byRAM, byBandwidth, 50); // Cap at 50 per meeting
+  const recommendedMeetings = Math.max(5, Math.floor(recommendedParticipants / 10)); // ~10 participants per meeting avg
+
+  return {
+    participants: recommendedParticipants,
+    meetings: recommendedMeetings,
+  };
+}
+
+const recommendedLimits = getRecommendedLimits();
+
+const serverSettings: ServerSettings = {
+  publicAccessEnabled: true,
+  maxParticipantsPerMeeting: 0, // 0 = unlimited
+  maxConcurrentMeetings: 0, // 0 = unlimited
+  recommendedMaxParticipants: recommendedLimits.participants,
+  recommendedMaxMeetings: recommendedLimits.meetings,
+};
+
 // Webhook event types
 const WEBHOOK_EVENTS = [
   'room.created',
@@ -534,6 +575,86 @@ Configure webhooks to receive real-time notifications for events like:
         },
       },
     },
+    '/api/admin/settings': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Get server settings',
+        description: 'Retrieve current server settings and recommended limits',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Server settings',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    settings: {
+                      type: 'object',
+                      properties: {
+                        publicAccessEnabled: { type: 'boolean', description: 'Whether public (non-API) access is allowed' },
+                        maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited' },
+                        maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited' },
+                      },
+                    },
+                    recommendations: {
+                      type: 'object',
+                      properties: {
+                        maxParticipantsPerMeeting: { type: 'integer', description: 'Recommended based on server resources' },
+                        maxConcurrentMeetings: { type: 'integer', description: 'Recommended based on server resources' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        tags: ['Admin'],
+        summary: 'Update server settings',
+        description: 'Update server settings. Set values to 0 for unlimited.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  publicAccessEnabled: { type: 'boolean', description: 'Enable/disable public access (API access always works)' },
+                  maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
+                  maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Settings updated successfully',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    settings: {
+                      type: 'object',
+                      properties: {
+                        publicAccessEnabled: { type: 'boolean' },
+                        maxParticipantsPerMeeting: { type: 'integer' },
+                        maxConcurrentMeetings: { type: 'integer' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     '/api/rooms': {
       get: {
         tags: ['Rooms'],
@@ -932,6 +1053,16 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
   try {
     const { roomName, participantName, deviceId } = req.body;
 
+    // Check if request is from API key or public access
+    const apiKeyHeader = req.headers['x-api-key'] as string;
+    const isApiAccess = !!apiKeyHeader;
+
+    // Check public access setting (API access is always allowed)
+    if (!isApiAccess && !serverSettings.publicAccessEnabled) {
+      res.status(403).json({ error: 'Public access is currently disabled. Please use API key authentication.' });
+      return;
+    }
+
     if (!roomName || typeof roomName !== 'string') {
       res.status(400).json({ error: 'roomName is required' });
       return;
@@ -957,14 +1088,43 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
 
     let isHost = false;
     let isNewRoom = false;
+    let currentParticipants = 0;
+    let allRooms: { name: string; numParticipants?: number }[] = [];
+
     try {
-      const rooms = await roomService.listRooms([sanitizedRoomName]);
-      isNewRoom = rooms.length === 0;
-      isHost = isNewRoom || (rooms[0]?.numParticipants ?? 0) === 0;
+      allRooms = await roomService.listRooms();
+      const targetRoom = allRooms.find(r => r.name === sanitizedRoomName);
+      isNewRoom = !targetRoom;
+      isHost = isNewRoom || (targetRoom?.numParticipants ?? 0) === 0;
+      currentParticipants = targetRoom?.numParticipants ?? 0;
     } catch (err) {
       console.warn('Could not check room status:', err);
       isHost = true;
       isNewRoom = true;
+    }
+
+    // Check concurrent meetings limit (only for new rooms)
+    if (isNewRoom && serverSettings.maxConcurrentMeetings > 0) {
+      if (allRooms.length >= serverSettings.maxConcurrentMeetings) {
+        res.status(503).json({
+          error: 'Maximum number of concurrent meetings reached',
+          limit: serverSettings.maxConcurrentMeetings,
+          current: allRooms.length,
+        });
+        return;
+      }
+    }
+
+    // Check participants per meeting limit
+    if (!isNewRoom && serverSettings.maxParticipantsPerMeeting > 0) {
+      if (currentParticipants >= serverSettings.maxParticipantsPerMeeting) {
+        res.status(503).json({
+          error: 'Maximum number of participants for this meeting reached',
+          limit: serverSettings.maxParticipantsPerMeeting,
+          current: currentParticipants,
+        });
+        return;
+      }
     }
 
     const token = new AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, {
@@ -1151,6 +1311,61 @@ app.get('/api/admin/stats', authenticateApiKeyOrAdmin, async (_req: AuthRequest,
       version: API_VERSION,
     });
   }
+});
+
+// Get server settings
+app.get('/api/admin/settings', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json({
+    settings: {
+      publicAccessEnabled: serverSettings.publicAccessEnabled,
+      maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
+      maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+    },
+    recommendations: {
+      maxParticipantsPerMeeting: serverSettings.recommendedMaxParticipants,
+      maxConcurrentMeetings: serverSettings.recommendedMaxMeetings,
+    },
+  });
+});
+
+// Update server settings
+interface UpdateSettingsRequest {
+  publicAccessEnabled?: boolean;
+  maxParticipantsPerMeeting?: number;
+  maxConcurrentMeetings?: number;
+}
+
+app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, UpdateSettingsRequest>, res: Response) => {
+  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings } = req.body;
+
+  if (publicAccessEnabled !== undefined) {
+    serverSettings.publicAccessEnabled = publicAccessEnabled;
+  }
+
+  if (maxParticipantsPerMeeting !== undefined) {
+    if (maxParticipantsPerMeeting < 0) {
+      res.status(400).json({ error: 'maxParticipantsPerMeeting must be 0 (unlimited) or a positive number' });
+      return;
+    }
+    serverSettings.maxParticipantsPerMeeting = maxParticipantsPerMeeting;
+  }
+
+  if (maxConcurrentMeetings !== undefined) {
+    if (maxConcurrentMeetings < 0) {
+      res.status(400).json({ error: 'maxConcurrentMeetings must be 0 (unlimited) or a positive number' });
+      return;
+    }
+    serverSettings.maxConcurrentMeetings = maxConcurrentMeetings;
+  }
+
+  res.json({
+    success: true,
+    settings: {
+      publicAccessEnabled: serverSettings.publicAccessEnabled,
+      maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
+      maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+    },
+  });
 });
 
 // List active rooms

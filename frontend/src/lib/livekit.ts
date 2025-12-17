@@ -1027,3 +1027,60 @@ export async function testWebhook(token: string, webhookId: string): Promise<Web
   return response.json();
 }
 
+// Server settings types and functions
+export interface ServerSettings {
+  publicAccessEnabled: boolean;
+  maxParticipantsPerMeeting: number;
+  maxConcurrentMeetings: number;
+}
+
+export interface ServerSettingsResponse {
+  settings: ServerSettings;
+  recommendations: {
+    maxParticipantsPerMeeting: number;
+    maxConcurrentMeetings: number;
+  };
+}
+
+/**
+ * Get server settings
+ */
+export async function getServerSettings(token: string): Promise<ServerSettingsResponse> {
+  const response = await fetch(`${API_URL}/api/admin/settings`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get settings' }));
+    throw new Error(error.error || 'Failed to get settings');
+  }
+
+  return response.json();
+}
+
+/**
+ * Update server settings
+ */
+export async function updateServerSettings(
+  token: string,
+  settings: Partial<ServerSettings>
+): Promise<{ success: boolean; settings: ServerSettings }> {
+  const response = await fetch(`${API_URL}/api/admin/settings`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify(settings),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
+    throw new Error(error.error || 'Failed to update settings');
+  }
+
+  return response.json();
+}
+

@@ -18,12 +18,14 @@ import {
   getJoinLink,
   formatRoomCode,
   updateRoomDisplayName,
+  getServerSettings,
+  updateServerSettings,
   WEBHOOK_EVENTS,
 } from '../lib/livekit';
-import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse } from '../lib/livekit';
+import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, ServerSettings } from '../lib/livekit';
 import type { RoomInfo } from '../stores/adminStore';
 
-type TabType = 'dashboard' | 'api-keys' | 'webhooks' | 'docs';
+type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
 
 interface AdminPanelProps {
   onClose: () => void;
@@ -86,6 +88,15 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   // Room display name editing state
   const [editingRoom, setEditingRoom] = useState<string | null>(null);
   const [editingDisplayName, setEditingDisplayName] = useState('');
+
+  // Settings state
+  const [settings, setSettings] = useState<ServerSettings | null>(null);
+  const [settingsRecommendations, setSettingsRecommendations] = useState<{
+    maxParticipantsPerMeeting: number;
+    maxConcurrentMeetings: number;
+  } | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   // Check session validity on mount
   useEffect(() => {
@@ -442,6 +453,42 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setEditingDisplayName('');
   };
 
+  // Load settings
+  const loadSettings = useCallback(async () => {
+    if (!token) return;
+    setSettingsLoading(true);
+    try {
+      const response = await getServerSettings(token);
+      setSettings(response.settings);
+      setSettingsRecommendations(response.recommendations);
+    } catch (err) {
+      console.error('Failed to load settings:', err);
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, [token]);
+
+  // Load settings when tab changes to settings
+  useEffect(() => {
+    if (activeTab === 'settings' && !settings && !settingsLoading) {
+      loadSettings();
+    }
+  }, [activeTab, settings, settingsLoading, loadSettings]);
+
+  // Handle settings update
+  const handleUpdateSettings = async (updates: Partial<ServerSettings>) => {
+    if (!token) return;
+    setSettingsSaving(true);
+    try {
+      const response = await updateServerSettings(token, updates);
+      setSettings(response.settings);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to update settings');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
+
   // Format uptime
   const formatUptime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -563,7 +610,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
         {/* Tabs */}
         <div className="flex gap-1 mt-4">
-          {(['dashboard', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
+          {(['dashboard', 'settings', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -743,6 +790,162 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Settings Tab */}
+            {activeTab === 'settings' && (
+              <div className="space-y-6">
+                {settingsLoading ? (
+                  <div className="flex items-center justify-center h-64">
+                    <div className="animate-spin h-8 w-8 border-4 border-meet-accent border-t-transparent rounded-full"></div>
+                  </div>
+                ) : settings ? (
+                  <>
+                    {/* Public Access */}
+                    <div className="glass rounded-xl p-6">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <h3 className="text-lg font-semibold text-meet-text-primary">Public Access</h3>
+                          <p className="text-sm text-meet-text-tertiary mt-1">
+                            When disabled, only API requests with valid API keys can create/join meetings. The public web interface will show an error.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleUpdateSettings({ publicAccessEnabled: !settings.publicAccessEnabled })}
+                          disabled={settingsSaving}
+                          className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors ${
+                            settings.publicAccessEnabled ? 'bg-meet-success' : 'bg-meet-bg-tertiary'
+                          } ${settingsSaving ? 'opacity-50' : ''}`}
+                        >
+                          <span
+                            className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                              settings.publicAccessEnabled ? 'translate-x-8' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                      <div className={`mt-2 text-sm font-medium ${settings.publicAccessEnabled ? 'text-meet-success' : 'text-meet-error'}`}>
+                        {settings.publicAccessEnabled ? 'Enabled - Anyone can use the public interface' : 'Disabled - API access only'}
+                      </div>
+                    </div>
+
+                    {/* Participants Per Meeting */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary">Participants per Meeting</h3>
+                      <p className="text-sm text-meet-text-tertiary mt-1 mb-4">
+                        Maximum number of participants allowed in a single meeting.
+                        {settingsRecommendations && (
+                          <span className="text-meet-accent ml-1">
+                            Recommended: {settingsRecommendations.maxParticipantsPerMeeting} based on server resources
+                          </span>
+                        )}
+                      </p>
+                      <div className="flex items-center gap-4">
+                        <select
+                          value={settings.maxParticipantsPerMeeting === 0 ? 'unlimited' : 'custom'}
+                          onChange={(e) => {
+                            if (e.target.value === 'unlimited') {
+                              handleUpdateSettings({ maxParticipantsPerMeeting: 0 });
+                            } else if (e.target.value === 'recommended' && settingsRecommendations) {
+                              handleUpdateSettings({ maxParticipantsPerMeeting: settingsRecommendations.maxParticipantsPerMeeting });
+                            }
+                          }}
+                          disabled={settingsSaving}
+                          className="bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                        >
+                          <option value="unlimited">Unlimited</option>
+                          <option value="recommended">Recommended ({settingsRecommendations?.maxParticipantsPerMeeting})</option>
+                          <option value="custom">Custom</option>
+                        </select>
+                        {settings.maxParticipantsPerMeeting > 0 && (
+                          <input
+                            type="number"
+                            value={settings.maxParticipantsPerMeeting}
+                            onChange={(e) => {
+                              const value = parseInt(e.target.value) || 0;
+                              if (value >= 0) {
+                                handleUpdateSettings({ maxParticipantsPerMeeting: value });
+                              }
+                            }}
+                            min="1"
+                            max="1000"
+                            disabled={settingsSaving}
+                            className="w-24 bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                          />
+                        )}
+                      </div>
+                      <div className="mt-2 text-sm text-meet-text-secondary">
+                        Current: {settings.maxParticipantsPerMeeting === 0 ? 'Unlimited' : `${settings.maxParticipantsPerMeeting} participants`}
+                      </div>
+                    </div>
+
+                    {/* Concurrent Meetings */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary">Concurrent Meetings</h3>
+                      <p className="text-sm text-meet-text-tertiary mt-1 mb-4">
+                        Maximum number of active meetings at the same time.
+                        {settingsRecommendations && (
+                          <span className="text-meet-accent ml-1">
+                            Recommended: {settingsRecommendations.maxConcurrentMeetings} based on server resources
+                          </span>
+                        )}
+                      </p>
+                      <div className="flex items-center gap-4">
+                        <select
+                          value={settings.maxConcurrentMeetings === 0 ? 'unlimited' : 'custom'}
+                          onChange={(e) => {
+                            if (e.target.value === 'unlimited') {
+                              handleUpdateSettings({ maxConcurrentMeetings: 0 });
+                            } else if (e.target.value === 'recommended' && settingsRecommendations) {
+                              handleUpdateSettings({ maxConcurrentMeetings: settingsRecommendations.maxConcurrentMeetings });
+                            }
+                          }}
+                          disabled={settingsSaving}
+                          className="bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                        >
+                          <option value="unlimited">Unlimited</option>
+                          <option value="recommended">Recommended ({settingsRecommendations?.maxConcurrentMeetings})</option>
+                          <option value="custom">Custom</option>
+                        </select>
+                        {settings.maxConcurrentMeetings > 0 && (
+                          <input
+                            type="number"
+                            value={settings.maxConcurrentMeetings}
+                            onChange={(e) => {
+                              const value = parseInt(e.target.value) || 0;
+                              if (value >= 0) {
+                                handleUpdateSettings({ maxConcurrentMeetings: value });
+                              }
+                            }}
+                            min="1"
+                            max="100"
+                            disabled={settingsSaving}
+                            className="w-24 bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                          />
+                        )}
+                      </div>
+                      <div className="mt-2 text-sm text-meet-text-secondary">
+                        Current: {settings.maxConcurrentMeetings === 0 ? 'Unlimited' : `${settings.maxConcurrentMeetings} concurrent meetings`}
+                      </div>
+                    </div>
+
+                    {/* Settings Info */}
+                    <div className="glass rounded-xl p-6 bg-meet-accent/5 border border-meet-accent/20">
+                      <h3 className="text-lg font-semibold text-meet-accent mb-2">About Settings</h3>
+                      <ul className="text-sm text-meet-text-secondary space-y-2">
+                        <li>• Settings take effect immediately for new connections</li>
+                        <li>• Existing meetings are not affected by changes</li>
+                        <li>• API access is always allowed regardless of Public Access setting</li>
+                        <li>• Set to 0 for unlimited (not recommended for production)</li>
+                      </ul>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-center text-meet-text-tertiary py-8">
+                    Failed to load settings. <button onClick={loadSettings} className="text-meet-accent hover:underline">Try again</button>
+                  </div>
+                )}
               </div>
             )}
 
