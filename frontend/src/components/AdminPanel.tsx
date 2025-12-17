@@ -30,7 +30,7 @@ interface AdminPanelProps {
 }
 
 // WebSocket connection state
-type WsConnectionState = 'disconnected' | 'connecting' | 'connected';
+type WsConnectionState = 'disconnected' | 'connecting' | 'connected' | 'polling';
 
 function AdminPanel({ onClose }: AdminPanelProps) {
   const {
@@ -60,6 +60,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const wsRef = useRef<WebSocket | null>(null);
   const [wsState, setWsState] = useState<WsConnectionState>('disconnected');
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const wsRetriesRef = useRef(0);
+  const maxWsRetries = 3;
 
   // API Key creation state
   const [newKeyName, setNewKeyName] = useState('');
@@ -123,66 +126,115 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     }
   }, [token, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
 
+  // Start polling as fallback for real-time updates
+  const startPolling = useCallback(() => {
+    if (pollingIntervalRef.current) return; // Already polling
+
+    console.log('Starting REST API polling for real-time updates');
+    setWsState('polling');
+    pollingIntervalRef.current = setInterval(() => {
+      if (token) {
+        loadData(false); // Load data without showing loading spinner
+      }
+    }, 5000); // Poll every 5 seconds
+  }, [token, loadData]);
+
+  // Stop polling
+  const stopPolling = useCallback(() => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  }, []);
+
   // WebSocket connection for real-time updates only (not initial load)
   const connectWebSocket = useCallback(() => {
     if (!token || wsRef.current?.readyState === WebSocket.OPEN) return;
 
+    // Check if we've exceeded max retries
+    if (wsRetriesRef.current >= maxWsRetries) {
+      console.log('Max WebSocket retries exceeded, falling back to polling');
+      startPolling();
+      return;
+    }
+
     setWsState('connecting');
     const wsUrl = getAdminWebSocketUrl();
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
 
-    ws.onopen = () => {
-      console.log('WebSocket connected, authenticating...');
-      // Send auth message
-      ws.send(JSON.stringify({ type: 'auth', token }));
-    };
+    try {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
+      ws.onopen = () => {
+        console.log('WebSocket connected, authenticating...');
+        wsRetriesRef.current = 0; // Reset retry counter on successful connection
+        stopPolling(); // Stop polling if WebSocket connects
+        // Send auth message
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      };
 
-        if (message.type === 'auth_required') {
-          // Server is ready for auth
-          ws.send(JSON.stringify({ type: 'auth', token }));
-        } else if (message.type === 'init') {
-          // WebSocket authenticated, just mark as connected
-          // Initial data already loaded via REST API
-          setWsState('connected');
-        } else if (message.type === 'update') {
-          // Real-time update from server - update data
-          const { data } = message;
-          if (data.stats) setStats(data.stats);
-          if (data.rooms) setRooms(data.rooms);
-          if (data.apiKeys) setApiKeys(data.apiKeys);
-          if (data.webhooks) setWebhooks(data.webhooks);
-        } else if (message.type === 'error') {
-          console.error('WebSocket error:', message.error);
-          // Don't set error state for WebSocket issues - REST API is primary
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+
+          if (message.type === 'auth_required') {
+            // Server is ready for auth
+            ws.send(JSON.stringify({ type: 'auth', token }));
+          } else if (message.type === 'init') {
+            // WebSocket authenticated, just mark as connected
+            // Initial data already loaded via REST API
+            setWsState('connected');
+            wsRetriesRef.current = 0;
+          } else if (message.type === 'update') {
+            // Real-time update from server - update data
+            const { data } = message;
+            if (data.stats) setStats(data.stats);
+            if (data.rooms) setRooms(data.rooms);
+            if (data.apiKeys) setApiKeys(data.apiKeys);
+            if (data.webhooks) setWebhooks(data.webhooks);
+          } else if (message.type === 'error') {
+            console.error('WebSocket error:', message.error);
+            // Don't set error state for WebSocket issues - REST API is primary
+          }
+        } catch (err) {
+          console.error('WebSocket message parse error:', err);
         }
-      } catch (err) {
-        console.error('WebSocket message parse error:', err);
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        setWsState('disconnected');
+        wsRef.current = null;
+        wsRetriesRef.current++;
+
+        // If exceeded retries, start polling
+        if (wsRetriesRef.current >= maxWsRetries) {
+          console.log('WebSocket failed, switching to polling');
+          startPolling();
+          return;
+        }
+
+        // Attempt to reconnect after delay
+        if (token) {
+          const delay = Math.min(5000 * wsRetriesRef.current, 15000); // Exponential backoff up to 15s
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket();
+          }, delay);
+        }
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        // onclose will be called after this
+      };
+    } catch (err) {
+      console.error('Failed to create WebSocket:', err);
+      wsRetriesRef.current++;
+      if (wsRetriesRef.current >= maxWsRetries) {
+        startPolling();
       }
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      setWsState('disconnected');
-      wsRef.current = null;
-
-      // Attempt to reconnect after 5 seconds (only if still authenticated)
-      if (token && isAuthenticated && initialDataLoaded) {
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connectWebSocket();
-        }, 5000);
-      }
-    };
-
-    ws.onerror = (err) => {
-      console.error('WebSocket error:', err);
-      setWsState('disconnected');
-    };
-  }, [token, isAuthenticated, initialDataLoaded, setStats, setRooms, setApiKeys, setWebhooks]);
+    }
+  }, [token, setStats, setRooms, setApiKeys, setWebhooks, startPolling, stopPolling]);
 
   // Load initial data via REST API when authenticated
   useEffect(() => {
@@ -194,11 +246,12 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   // Connect WebSocket for real-time updates after initial data is loaded
   useEffect(() => {
     if (isAuthenticated && token && initialDataLoaded) {
+      wsRetriesRef.current = 0; // Reset retries when starting fresh
       connectWebSocket();
     }
 
     return () => {
-      // Cleanup WebSocket on unmount
+      // Cleanup WebSocket and polling on unmount
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
@@ -206,6 +259,10 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
+      }
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
       }
     };
   }, [isAuthenticated, token, initialDataLoaded, connectWebSocket]);
@@ -246,6 +303,11 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    wsRetriesRef.current = 0;
     if (token) {
       await adminLogout(token);
     }
@@ -456,15 +518,19 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             )}
             <span className={`text-xs flex items-center gap-1 ${
               wsState === 'connected' ? 'text-meet-success' :
+              wsState === 'polling' ? 'text-blue-400' :
               wsState === 'connecting' ? 'text-yellow-500' :
               'text-meet-error'
             }`}>
               <span className={`w-2 h-2 rounded-full ${
                 wsState === 'connected' ? 'bg-meet-success animate-pulse' :
+                wsState === 'polling' ? 'bg-blue-400 animate-pulse' :
                 wsState === 'connecting' ? 'bg-yellow-500 animate-pulse' :
                 'bg-meet-error'
               }`}></span>
-              {wsState === 'connected' ? 'Live' : wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
+              {wsState === 'connected' ? 'Live' :
+               wsState === 'polling' ? 'Polling' :
+               wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
             </span>
           </div>
           <div className="flex items-center gap-4">
