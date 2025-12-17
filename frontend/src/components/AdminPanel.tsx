@@ -1228,23 +1228,23 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             {activeTab === 'docs' && (
               <div className="space-y-6">
                 {/* Sub-tabs */}
-                <div className="flex gap-2">
+                <div className="glass rounded-xl p-1 inline-flex gap-1">
                   <button
                     onClick={() => setDocsSubTab('api')}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-smooth ${
+                    className={`px-6 py-2.5 rounded-lg text-sm font-medium transition-smooth ${
                       docsSubTab === 'api'
-                        ? 'bg-meet-bg-tertiary text-meet-text-primary'
-                        : 'text-meet-text-secondary hover:text-meet-text-primary'
+                        ? 'bg-meet-accent text-meet-bg'
+                        : 'text-meet-text-secondary hover:text-meet-text-primary hover:bg-meet-bg-tertiary'
                     }`}
                   >
                     API Reference
                   </button>
                   <button
                     onClick={() => setDocsSubTab('iframe')}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-smooth ${
+                    className={`px-6 py-2.5 rounded-lg text-sm font-medium transition-smooth ${
                       docsSubTab === 'iframe'
-                        ? 'bg-meet-bg-tertiary text-meet-text-primary'
-                        : 'text-meet-text-secondary hover:text-meet-text-primary'
+                        ? 'bg-meet-accent text-meet-bg'
+                        : 'text-meet-text-secondary hover:text-meet-text-primary hover:bg-meet-bg-tertiary'
                     }`}
                   >
                     Iframe Integration
@@ -1340,7 +1340,164 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                 {docsSubTab === 'iframe' && (
                   <div className="glass rounded-xl p-6 overflow-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
                     <div className="prose prose-invert max-w-none">
-                      <h2 className="text-2xl font-bold text-meet-text-primary mb-4">Iframe Integration Guide</h2>
+                      <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-2xl font-bold text-meet-text-primary">Iframe Integration Guide</h2>
+                        <button
+                          onClick={() => {
+                            const markdown = `# MEET Iframe Integration Guide
+
+Embed MEET video conferencing into your application using iframes. This is the simplest integration method and requires minimal setup.
+
+## Quick Start
+
+\`\`\`html
+<iframe
+  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  allow="camera; microphone; display-capture; autoplay"
+  style="width: 100%; height: 600px; border: none;"
+></iframe>
+\`\`\`
+
+## URL Parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| \`room\` | Yes | Room code/ID to join |
+| \`name\` | No | Pre-filled participant name |
+| \`autojoin\` | No | Auto-join when both room and name provided (true/false) |
+| \`quality\` | No | Video quality: auto, high, max, balanced, low |
+
+## Integration Steps
+
+1. **Create an API Key**
+   Go to the Admin Panel > API Keys tab and create a new API key with appropriate permissions.
+
+2. **Create a Room (Optional)**
+   Use the API to create rooms programmatically with custom IDs:
+   \`\`\`
+   POST /api/rooms
+   {
+     "roomName": "my-meeting-123",
+     "displayName": "Team Standup",
+     "maxParticipants": 10
+   }
+   \`\`\`
+
+3. **Embed the Iframe**
+   Add the iframe to your application with the room code.
+
+## Required Iframe Permissions
+
+\`\`\`html
+allow="camera; microphone; display-capture; autoplay"
+\`\`\`
+
+- \`camera\` - Access to user's camera
+- \`microphone\` - Access to user's microphone
+- \`display-capture\` - Screen sharing capability
+- \`autoplay\` - Auto-play audio/video streams
+
+## JavaScript Integration
+
+\`\`\`javascript
+class MeetIntegration {
+  constructor(apiKey, serverUrl = '${window.location.origin}') {
+    this.apiKey = apiKey;
+    this.serverUrl = serverUrl;
+  }
+
+  // Create a new meeting room
+  async createMeeting(options = {}) {
+    const response = await fetch(\`\${this.serverUrl}/api/rooms\`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': this.apiKey
+      },
+      body: JSON.stringify({
+        roomName: options.roomId || \`meeting-\${Date.now()}\`,
+        displayName: options.displayName || 'Video Meeting',
+        maxParticipants: options.maxParticipants || 100
+      })
+    });
+    return response.json();
+  }
+
+  // Generate join URL
+  getJoinUrl(roomName, participantName) {
+    const params = new URLSearchParams({ room: roomName });
+    if (participantName) params.set('name', participantName);
+    return \`\${this.serverUrl}/?\${params.toString()}\`;
+  }
+
+  // Embed meeting in a container
+  embedMeeting(containerId, roomName, participantName) {
+    const container = document.getElementById(containerId);
+    const iframe = document.createElement('iframe');
+    iframe.src = this.getJoinUrl(roomName, participantName);
+    iframe.allow = 'camera; microphone; display-capture; autoplay';
+    iframe.allowFullscreen = true;
+    iframe.style.cssText = 'width: 100%; height: 100%; border: none;';
+    container.innerHTML = '';
+    container.appendChild(iframe);
+    return iframe;
+  }
+}
+
+// Usage
+const meet = new MeetIntegration('your-api-key');
+const meeting = await meet.createMeeting({ roomId: 'standup-123' });
+meet.embedMeeting('meeting-container', meeting.room.name, 'John');
+\`\`\`
+
+## React Component Example
+
+\`\`\`jsx
+function MeetEmbed({ roomId, participantName }) {
+  const [isLoading, setIsLoading] = useState(true);
+  const meetUrl = \`${window.location.origin}/?room=\${roomId}\${
+    participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
+  }\`;
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '600px' }}>
+      {isLoading && <div>Loading...</div>}
+      <iframe
+        src={meetUrl}
+        allow="camera; microphone; display-capture; autoplay"
+        allowFullScreen
+        onLoad={() => setIsLoading(false)}
+        style={{ width: '100%', height: '100%', border: 'none' }}
+      />
+    </div>
+  );
+}
+\`\`\`
+
+## Troubleshooting
+
+- **Camera/Microphone not working:** Ensure iframe has correct \`allow\` attributes and page is served over HTTPS.
+- **Iframe not loading:** Check browser console for CSP errors. Verify CORS is configured properly.
+- **Room not found:** Rooms are created on first join unless pre-created via API. Check room name uses only alphanumeric characters, hyphens, and underscores.
+`;
+                            const blob = new Blob([markdown], { type: 'text/markdown' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = 'MEET_Iframe_Integration.md';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                          }}
+                          className="flex items-center gap-2 px-4 py-2 bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-medium rounded-lg transition-smooth text-sm"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                          </svg>
+                          Download as Markdown
+                        </button>
+                      </div>
                       <p className="text-meet-text-secondary mb-6">
                         Embed MEET video conferencing into your application using iframes. This is the simplest integration method and requires minimal setup.
                       </p>
