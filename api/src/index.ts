@@ -61,12 +61,19 @@ interface AdminSession {
   expiresAt: Date;
 }
 
+// Room metadata for display names
+interface RoomMetadata {
+  displayName: string;
+  createdAt: Date;
+}
+
 // Storage
 let adminPassword: string = ADMIN_PASSWORD;
 let isFirstLogin = !ADMIN_PASSWORD;
 const apiKeys: Map<string, ApiKey> = new Map();
 const webhooks: Map<string, Webhook> = new Map();
 const adminSessions: Map<string, AdminSession> = new Map();
+const roomMetadata: Map<string, RoomMetadata> = new Map();
 
 // Webhook event types
 const WEBHOOK_EVENTS = [
@@ -529,17 +536,61 @@ app.get('/api/rooms', authenticateApiKeyOrAdmin, async (_req: AuthRequest, res: 
   try {
     const rooms = await roomService.listRooms();
     res.json({
-      rooms: rooms.map(room => ({
-        name: room.name,
-        numParticipants: room.numParticipants,
-        createdAt: room.creationTime ? new Date(Number(room.creationTime) * 1000).toISOString() : null,
-        maxParticipants: room.maxParticipants,
-      })),
+      rooms: rooms.map(room => {
+        const metadata = roomMetadata.get(room.name);
+        return {
+          name: room.name,
+          displayName: metadata?.displayName || null,
+          numParticipants: room.numParticipants,
+          createdAt: room.creationTime ? new Date(Number(room.creationTime) * 1000).toISOString() : null,
+          maxParticipants: room.maxParticipants,
+        };
+      }),
       total: rooms.length,
     });
   } catch (error) {
     console.error('List rooms error:', error);
     res.status(500).json({ error: 'Failed to list rooms' });
+  }
+});
+
+// Update room display name
+interface UpdateRoomRequest {
+  displayName?: string;
+}
+
+app.put('/api/rooms/:roomName', authenticateApiKeyOrAdmin, async (req: Request<{ roomName: string }, object, UpdateRoomRequest>, res: Response) => {
+  const { roomName } = req.params;
+  const { displayName } = req.body;
+
+  try {
+    // Verify room exists
+    const rooms = await roomService.listRooms([roomName]);
+    if (rooms.length === 0) {
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    // Update or create metadata
+    const existing = roomMetadata.get(roomName);
+    if (displayName !== undefined) {
+      roomMetadata.set(roomName, {
+        displayName: displayName || '',
+        createdAt: existing?.createdAt || new Date(),
+      });
+    }
+
+    const metadata = roomMetadata.get(roomName);
+    res.json({
+      name: roomName,
+      displayName: metadata?.displayName || null,
+      numParticipants: rooms[0].numParticipants,
+      createdAt: rooms[0].creationTime ? new Date(Number(rooms[0].creationTime) * 1000).toISOString() : null,
+      maxParticipants: rooms[0].maxParticipants,
+    });
+  } catch (error) {
+    console.error('Update room error:', error);
+    res.status(500).json({ error: 'Failed to update room' });
   }
 });
 

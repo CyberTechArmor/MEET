@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAdminStore } from '../stores/adminStore';
 import {
   adminLogin,
@@ -14,15 +14,21 @@ import {
   deleteWebhook,
   testWebhook,
   getOpenApiUrl,
+  getJoinLink,
+  formatRoomCode,
+  updateRoomDisplayName,
   WEBHOOK_EVENTS,
 } from '../lib/livekit';
-import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse } from '../lib/livekit';
+import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, RoomInfo } from '../lib/livekit';
 
 type TabType = 'dashboard' | 'api-keys' | 'webhooks' | 'docs';
 
 interface AdminPanelProps {
   onClose: () => void;
 }
+
+// Polling interval for real-time updates (5 seconds)
+const POLL_INTERVAL = 5000;
 
 function AdminPanel({ onClose }: AdminPanelProps) {
   const {
@@ -48,6 +54,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // API Key creation state
   const [newKeyName, setNewKeyName] = useState('');
@@ -65,6 +72,13 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const [createdWebhook, setCreatedWebhook] = useState<CreateWebhookResponse | null>(null);
   const [testingWebhook, setTestingWebhook] = useState<string | null>(null);
 
+  // Copy feedback state
+  const [copiedRoom, setCopiedRoom] = useState<string | null>(null);
+
+  // Room display name editing state
+  const [editingRoom, setEditingRoom] = useState<string | null>(null);
+  const [editingDisplayName, setEditingDisplayName] = useState('');
+
   // Check session validity on mount
   useEffect(() => {
     if (isAuthenticated && !isSessionValid()) {
@@ -73,10 +87,12 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   }, [isAuthenticated, isSessionValid, logout]);
 
   // Load data when authenticated
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (showLoading = true) => {
     if (!token) return;
 
-    setLoading(true);
+    if (showLoading) {
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -94,13 +110,33 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
-      setLoading(false);
+      if (showLoading) {
+        setLoading(false);
+      }
     }
   }, [token, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
 
+  // Initial data load
   useEffect(() => {
     if (isAuthenticated && token) {
-      loadData();
+      loadData(true);
+    }
+  }, [isAuthenticated, token, loadData]);
+
+  // Real-time polling for data updates
+  useEffect(() => {
+    if (isAuthenticated && token) {
+      // Start polling
+      pollIntervalRef.current = setInterval(() => {
+        loadData(false); // Don't show loading indicator for polls
+      }, POLL_INTERVAL);
+
+      return () => {
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      };
     }
   }, [isAuthenticated, token, loadData]);
 
@@ -120,6 +156,10 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
   // Handle logout
   const handleLogout = async () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
     if (token) {
       await adminLogout(token);
     }
@@ -136,7 +176,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setCreatedKey(key);
       setNewKeyName('');
       setNewKeyPermissions(['read']);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create API key');
     }
@@ -148,7 +188,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await revokeApiKey(token, keyId);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke API key');
     }
@@ -170,7 +210,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setCreatedWebhook(webhook);
       setWebhookForm({ name: '', url: '', events: [], enabled: true });
       setShowWebhookForm(false);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create webhook');
     }
@@ -182,7 +222,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await updateWebhook(token, webhook.id, { enabled: !webhook.enabled });
-      await loadData();
+      await loadData(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update webhook');
     }
@@ -194,7 +234,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await deleteWebhook(token, webhookId);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete webhook');
     }
@@ -217,6 +257,40 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     } finally {
       setTestingWebhook(null);
     }
+  };
+
+  // Handle copy join link
+  const handleCopyJoinLink = async (room: RoomInfo) => {
+    const link = getJoinLink(room.name);
+    await navigator.clipboard.writeText(link);
+    setCopiedRoom(room.name);
+    setTimeout(() => setCopiedRoom(null), 2000);
+  };
+
+  // Handle edit display name
+  const handleStartEditDisplayName = (room: RoomInfo) => {
+    setEditingRoom(room.name);
+    setEditingDisplayName(room.displayName || '');
+  };
+
+  // Handle save display name
+  const handleSaveDisplayName = async (roomName: string) => {
+    if (!token) return;
+
+    try {
+      await updateRoomDisplayName(token, roomName, editingDisplayName);
+      setEditingRoom(null);
+      setEditingDisplayName('');
+      await loadData(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update display name');
+    }
+  };
+
+  // Handle cancel edit
+  const handleCancelEdit = () => {
+    setEditingRoom(null);
+    setEditingDisplayName('');
   };
 
   // Format uptime
@@ -286,8 +360,22 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             {stats && (
               <span className="text-xs text-meet-text-tertiary">v{stats.version}</span>
             )}
+            <span className="text-xs text-meet-success flex items-center gap-1">
+              <span className="w-2 h-2 rounded-full bg-meet-success animate-pulse"></span>
+              Live
+            </span>
           </div>
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => loadData(true)}
+              className="text-meet-text-secondary hover:text-meet-text-primary transition-smooth text-sm flex items-center gap-1"
+              title="Refresh"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              Refresh
+            </button>
             <button
               onClick={handleLogout}
               className="text-meet-text-secondary hover:text-meet-text-primary transition-smooth text-sm"
@@ -366,17 +454,121 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                   {rooms.length === 0 ? (
                     <p className="text-meet-text-tertiary">No active rooms</p>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {rooms.map((room) => (
                         <div
                           key={room.name}
-                          className="flex items-center justify-between bg-meet-bg-tertiary rounded-lg px-4 py-3"
+                          className="bg-meet-bg-tertiary rounded-lg px-4 py-3"
                         >
-                          <div>
-                            <span className="font-mono text-meet-text-primary">{room.name}</span>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-3">
+                              <span className="font-mono text-meet-text-primary text-lg">
+                                {formatRoomCode(room.name)}
+                              </span>
+                              {editingRoom === room.name ? (
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="text"
+                                    value={editingDisplayName}
+                                    onChange={(e) => setEditingDisplayName(e.target.value)}
+                                    placeholder="Meeting name (optional)"
+                                    className="bg-meet-bg border border-meet-border rounded-lg px-3 py-1 text-sm text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') handleSaveDisplayName(room.name);
+                                      if (e.key === 'Escape') handleCancelEdit();
+                                    }}
+                                  />
+                                  <button
+                                    onClick={() => handleSaveDisplayName(room.name)}
+                                    className="text-meet-success hover:text-meet-success/80 p-1"
+                                    title="Save"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  </button>
+                                  <button
+                                    onClick={handleCancelEdit}
+                                    className="text-meet-text-tertiary hover:text-meet-text-secondary p-1"
+                                    title="Cancel"
+                                  >
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    </svg>
+                                  </button>
+                                </div>
+                              ) : (
+                                <>
+                                  {room.displayName ? (
+                                    <span className="text-meet-text-secondary text-sm">
+                                      "{room.displayName}"
+                                    </span>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleStartEditDisplayName(room)}
+                                      className="text-meet-text-tertiary hover:text-meet-accent text-xs flex items-center gap-1 transition-smooth"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                                      </svg>
+                                      Add name
+                                    </button>
+                                  )}
+                                  {room.displayName && (
+                                    <button
+                                      onClick={() => handleStartEditDisplayName(room)}
+                                      className="text-meet-text-tertiary hover:text-meet-text-secondary p-1 transition-smooth"
+                                      title="Edit name"
+                                    >
+                                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                      </svg>
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                            <span className="text-sm text-meet-text-secondary">
+                              {room.numParticipants} participant{room.numParticipants !== 1 ? 's' : ''}
+                            </span>
                           </div>
-                          <div className="flex items-center gap-4 text-sm text-meet-text-secondary">
-                            <span>{room.numParticipants} participant{room.numParticipants !== 1 ? 's' : ''}</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleCopyJoinLink(room)}
+                              className={`flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg transition-smooth ${
+                                copiedRoom === room.name
+                                  ? 'bg-meet-success/20 text-meet-success'
+                                  : 'bg-meet-accent/20 text-meet-accent hover:bg-meet-accent/30'
+                              }`}
+                            >
+                              {copiedRoom === room.name ? (
+                                <>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                  Copied!
+                                </>
+                              ) : (
+                                <>
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                                  </svg>
+                                  Copy Join Link
+                                </>
+                              )}
+                            </button>
+                            <a
+                              href={getJoinLink(room.name)}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1 text-sm px-3 py-1.5 rounded-lg bg-meet-bg hover:bg-meet-bg-elevated text-meet-text-secondary hover:text-meet-text-primary transition-smooth"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                              </svg>
+                              Join
+                            </a>
                           </div>
                         </div>
                       ))}
@@ -657,72 +849,33 @@ function AdminPanel({ onClose }: AdminPanelProps) {
               </div>
             )}
 
-            {/* Docs Tab */}
+            {/* Docs Tab - Swagger UI */}
             {activeTab === 'docs' && (
               <div className="space-y-6">
-                <div className="glass rounded-xl p-6">
-                  <h3 className="text-lg font-semibold text-meet-text-primary mb-4">API Documentation</h3>
-                  <p className="text-meet-text-secondary mb-4">
-                    The MEET API is documented using OpenAPI 3.0 specification. You can view the full specification
-                    or import it into tools like Swagger UI, Postman, or Insomnia.
-                  </p>
-                  <div className="space-y-3">
+                <div className="glass rounded-xl overflow-hidden" style={{ height: 'calc(100vh - 250px)' }}>
+                  <iframe
+                    src={`https://petstore.swagger.io/?url=${encodeURIComponent(getOpenApiUrl())}`}
+                    title="API Documentation"
+                    className="w-full h-full border-0"
+                    sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
+                  />
+                </div>
+                <div className="glass rounded-xl p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-meet-text-secondary">
+                      OpenAPI Spec URL: <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary">{getOpenApiUrl()}</code>
+                    </div>
                     <a
                       href={getOpenApiUrl()}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-2 px-4 rounded-lg transition-smooth inline-block"
+                      className="text-sm text-meet-accent hover:underline flex items-center gap-1"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                       </svg>
-                      View OpenAPI Spec
+                      Download YAML
                     </a>
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(getOpenApiUrl());
-                        alert('URL copied to clipboard!');
-                      }}
-                      className="flex items-center gap-2 bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary font-medium py-2 px-4 rounded-lg transition-smooth"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      Copy OpenAPI URL
-                    </button>
-                  </div>
-                </div>
-
-                <div className="glass rounded-xl p-6">
-                  <h3 className="text-lg font-semibold text-meet-text-primary mb-4">Quick Reference</h3>
-                  <div className="space-y-4 text-sm">
-                    <div>
-                      <div className="text-meet-text-secondary mb-1">Base URL:</div>
-                      <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary">
-                        {window.location.origin}/api
-                      </code>
-                    </div>
-                    <div>
-                      <div className="text-meet-text-secondary mb-1">Authentication:</div>
-                      <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary block">
-                        Authorization: Bearer YOUR_TOKEN
-                      </code>
-                      <div className="text-meet-text-tertiary mt-1">or</div>
-                      <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary block mt-1">
-                        X-API-Key: YOUR_API_KEY
-                      </code>
-                    </div>
-                    <div>
-                      <div className="text-meet-text-secondary mb-2">Key Endpoints:</div>
-                      <ul className="space-y-1 text-meet-text-tertiary">
-                        <li><code className="text-meet-text-primary">POST /api/token</code> - Generate meeting token</li>
-                        <li><code className="text-meet-text-primary">GET /api/room-code</code> - Generate room code</li>
-                        <li><code className="text-meet-text-primary">GET /api/rooms</code> - List active rooms</li>
-                        <li><code className="text-meet-text-primary">GET /api/admin/stats</code> - Server statistics</li>
-                        <li><code className="text-meet-text-primary">POST /api/admin/api-keys</code> - Create API key</li>
-                        <li><code className="text-meet-text-primary">POST /api/admin/webhooks</code> - Create webhook</li>
-                      </ul>
-                    </div>
                   </div>
                 </div>
               </div>

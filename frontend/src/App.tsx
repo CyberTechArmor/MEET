@@ -67,19 +67,6 @@ function App() {
     }
   }, [connect, setDisplayName, setRoomCode]);
 
-  // Check for admin URL parameter
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('admin') === 'true') {
-      setShowAdmin(true);
-      // Clean up URL
-      params.delete('admin');
-      const newUrl = params.toString()
-        ? `${window.location.pathname}?${params.toString()}`
-        : window.location.pathname;
-      window.history.replaceState({}, '', newUrl);
-    }
-  }, []);
 
   return (
     <div className="h-full w-full bg-meet-bg">

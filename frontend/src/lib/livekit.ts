@@ -739,6 +739,7 @@ export async function getServerStats(token: string): Promise<ServerStats> {
 
 export interface RoomInfo {
   name: string;
+  displayName: string | null;
   numParticipants: number;
   createdAt: string | null;
   maxParticipants: number;
@@ -757,6 +758,31 @@ export async function listRooms(token: string): Promise<{ rooms: RoomInfo[]; tot
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list rooms' }));
     throw new Error(error.error || 'Failed to list rooms');
+  }
+
+  return response.json();
+}
+
+/**
+ * Update room display name
+ */
+export async function updateRoomDisplayName(
+  token: string,
+  roomName: string,
+  displayName: string
+): Promise<RoomInfo> {
+  const response = await fetch(`${API_URL}/api/rooms/${roomName}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ displayName }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update room' }));
+    throw new Error(error.error || 'Failed to update room');
   }
 
   return response.json();

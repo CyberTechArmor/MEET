@@ -188,6 +188,55 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/rooms/{roomName}:
+    put:
+      tags:
+        - Meetings
+      summary: Update room display name
+      description: Set or update the display name for an active meeting room
+      operationId: updateRoom
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: roomName
+          in: path
+          required: true
+          description: The room code (e.g., ABC123)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                  description: Display name for the meeting (optional, can be empty to clear)
+                  maxLength: 100
+                  example: "Team Weekly Standup"
+      responses:
+        '200':
+          description: Room updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomInfo'
+        '404':
+          description: Room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/admin/login:
     post:
       tags:
@@ -621,13 +670,22 @@ components:
       properties:
         name:
           type: string
+          description: Room code (e.g., ABC123)
+        displayName:
+          type: string
+          nullable: true
+          description: Optional display name for the meeting
         numParticipants:
           type: integer
+          description: Current number of participants
         createdAt:
           type: string
           format: date-time
+          nullable: true
+          description: Room creation timestamp
         maxParticipants:
           type: integer
+          description: Maximum allowed participants (0 = unlimited)
 
     AdminLoginRequest:
       type: object
