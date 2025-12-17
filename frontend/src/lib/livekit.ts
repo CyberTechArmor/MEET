@@ -1055,6 +1055,7 @@ export interface ServerSettings {
   publicAccessEnabled: boolean;
   maxParticipantsPerMeeting: number;
   maxConcurrentMeetings: number;
+  iframeAllowedDomains: string[];
 }
 
 export interface ServerSettingsResponse {

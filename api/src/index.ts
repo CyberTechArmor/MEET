@@ -85,6 +85,7 @@ interface ServerSettings {
   maxConcurrentMeetings: number; // 0 = unlimited
   recommendedMaxParticipants: number;
   recommendedMaxMeetings: number;
+  iframeAllowedDomains: string[]; // Empty array = allow all (*)
 }
 
 // Calculate recommended limits based on available resources
@@ -117,6 +118,7 @@ const serverSettings: ServerSettings = {
   maxConcurrentMeetings: 0, // 0 = unlimited
   recommendedMaxParticipants: recommendedLimits.participants,
   recommendedMaxMeetings: recommendedLimits.meetings,
+  iframeAllowedDomains: [], // Empty = allow all domains (*)
 };
 
 // Webhook event types
@@ -238,6 +240,25 @@ const corsOptions: cors.CorsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json());
+
+// CSP frame-ancestors middleware for iframe embedding control
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  // Build frame-ancestors directive based on settings
+  let frameAncestors: string;
+  if (serverSettings.iframeAllowedDomains.length === 0) {
+    // Empty array = allow all domains
+    frameAncestors = '*';
+  } else {
+    // Specific domains + self
+    frameAncestors = `'self' ${serverSettings.iframeAllowedDomains.join(' ')}`;
+  }
+
+  // Set CSP header with frame-ancestors
+  res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors}`);
+  // Remove X-Frame-Options as CSP frame-ancestors takes precedence
+  res.removeHeader('X-Frame-Options');
+  next();
+});
 
 // Authentication middleware
 interface AuthRequest extends Request {
@@ -626,6 +647,7 @@ Configure webhooks to receive real-time notifications for events like:
                         publicAccessEnabled: { type: 'boolean', description: 'Whether public (non-API) access is allowed' },
                         maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited' },
                         maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited' },
+                        iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty = allow all (*)' },
                       },
                     },
                     recommendations: {
@@ -656,6 +678,7 @@ Configure webhooks to receive real-time notifications for events like:
                   publicAccessEnabled: { type: 'boolean', description: 'Enable/disable public access (API access always works)' },
                   maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
                   maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
+                  iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty array = allow all (*)' },
                 },
               },
             },
@@ -676,6 +699,7 @@ Configure webhooks to receive real-time notifications for events like:
                         publicAccessEnabled: { type: 'boolean' },
                         maxParticipantsPerMeeting: { type: 'integer' },
                         maxConcurrentMeetings: { type: 'integer' },
+                        iframeAllowedDomains: { type: 'array', items: { type: 'string' } },
                       },
                     },
                   },
@@ -1351,6 +1375,7 @@ app.get('/api/admin/settings', authenticateAdmin, (_req: AuthRequest, res: Respo
       publicAccessEnabled: serverSettings.publicAccessEnabled,
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+      iframeAllowedDomains: serverSettings.iframeAllowedDomains,
     },
     recommendations: {
       maxParticipantsPerMeeting: serverSettings.recommendedMaxParticipants,
@@ -1364,10 +1389,11 @@ interface UpdateSettingsRequest {
   publicAccessEnabled?: boolean;
   maxParticipantsPerMeeting?: number;
   maxConcurrentMeetings?: number;
+  iframeAllowedDomains?: string[];
 }
 
 app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, UpdateSettingsRequest>, res: Response) => {
-  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings } = req.body;
+  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings, iframeAllowedDomains } = req.body;
 
   if (publicAccessEnabled !== undefined) {
     serverSettings.publicAccessEnabled = publicAccessEnabled;
@@ -1389,12 +1415,23 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
     serverSettings.maxConcurrentMeetings = maxConcurrentMeetings;
   }
 
+  if (iframeAllowedDomains !== undefined) {
+    // Validate domains - must be valid URLs or wildcards like *.example.com
+    const validDomains = iframeAllowedDomains.filter(domain => {
+      // Allow wildcards like *.example.com or https://example.com
+      return domain.match(/^(\*\.)?[\w.-]+\.[a-z]{2,}$/i) ||
+             domain.match(/^https?:\/\/[\w.-]+/i);
+    });
+    serverSettings.iframeAllowedDomains = validDomains;
+  }
+
   res.json({
     success: true,
     settings: {
       publicAccessEnabled: serverSettings.publicAccessEnabled,
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+      iframeAllowedDomains: serverSettings.iframeAllowedDomains,
     },
   });
 });

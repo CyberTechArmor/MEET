@@ -98,6 +98,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   } | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [newIframeDomain, setNewIframeDomain] = useState('');
 
   // Docs sub-tab state
   const [docsSubTab, setDocsSubTab] = useState<DocsSubTab>('api');
@@ -934,6 +935,98 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                       </div>
                     </div>
 
+                    {/* Iframe Embedding Domains */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary">Iframe Embedding Domains</h3>
+                      <p className="text-sm text-meet-text-tertiary mt-1 mb-4">
+                        Control which domains can embed MEET in an iframe. Leave empty to allow all domains (*).
+                      </p>
+
+                      {/* Add domain input */}
+                      <div className="flex gap-2 mb-4">
+                        <input
+                          type="text"
+                          placeholder="e.g., https://example.com or *.example.com"
+                          value={newIframeDomain}
+                          onChange={(e) => setNewIframeDomain(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && newIframeDomain.trim()) {
+                              e.preventDefault();
+                              const domain = newIframeDomain.trim();
+                              if (!settings.iframeAllowedDomains.includes(domain)) {
+                                handleUpdateSettings({
+                                  iframeAllowedDomains: [...settings.iframeAllowedDomains, domain]
+                                });
+                              }
+                              setNewIframeDomain('');
+                            }
+                          }}
+                          disabled={settingsSaving}
+                          className="flex-1 bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary placeholder-meet-text-tertiary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                        />
+                        <button
+                          onClick={() => {
+                            const domain = newIframeDomain.trim();
+                            if (domain && !settings.iframeAllowedDomains.includes(domain)) {
+                              handleUpdateSettings({
+                                iframeAllowedDomains: [...settings.iframeAllowedDomains, domain]
+                              });
+                            }
+                            setNewIframeDomain('');
+                          }}
+                          disabled={settingsSaving || !newIframeDomain.trim()}
+                          className="px-4 py-2 bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-medium rounded-lg transition-smooth disabled:opacity-50"
+                        >
+                          Add
+                        </button>
+                      </div>
+
+                      {/* Current status */}
+                      <div className={`mb-4 text-sm font-medium ${settings.iframeAllowedDomains.length === 0 ? 'text-meet-warning' : 'text-meet-success'}`}>
+                        {settings.iframeAllowedDomains.length === 0
+                          ? 'Currently allowing all domains (*)'
+                          : `Restricting to ${settings.iframeAllowedDomains.length} domain(s)`}
+                      </div>
+
+                      {/* Domain list */}
+                      {settings.iframeAllowedDomains.length > 0 && (
+                        <div className="space-y-2">
+                          {settings.iframeAllowedDomains.map((domain, index) => (
+                            <div
+                              key={index}
+                              className="flex items-center justify-between bg-meet-bg-tertiary rounded-lg px-4 py-2"
+                            >
+                              <code className="text-meet-text-primary">{domain}</code>
+                              <button
+                                onClick={() => {
+                                  handleUpdateSettings({
+                                    iframeAllowedDomains: settings.iframeAllowedDomains.filter((_, i) => i !== index)
+                                  });
+                                }}
+                                disabled={settingsSaving}
+                                className="text-meet-error hover:text-red-400 transition-smooth disabled:opacity-50"
+                                title="Remove domain"
+                              >
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Info box */}
+                      <div className="mt-4 p-3 bg-meet-bg-secondary rounded-lg">
+                        <p className="text-xs text-meet-text-tertiary">
+                          <strong className="text-meet-text-secondary">Examples:</strong><br />
+                          • <code className="text-meet-accent">https://chat.example.com</code> - Specific domain<br />
+                          • <code className="text-meet-accent">*.example.com</code> - All subdomains<br />
+                          • <code className="text-meet-accent">https://*.neoncore.io</code> - All HTTPS subdomains
+                        </p>
+                      </div>
+                    </div>
+
                     {/* Settings Info */}
                     <div className="glass rounded-xl p-6 bg-meet-accent/5 border border-meet-accent/20">
                       <h3 className="text-lg font-semibold text-meet-accent mb-2">About Settings</h3>
@@ -942,6 +1035,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         <li>• Existing meetings are not affected by changes</li>
                         <li>• API access is always allowed regardless of Public Access setting</li>
                         <li>• Set to 0 for unlimited (not recommended for production)</li>
+                        <li>• Iframe domains control the CSP frame-ancestors header</li>
                       </ul>
                     </div>
                   </>
