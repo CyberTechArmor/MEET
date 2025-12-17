@@ -14,12 +14,14 @@ import {
   deleteWebhook,
   testWebhook,
   getOpenApiUrl,
+  getAdminWebSocketUrl,
   getJoinLink,
   formatRoomCode,
   updateRoomDisplayName,
   WEBHOOK_EVENTS,
 } from '../lib/livekit';
-import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, RoomInfo } from '../lib/livekit';
+import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse } from '../lib/livekit';
+import type { RoomInfo } from '../stores/adminStore';
 
 type TabType = 'dashboard' | 'api-keys' | 'webhooks' | 'docs';
 
@@ -27,8 +29,8 @@ interface AdminPanelProps {
   onClose: () => void;
 }
 
-// Polling interval for real-time updates (5 seconds)
-const POLL_INTERVAL = 5000;
+// WebSocket connection state
+type WsConnectionState = 'disconnected' | 'connecting' | 'connected';
 
 function AdminPanel({ onClose }: AdminPanelProps) {
   const {
@@ -54,7 +56,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
-  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const [wsState, setWsState] = useState<WsConnectionState>('disconnected');
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // API Key creation state
   const [newKeyName, setNewKeyName] = useState('');
@@ -86,7 +90,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     }
   }, [isAuthenticated, isSessionValid, logout]);
 
-  // Load data when authenticated
+  // Load data via REST API (fallback)
   const loadData = useCallback(async (showLoading = true) => {
     if (!token) return;
 
@@ -116,29 +120,94 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     }
   }, [token, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
 
-  // Initial data load
+  // WebSocket connection for real-time updates
+  const connectWebSocket = useCallback(() => {
+    if (!token || wsRef.current?.readyState === WebSocket.OPEN) return;
+
+    setWsState('connecting');
+    const wsUrl = getAdminWebSocketUrl();
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log('WebSocket connected, authenticating...');
+      // Send auth message
+      ws.send(JSON.stringify({ type: 'auth', token }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+
+        if (message.type === 'auth_required') {
+          // Server is ready for auth
+          ws.send(JSON.stringify({ type: 'auth', token }));
+        } else if (message.type === 'init' || message.type === 'update') {
+          // Update data from WebSocket
+          const { data } = message;
+          if (data.stats) setStats(data.stats);
+          if (data.rooms) setRooms(data.rooms);
+          if (data.apiKeys) setApiKeys(data.apiKeys);
+          if (data.webhooks) setWebhooks(data.webhooks);
+          setWsState('connected');
+          setLoading(false);
+        } else if (message.type === 'error') {
+          console.error('WebSocket error:', message.error);
+          setError(message.error);
+        }
+      } catch (err) {
+        console.error('WebSocket message parse error:', err);
+      }
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      setWsState('disconnected');
+      wsRef.current = null;
+
+      // Attempt to reconnect after 3 seconds
+      if (token && isAuthenticated) {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connectWebSocket();
+        }, 3000);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error('WebSocket error:', err);
+      setWsState('disconnected');
+    };
+  }, [token, isAuthenticated, setStats, setRooms, setApiKeys, setWebhooks, setLoading, setError]);
+
+  // Connect WebSocket when authenticated
   useEffect(() => {
     if (isAuthenticated && token) {
+      setLoading(true);
+      connectWebSocket();
+    }
+
+    return () => {
+      // Cleanup WebSocket on unmount
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+    };
+  }, [isAuthenticated, token, connectWebSocket]);
+
+  // Request refresh via WebSocket
+  const requestRefresh = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'refresh' }));
+    } else {
+      // Fallback to REST API
       loadData(true);
     }
-  }, [isAuthenticated, token, loadData]);
-
-  // Real-time polling for data updates
-  useEffect(() => {
-    if (isAuthenticated && token) {
-      // Start polling
-      pollIntervalRef.current = setInterval(() => {
-        loadData(false); // Don't show loading indicator for polls
-      }, POLL_INTERVAL);
-
-      return () => {
-        if (pollIntervalRef.current) {
-          clearInterval(pollIntervalRef.current);
-          pollIntervalRef.current = null;
-        }
-      };
-    }
-  }, [isAuthenticated, token, loadData]);
+  }, [loadData]);
 
   // Handle login
   const handleLogin = async (e: React.FormEvent) => {
@@ -156,9 +225,14 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
   // Handle logout
   const handleLogout = async () => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
+    // Close WebSocket connection
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
     if (token) {
       await adminLogout(token);
@@ -176,7 +250,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setCreatedKey(key);
       setNewKeyName('');
       setNewKeyPermissions(['read']);
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create API key');
     }
@@ -188,7 +262,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await revokeApiKey(token, keyId);
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke API key');
     }
@@ -210,7 +284,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       setCreatedWebhook(webhook);
       setWebhookForm({ name: '', url: '', events: [], enabled: true });
       setShowWebhookForm(false);
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create webhook');
     }
@@ -222,7 +296,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await updateWebhook(token, webhook.id, { enabled: !webhook.enabled });
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update webhook');
     }
@@ -234,7 +308,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       await deleteWebhook(token, webhookId);
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete webhook');
     }
@@ -281,7 +355,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       await updateRoomDisplayName(token, roomName, editingDisplayName);
       setEditingRoom(null);
       setEditingDisplayName('');
-      await loadData(false);
+      requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update display name');
     }
@@ -360,14 +434,22 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             {stats && (
               <span className="text-xs text-meet-text-tertiary">v{stats.version}</span>
             )}
-            <span className="text-xs text-meet-success flex items-center gap-1">
-              <span className="w-2 h-2 rounded-full bg-meet-success animate-pulse"></span>
-              Live
+            <span className={`text-xs flex items-center gap-1 ${
+              wsState === 'connected' ? 'text-meet-success' :
+              wsState === 'connecting' ? 'text-yellow-500' :
+              'text-meet-error'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${
+                wsState === 'connected' ? 'bg-meet-success animate-pulse' :
+                wsState === 'connecting' ? 'bg-yellow-500 animate-pulse' :
+                'bg-meet-error'
+              }`}></span>
+              {wsState === 'connected' ? 'Live' : wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
             </span>
           </div>
           <div className="flex items-center gap-4">
             <button
-              onClick={() => loadData(true)}
+              onClick={requestRefresh}
               className="text-meet-text-secondary hover:text-meet-text-primary transition-smooth text-sm flex items-center gap-1"
               title="Refresh"
             >

@@ -34,6 +34,7 @@ export interface ServerStats {
 
 export interface RoomInfo {
   name: string;
+  displayName: string | null;
   numParticipants: number;
   createdAt: string | null;
   maxParticipants: number;

@@ -670,6 +670,23 @@ export function getOpenApiUrl(): string {
   return `${API_URL}/api/openapi.yaml`;
 }
 
+/**
+ * Get the WebSocket URL for admin real-time updates
+ */
+export function getAdminWebSocketUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const hostname = window.location.hostname;
+  const port = window.location.port;
+
+  // If running behind reverse proxy (port 80/443)
+  if (port === '' || port === '80' || port === '443') {
+    return `${protocol}//${hostname}/ws/admin`;
+  }
+
+  // Demo mode: API runs on port 8080 on same host
+  return `${protocol}//${hostname}:8080/ws/admin`;
+}
+
 export interface AdminLoginResponse {
   success: boolean;
   token: string;

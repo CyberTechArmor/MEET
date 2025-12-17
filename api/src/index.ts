@@ -3,9 +3,12 @@ import cors from 'cors';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import http from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
 import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
 
 const app = express();
+const server = http.createServer(app);
 
 // ============================================================================
 // CONFIGURATION
@@ -910,10 +913,200 @@ app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: R
 });
 
 // ============================================================================
+// WEBSOCKET SERVER FOR REAL-TIME ADMIN UPDATES
+// ============================================================================
+
+const wss = new WebSocketServer({ server, path: '/ws/admin' });
+
+// Store authenticated WebSocket connections
+interface AuthenticatedWs extends WebSocket {
+  isAuthenticated?: boolean;
+  token?: string;
+}
+
+const authenticatedClients = new Set<AuthenticatedWs>();
+
+// Broadcast data to all authenticated clients
+function broadcastToAdmins(type: string, data: unknown): void {
+  const message = JSON.stringify({ type, data, timestamp: new Date().toISOString() });
+  authenticatedClients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN && client.isAuthenticated) {
+      client.send(message);
+    }
+  });
+}
+
+// Get current admin data for WebSocket clients
+async function getAdminData(): Promise<{
+  stats: {
+    activeRooms: number;
+    totalParticipants: number;
+    apiKeysCount: number;
+    webhooksCount: number;
+    uptime: number;
+    version: string;
+  };
+  rooms: Array<{
+    name: string;
+    displayName: string | null;
+    numParticipants: number;
+    createdAt: string | null;
+    maxParticipants: number;
+  }>;
+  apiKeys: Array<{
+    id: string;
+    name: string;
+    keyPrefix: string;
+    permissions: string[];
+    createdAt: string;
+    lastUsedAt: string | null;
+  }>;
+  webhooks: Array<{
+    id: string;
+    name: string;
+    url: string;
+    events: string[];
+    enabled: boolean;
+    secret: string;
+    createdAt: string;
+    lastTriggeredAt: string | null;
+    failureCount: number;
+  }>;
+}> {
+  let rooms: Array<{
+    name: string;
+    displayName: string | null;
+    numParticipants: number;
+    createdAt: string | null;
+    maxParticipants: number;
+  }> = [];
+  let totalParticipants = 0;
+
+  try {
+    const liveKitRooms = await roomService.listRooms();
+    rooms = liveKitRooms.map((room) => {
+      const metadata = roomMetadata.get(room.name);
+      return {
+        name: room.name,
+        displayName: metadata?.displayName || null,
+        numParticipants: room.numParticipants || 0,
+        createdAt: room.creationTime ? new Date(Number(room.creationTime) * 1000).toISOString() : null,
+        maxParticipants: room.maxParticipants || 0,
+      };
+    });
+    totalParticipants = liveKitRooms.reduce((sum, room) => sum + (room.numParticipants || 0), 0);
+  } catch (error) {
+    console.error('Error fetching rooms for WebSocket:', error);
+  }
+
+  return {
+    stats: {
+      activeRooms: rooms.length,
+      totalParticipants,
+      apiKeysCount: apiKeys.size,
+      webhooksCount: webhooks.size,
+      uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
+      version: API_VERSION,
+    },
+    rooms,
+    apiKeys: Array.from(apiKeys.values()).map((key) => ({
+      id: key.id,
+      name: key.name,
+      keyPrefix: maskApiKey(key.key),
+      permissions: key.permissions,
+      createdAt: key.createdAt.toISOString(),
+      lastUsedAt: key.lastUsedAt?.toISOString() || null,
+    })),
+    webhooks: Array.from(webhooks.values()).map((webhook) => ({
+      id: webhook.id,
+      name: webhook.name,
+      url: webhook.url,
+      events: webhook.events,
+      enabled: webhook.enabled,
+      secret: maskSecret(webhook.secret),
+      createdAt: webhook.createdAt.toISOString(),
+      lastTriggeredAt: webhook.lastTriggeredAt?.toISOString() || null,
+      failureCount: webhook.failureCount,
+    })),
+  };
+}
+
+// WebSocket connection handler
+wss.on('connection', (ws: AuthenticatedWs) => {
+  console.log('WebSocket client connected');
+
+  ws.on('message', async (messageData) => {
+    try {
+      const message = JSON.parse(messageData.toString());
+
+      // Handle authentication
+      if (message.type === 'auth') {
+        const token = message.token;
+
+        // Check if it's a valid session token
+        const session = adminSessions.get(token);
+        if (session && session.expiresAt > new Date()) {
+          ws.isAuthenticated = true;
+          ws.token = token;
+          authenticatedClients.add(ws);
+
+          // Send initial data
+          const data = await getAdminData();
+          ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
+          console.log('WebSocket client authenticated');
+        } else if (adminPassword && token === adminPassword) {
+          ws.isAuthenticated = true;
+          ws.token = token;
+          authenticatedClients.add(ws);
+
+          // Send initial data
+          const data = await getAdminData();
+          ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
+          console.log('WebSocket client authenticated via password');
+        } else {
+          ws.send(JSON.stringify({ type: 'error', error: 'Invalid token' }));
+          ws.close();
+        }
+      }
+
+      // Handle refresh request
+      if (message.type === 'refresh' && ws.isAuthenticated) {
+        const data = await getAdminData();
+        ws.send(JSON.stringify({ type: 'update', data, timestamp: new Date().toISOString() }));
+      }
+    } catch (error) {
+      console.error('WebSocket message error:', error);
+      ws.send(JSON.stringify({ type: 'error', error: 'Invalid message' }));
+    }
+  });
+
+  ws.on('close', () => {
+    authenticatedClients.delete(ws);
+    console.log('WebSocket client disconnected');
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+    authenticatedClients.delete(ws);
+  });
+
+  // Send authentication required message
+  ws.send(JSON.stringify({ type: 'auth_required' }));
+});
+
+// Periodic broadcast of admin data (every 5 seconds)
+setInterval(async () => {
+  if (authenticatedClients.size > 0) {
+    const data = await getAdminData();
+    broadcastToAdmins('update', data);
+  }
+}, 5000);
+
+// ============================================================================
 // START SERVER
 // ============================================================================
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════════════════════════╗
 ║                    MEET API Server                              ║
@@ -923,6 +1116,7 @@ app.listen(PORT, () => {
 ║  CORS:       ${CORS_ORIGIN.slice(0, 48).padEnd(48)}║
 ║  LiveKit:    Ready                                              ║
 ║  Admin:      ${(ADMIN_PASSWORD ? 'Password set' : 'First login sets password').padEnd(48)}║
+║  WebSocket:  ws://localhost:${PORT}/ws/admin${' '.repeat(27)}║
 ║  OpenAPI:    http://localhost:${PORT}/api/openapi.yaml${' '.repeat(20)}║
 ╚════════════════════════════════════════════════════════════════╝
   `);
