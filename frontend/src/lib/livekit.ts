@@ -1,4 +1,146 @@
-import { Room, RoomOptions, VideoPresets } from 'livekit-client';
+import {
+  Room,
+  RoomOptions,
+  VideoPresets,
+  VideoCodec,
+  ScreenSharePresets,
+  TrackPublishDefaults,
+  VideoCaptureOptions,
+} from 'livekit-client';
+
+/**
+ * Video Quality Preset Configuration
+ *
+ * MEET supports multiple video quality presets optimized for different use cases:
+ * - 'auto': Adaptive quality based on network conditions (recommended)
+ * - 'high': Full HD (1080p) with high bitrate for quality-focused calls
+ * - 'max': 4K Ultra HD for maximum quality (requires good network)
+ * - 'balanced': 720p balanced between quality and bandwidth
+ * - 'low': 360p for low-bandwidth situations
+ */
+export type VideoQualityPreset = 'auto' | 'high' | 'max' | 'balanced' | 'low';
+
+/**
+ * Video quality configuration interface
+ */
+export interface VideoQualityConfig {
+  /** Maximum capture resolution */
+  captureResolution: typeof VideoPresets[keyof typeof VideoPresets];
+  /** Simulcast layers for adaptive streaming */
+  simulcastLayers: typeof VideoPresets[keyof typeof VideoPresets][];
+  /** Preferred video codec */
+  videoCodec: VideoCodec;
+  /** Screen share preset */
+  screenSharePreset: typeof ScreenSharePresets[keyof typeof ScreenSharePresets];
+  /** Enable DTX (Discontinuous Transmission) for audio */
+  audioDtx: boolean;
+  /** Enable RED (Redundant Encoding) for audio */
+  audioRed: boolean;
+}
+
+/**
+ * Video quality presets configuration
+ */
+export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfig> = {
+  /**
+   * Maximum quality (4K UHD)
+   * Best for: High-bandwidth connections, quality-critical presentations
+   * Resolution: 2160p (3840x2160)
+   * Bitrate: Up to 8 Mbps
+   */
+  max: {
+    captureResolution: VideoPresets.h2160,
+    simulcastLayers: [VideoPresets.h360, VideoPresets.h720, VideoPresets.h1080],
+    videoCodec: 'vp9',
+    screenSharePreset: ScreenSharePresets.h1080fps30,
+    audioDtx: true,
+    audioRed: true,
+  },
+  /**
+   * High quality (Full HD)
+   * Best for: Standard video calls with good network
+   * Resolution: 1080p (1920x1080)
+   * Bitrate: Up to 3 Mbps
+   */
+  high: {
+    captureResolution: VideoPresets.h1080,
+    simulcastLayers: [VideoPresets.h360, VideoPresets.h540, VideoPresets.h720],
+    videoCodec: 'vp9',
+    screenSharePreset: ScreenSharePresets.h1080fps30,
+    audioDtx: true,
+    audioRed: true,
+  },
+  /**
+   * Adaptive quality (recommended)
+   * Best for: Most use cases, automatically adapts to network conditions
+   * Resolution: 1080p capture with dynamic adjustment
+   * Bitrate: Adaptive based on network
+   */
+  auto: {
+    captureResolution: VideoPresets.h1080,
+    simulcastLayers: [VideoPresets.h180, VideoPresets.h360, VideoPresets.h720],
+    videoCodec: 'vp9',
+    screenSharePreset: ScreenSharePresets.h1080fps15,
+    audioDtx: true,
+    audioRed: true,
+  },
+  /**
+   * Balanced quality (HD)
+   * Best for: Average network conditions
+   * Resolution: 720p (1280x720)
+   * Bitrate: Up to 1.5 Mbps
+   */
+  balanced: {
+    captureResolution: VideoPresets.h720,
+    simulcastLayers: [VideoPresets.h180, VideoPresets.h360],
+    videoCodec: 'vp8',
+    screenSharePreset: ScreenSharePresets.h720fps15,
+    audioDtx: true,
+    audioRed: true,
+  },
+  /**
+   * Low bandwidth mode
+   * Best for: Poor network conditions, mobile data
+   * Resolution: 360p (640x360)
+   * Bitrate: Up to 500 Kbps
+   */
+  low: {
+    captureResolution: VideoPresets.h360,
+    simulcastLayers: [VideoPresets.h90, VideoPresets.h180],
+    videoCodec: 'vp8',
+    screenSharePreset: ScreenSharePresets.h720fps5,
+    audioDtx: true,
+    audioRed: true,
+  },
+};
+
+/** Current video quality preset (can be changed at runtime) */
+let currentQualityPreset: VideoQualityPreset = 'high';
+
+/**
+ * Set the video quality preset
+ * @param preset - The quality preset to use
+ */
+export function setVideoQualityPreset(preset: VideoQualityPreset): void {
+  currentQualityPreset = preset;
+}
+
+/**
+ * Get the current video quality preset
+ * @returns The current quality preset
+ */
+export function getVideoQualityPreset(): VideoQualityPreset {
+  return currentQualityPreset;
+}
+
+/**
+ * Get the configuration for a specific quality preset
+ * @param preset - The quality preset
+ * @returns The quality configuration
+ */
+export function getQualityConfig(preset?: VideoQualityPreset): VideoQualityConfig {
+  return VIDEO_QUALITY_PRESETS[preset ?? currentQualityPreset];
+}
 
 // API configuration - dynamically determine URLs based on current hostname
 function getApiUrl(): string {
@@ -178,20 +320,124 @@ export async function generateRoomCode(): Promise<string> {
 
 /**
  * Create a new LiveKit room instance with optimized settings
+ *
+ * Creates a Room configured with the current video quality preset.
+ * By default, uses 'high' quality (1080p) for the best balance of quality and compatibility.
+ *
+ * Features:
+ * - Adaptive streaming: Automatically adjusts quality based on network conditions
+ * - Dynacast: Selective forwarding to save bandwidth when tracks aren't being viewed
+ * - Simulcast: Multiple quality layers for optimal delivery to each participant
+ * - VP9 codec: Better compression and quality at lower bitrates
+ *
+ * @param qualityPreset - Optional quality preset override (defaults to current preset)
+ * @returns Configured Room instance
+ *
+ * @example
+ * ```typescript
+ * // Create room with default (high) quality
+ * const room = createRoom();
+ *
+ * // Create room with maximum quality
+ * const room = createRoom('max');
+ *
+ * // Create room with adaptive quality
+ * const room = createRoom('auto');
+ * ```
  */
-export function createRoom(): Room {
+export function createRoom(qualityPreset?: VideoQualityPreset): Room {
+  const config = getQualityConfig(qualityPreset);
+
+  const videoCaptureDefaults: VideoCaptureOptions = {
+    resolution: config.captureResolution.resolution,
+    facingMode: 'user',
+  };
+
+  const publishDefaults: TrackPublishDefaults = {
+    // Video settings
+    videoSimulcastLayers: config.simulcastLayers,
+    videoCodec: config.videoCodec,
+    // Screen share settings
+    screenShareEncoding: config.screenSharePreset.encoding,
+    screenShareSimulcastLayers: [
+      ScreenSharePresets.h720fps15,
+      ScreenSharePresets.h1080fps15,
+    ],
+    // Audio settings for better quality
+    dtx: config.audioDtx,
+    red: config.audioRed,
+    // Force relay for better NAT traversal
+    forceStereo: false,
+    // Enable simulcast for all tracks
+    simulcast: true,
+    // Backup codec for compatibility
+    backupCodec: { codec: 'vp8', encoding: VideoPresets.h720.encoding },
+  };
+
   const roomOptions: RoomOptions = {
+    // Adaptive streaming automatically adjusts quality based on network
     adaptiveStream: true,
+    // Dynacast reduces bandwidth by not publishing to subscribers who aren't watching
     dynacast: true,
-    videoCaptureDefaults: {
-      resolution: VideoPresets.h720.resolution,
+    // Video capture configuration
+    videoCaptureDefaults,
+    // Publishing configuration
+    publishDefaults,
+    // Audio capture defaults with noise suppression
+    audioCaptureDefaults: {
+      autoGainControl: true,
+      echoCancellation: true,
+      noiseSuppression: true,
     },
-    publishDefaults: {
-      videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360],
-    },
+    // Reconnection policy
+    disconnectOnPageLeave: true,
   };
 
   return new Room(roomOptions);
+}
+
+/**
+ * Get available video quality presets with their descriptions
+ * @returns Array of preset information
+ */
+export function getAvailableQualityPresets(): Array<{
+  preset: VideoQualityPreset;
+  name: string;
+  description: string;
+  resolution: string;
+}> {
+  return [
+    {
+      preset: 'max',
+      name: '4K Ultra HD',
+      description: 'Maximum quality for high-bandwidth connections',
+      resolution: '2160p (3840×2160)',
+    },
+    {
+      preset: 'high',
+      name: 'Full HD',
+      description: 'Excellent quality for most video calls',
+      resolution: '1080p (1920×1080)',
+    },
+    {
+      preset: 'auto',
+      name: 'Adaptive',
+      description: 'Automatically adjusts based on network conditions',
+      resolution: 'Up to 1080p',
+    },
+    {
+      preset: 'balanced',
+      name: 'HD',
+      description: 'Good balance between quality and bandwidth',
+      resolution: '720p (1280×720)',
+    },
+    {
+      preset: 'low',
+      name: 'Low Bandwidth',
+      description: 'Optimized for poor network conditions',
+      resolution: '360p (640×360)',
+    },
+  ];
 }
 
 /**
