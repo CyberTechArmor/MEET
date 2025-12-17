@@ -568,6 +568,57 @@ Configure webhooks to receive real-time notifications for events like:
           },
         },
       },
+      post: {
+        tags: ['Rooms'],
+        summary: 'Create a room',
+        description: 'Create a new room with a specific ID. Useful for programmatic room creation from external applications.',
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['roomName'],
+                properties: {
+                  roomName: { type: 'string', description: 'Unique room identifier (alphanumeric, hyphens, underscores)', example: 'meeting-123' },
+                  displayName: { type: 'string', description: 'Friendly display name for the room', example: 'Team Standup' },
+                  maxParticipants: { type: 'integer', description: 'Maximum number of participants', default: 100 },
+                  emptyTimeout: { type: 'integer', description: 'Seconds before empty room is deleted', default: 300 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'Room created successfully',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    room: {
+                      type: 'object',
+                      properties: {
+                        name: { type: 'string' },
+                        displayName: { type: 'string', nullable: true },
+                        maxParticipants: { type: 'integer' },
+                        emptyTimeout: { type: 'integer' },
+                        createdAt: { type: 'string', format: 'date-time' },
+                      },
+                    },
+                    joinUrl: { type: 'string', format: 'uri', description: 'URL to join the room' },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'Invalid room name' },
+          '409': { description: 'Room already exists' },
+        },
+      },
     },
     '/api/rooms/{roomName}': {
       put: {
@@ -1122,6 +1173,75 @@ app.get('/api/rooms', authenticateApiKeyOrAdmin, async (_req: AuthRequest, res: 
   } catch (error) {
     console.error('List rooms error:', error);
     res.status(500).json({ error: 'Failed to list rooms' });
+  }
+});
+
+// Create room with specific ID
+interface CreateRoomRequest {
+  roomName: string;
+  displayName?: string;
+  maxParticipants?: number;
+  emptyTimeout?: number; // seconds before empty room is deleted
+}
+
+app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, object, CreateRoomRequest>, res: Response) => {
+  const { roomName, displayName, maxParticipants, emptyTimeout } = req.body;
+
+  if (!roomName || typeof roomName !== 'string') {
+    res.status(400).json({ error: 'roomName is required' });
+    return;
+  }
+
+  // Sanitize room name - allow alphanumeric, hyphens, underscores
+  const sanitizedRoomName = roomName.replace(/[^a-zA-Z0-9-_]/g, '').slice(0, 50);
+  if (!sanitizedRoomName) {
+    res.status(400).json({ error: 'Invalid room name. Use alphanumeric characters, hyphens, or underscores.' });
+    return;
+  }
+
+  try {
+    // Check if room already exists
+    const existingRooms = await roomService.listRooms([sanitizedRoomName]);
+    if (existingRooms.length > 0) {
+      res.status(409).json({ error: 'Room already exists', roomName: sanitizedRoomName });
+      return;
+    }
+
+    // Create the room via LiveKit
+    const room = await roomService.createRoom({
+      name: sanitizedRoomName,
+      maxParticipants: maxParticipants || 100,
+      emptyTimeout: emptyTimeout || 300, // 5 minutes default
+    });
+
+    // Store metadata if display name provided
+    if (displayName) {
+      roomMetadata.set(sanitizedRoomName, {
+        displayName,
+        createdAt: new Date(),
+      });
+    }
+
+    // Trigger webhook
+    triggerWebhooks('room.created', { roomName: sanitizedRoomName, displayName });
+
+    // Generate join URL
+    const joinUrl = `${req.protocol}://${req.get('host')}/?room=${sanitizedRoomName}`;
+
+    res.status(201).json({
+      success: true,
+      room: {
+        name: room.name,
+        displayName: displayName || null,
+        maxParticipants: room.maxParticipants,
+        emptyTimeout: room.emptyTimeout,
+        createdAt: new Date().toISOString(),
+      },
+      joinUrl,
+    });
+  } catch (error) {
+    console.error('Create room error:', error);
+    res.status(500).json({ error: 'Failed to create room' });
   }
 });
 
