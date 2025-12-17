@@ -651,3 +651,333 @@ export async function endMeetingForAll(roomName: string, participantIdentity: st
     throw new Error(error.error || 'Failed to end meeting');
   }
 }
+
+// ============================================================================
+// ADMIN API
+// ============================================================================
+
+/**
+ * Get the API base URL for admin endpoints
+ */
+export function getApiBaseUrl(): string {
+  return API_URL;
+}
+
+/**
+ * Get the OpenAPI documentation URL
+ */
+export function getOpenApiUrl(): string {
+  return `${API_URL}/api/openapi.yaml`;
+}
+
+export interface AdminLoginResponse {
+  success: boolean;
+  token: string;
+  expiresAt: string;
+  isFirstLogin?: boolean;
+  superAdmin?: string;
+}
+
+/**
+ * Admin login
+ */
+export async function adminLogin(password: string): Promise<AdminLoginResponse> {
+  const response = await fetch(`${API_URL}/api/admin/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ password }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Login failed' }));
+    throw new Error(error.error || 'Login failed');
+  }
+
+  return response.json();
+}
+
+/**
+ * Admin logout
+ */
+export async function adminLogout(token: string): Promise<void> {
+  await fetch(`${API_URL}/api/admin/logout`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+}
+
+export interface ServerStats {
+  activeRooms: number;
+  totalParticipants: number;
+  apiKeysCount: number;
+  webhooksCount: number;
+  uptime: number;
+  version: string;
+}
+
+/**
+ * Get server statistics
+ */
+export async function getServerStats(token: string): Promise<ServerStats> {
+  const response = await fetch(`${API_URL}/api/admin/stats`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to get stats' }));
+    throw new Error(error.error || 'Failed to get stats');
+  }
+
+  return response.json();
+}
+
+export interface RoomInfo {
+  name: string;
+  numParticipants: number;
+  createdAt: string | null;
+  maxParticipants: number;
+}
+
+/**
+ * List active rooms
+ */
+export async function listRooms(token: string): Promise<{ rooms: RoomInfo[]; total: number }> {
+  const response = await fetch(`${API_URL}/api/rooms`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to list rooms' }));
+    throw new Error(error.error || 'Failed to list rooms');
+  }
+
+  return response.json();
+}
+
+// API Key types and functions
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  permissions: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface CreateApiKeyResponse {
+  id: string;
+  name: string;
+  key: string;
+  permissions: string[];
+  createdAt: string;
+}
+
+/**
+ * List API keys
+ */
+export async function listApiKeys(token: string): Promise<{ apiKeys: ApiKeyInfo[] }> {
+  const response = await fetch(`${API_URL}/api/admin/api-keys`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to list API keys' }));
+    throw new Error(error.error || 'Failed to list API keys');
+  }
+
+  return response.json();
+}
+
+/**
+ * Create API key
+ */
+export async function createApiKey(
+  token: string,
+  name: string,
+  permissions: string[] = ['read']
+): Promise<CreateApiKeyResponse> {
+  const response = await fetch(`${API_URL}/api/admin/api-keys`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ name, permissions }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to create API key' }));
+    throw new Error(error.error || 'Failed to create API key');
+  }
+
+  return response.json();
+}
+
+/**
+ * Revoke API key
+ */
+export async function revokeApiKey(token: string, keyId: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/admin/api-keys/${keyId}`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to revoke API key' }));
+    throw new Error(error.error || 'Failed to revoke API key');
+  }
+}
+
+// Webhook types and functions
+export interface WebhookInfo {
+  id: string;
+  name: string;
+  url: string;
+  events: string[];
+  enabled: boolean;
+  secret: string;
+  createdAt: string;
+  lastTriggeredAt: string | null;
+  failureCount: number;
+}
+
+export interface CreateWebhookResponse extends WebhookInfo {
+  secret: string; // Full secret only on creation
+}
+
+export const WEBHOOK_EVENTS = [
+  'room.created',
+  'room.deleted',
+  'participant.joined',
+  'participant.left',
+  'recording.started',
+  'recording.stopped',
+] as const;
+
+export type WebhookEventType = typeof WEBHOOK_EVENTS[number];
+
+/**
+ * List webhooks
+ */
+export async function listWebhooks(token: string): Promise<{ webhooks: WebhookInfo[] }> {
+  const response = await fetch(`${API_URL}/api/admin/webhooks`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to list webhooks' }));
+    throw new Error(error.error || 'Failed to list webhooks');
+  }
+
+  return response.json();
+}
+
+/**
+ * Create webhook
+ */
+export async function createWebhook(
+  token: string,
+  name: string,
+  url: string,
+  events: string[],
+  enabled: boolean = true
+): Promise<CreateWebhookResponse> {
+  const response = await fetch(`${API_URL}/api/admin/webhooks`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify({ name, url, events, enabled }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to create webhook' }));
+    throw new Error(error.error || 'Failed to create webhook');
+  }
+
+  return response.json();
+}
+
+/**
+ * Update webhook
+ */
+export async function updateWebhook(
+  token: string,
+  webhookId: string,
+  updates: Partial<{ name: string; url: string; events: string[]; enabled: boolean }>
+): Promise<WebhookInfo> {
+  const response = await fetch(`${API_URL}/api/admin/webhooks/${webhookId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
+    },
+    body: JSON.stringify(updates),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update webhook' }));
+    throw new Error(error.error || 'Failed to update webhook');
+  }
+
+  return response.json();
+}
+
+/**
+ * Delete webhook
+ */
+export async function deleteWebhook(token: string, webhookId: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/admin/webhooks/${webhookId}`, {
+    method: 'DELETE',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to delete webhook' }));
+    throw new Error(error.error || 'Failed to delete webhook');
+  }
+}
+
+export interface WebhookTestResult {
+  success: boolean;
+  statusCode: number;
+  responseTime: number;
+  error: string | null;
+}
+
+/**
+ * Test webhook
+ */
+export async function testWebhook(token: string, webhookId: string): Promise<WebhookTestResult> {
+  const response = await fetch(`${API_URL}/api/admin/webhooks/${webhookId}/test`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to test webhook' }));
+    throw new Error(error.error || 'Failed to test webhook');
+  }
+
+  return response.json();
+}
+

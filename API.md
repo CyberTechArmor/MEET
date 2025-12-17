@@ -5,6 +5,7 @@ Complete API reference for the MEET video conferencing platform.
 ## Table of Contents
 
 - [Overview](#overview)
+- [OpenAPI Specification](#openapi-specification)
 - [Join Links](#join-links)
   - [URL Parameters](#url-parameters)
   - [Generating Join Links](#generating-join-links)
@@ -14,6 +15,23 @@ Complete API reference for the MEET video conferencing platform.
   - [Token Generation](#token-generation)
   - [Room Code Generation](#room-code-generation)
   - [End Meeting](#end-meeting)
+- [Admin API](#admin-api)
+  - [Authentication](#authentication)
+  - [Admin Login](#admin-login)
+  - [Server Statistics](#server-statistics)
+  - [List Active Rooms](#list-active-rooms)
+- [API Keys](#api-keys)
+  - [List API Keys](#list-api-keys)
+  - [Create API Key](#create-api-key)
+  - [Revoke API Key](#revoke-api-key)
+- [Webhooks](#webhooks)
+  - [Webhook Events](#webhook-events)
+  - [List Webhooks](#list-webhooks)
+  - [Create Webhook](#create-webhook)
+  - [Update Webhook](#update-webhook)
+  - [Delete Webhook](#delete-webhook)
+  - [Test Webhook](#test-webhook)
+  - [Webhook Payload Format](#webhook-payload-format)
 - [Client SDK](#client-sdk)
   - [Video Quality API](#video-quality-api)
   - [Room Management](#room-management)
@@ -38,6 +56,33 @@ MEET provides two API layers:
 |-------------|----------|---------------------|
 | Demo Mode | `http://localhost:8080` | `ws://localhost:7880` |
 | With Proxy | `https://your-domain.com/api` | `wss://your-domain.com/livekit` |
+
+---
+
+## OpenAPI Specification
+
+The MEET API is fully documented using OpenAPI 3.0. You can access the specification at:
+
+```
+GET /api/openapi.yaml
+```
+
+### Viewing the Specification
+
+1. **Direct URL**: `http://localhost:8080/api/openapi.yaml`
+2. **Admin Panel**: Click the gear icon on the main page, then navigate to the "Docs" tab
+3. **Swagger UI**: Import the spec URL into [Swagger Editor](https://editor.swagger.io)
+4. **Postman**: Import as OpenAPI collection
+
+### Using with API Clients
+
+```bash
+# Download the spec
+curl http://localhost:8080/api/openapi.yaml -o openapi.yaml
+
+# Use with Swagger Codegen
+swagger-codegen generate -i openapi.yaml -l python -o ./client
+```
 
 ---
 
@@ -335,6 +380,497 @@ Content-Type: application/json
 | 200 | Meeting ended successfully |
 | 400 | Invalid request |
 | 500 | Failed to end meeting |
+
+---
+
+## Admin API
+
+The Admin API provides server management capabilities including statistics, room management, API keys, and webhooks.
+
+### Authentication
+
+Admin endpoints require a JWT token obtained from the login endpoint. Include the token in the `Authorization` header:
+
+```http
+Authorization: Bearer <admin_token>
+```
+
+Tokens expire after 24 hours.
+
+### Admin Login
+
+Authenticate to access admin endpoints.
+
+```http
+POST /api/admin/login
+Content-Type: application/json
+```
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `password` | string | Yes | Admin password |
+
+#### First Login Behavior
+
+If no admin password is configured via `MEET_ADMIN_PASSWORD` environment variable, the first login will set the password. This creates a "super admin" account.
+
+#### Example Request
+
+```json
+{
+  "password": "your-secure-password"
+}
+```
+
+#### Response
+
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expiresAt": "2024-01-16T10:30:00.000Z",
+  "isFirstLogin": false
+}
+```
+
+#### Status Codes
+
+| Code | Description |
+|------|-------------|
+| 200 | Login successful |
+| 401 | Invalid password |
+| 500 | Server error |
+
+---
+
+### Server Statistics
+
+Get server statistics including active rooms and participants.
+
+```http
+GET /api/admin/stats
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "activeRooms": 5,
+  "totalParticipants": 23,
+  "apiKeysCount": 3,
+  "webhooksCount": 2,
+  "uptime": 86400,
+  "version": "1.0.0"
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `activeRooms` | number | Number of currently active rooms |
+| `totalParticipants` | number | Total participants across all rooms |
+| `apiKeysCount` | number | Number of active API keys |
+| `webhooksCount` | number | Number of configured webhooks |
+| `uptime` | number | Server uptime in seconds |
+| `version` | string | API server version |
+
+---
+
+### List Active Rooms
+
+Get information about all active rooms.
+
+```http
+GET /api/admin/rooms
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "rooms": [
+    {
+      "name": "ABC123",
+      "numParticipants": 5,
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "maxParticipants": 0
+    },
+    {
+      "name": "XYZ789",
+      "numParticipants": 2,
+      "createdAt": "2024-01-15T09:30:00.000Z",
+      "maxParticipants": 10
+    }
+  ]
+}
+```
+
+---
+
+## API Keys
+
+API keys provide programmatic access to the MEET API for third-party integrations.
+
+### List API Keys
+
+Get all active API keys.
+
+```http
+GET /api/admin/api-keys
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "apiKeys": [
+    {
+      "id": "key_abc123",
+      "name": "Production Integration",
+      "keyPrefix": "meet_k1...",
+      "permissions": ["rooms:read", "rooms:create", "participants:read"],
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "lastUsedAt": "2024-01-15T12:30:00.000Z"
+    }
+  ]
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique key identifier |
+| `name` | string | Descriptive name for the key |
+| `keyPrefix` | string | First 10 characters of the key (for identification) |
+| `permissions` | string[] | List of granted permissions |
+| `createdAt` | string | ISO 8601 creation timestamp |
+| `lastUsedAt` | string | ISO 8601 timestamp of last use (null if never used) |
+
+---
+
+### Create API Key
+
+Generate a new API key.
+
+```http
+POST /api/admin/api-keys
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Descriptive name for the key |
+| `permissions` | string[] | No | Permissions to grant (default: all) |
+
+#### Available Permissions
+
+| Permission | Description |
+|------------|-------------|
+| `rooms:read` | View room information |
+| `rooms:create` | Create new rooms |
+| `rooms:delete` | Delete/end rooms |
+| `participants:read` | View participant information |
+| `participants:remove` | Remove participants from rooms |
+| `recordings:read` | View recording information |
+| `recordings:manage` | Start/stop recordings |
+
+#### Example Request
+
+```json
+{
+  "name": "Calendar Integration",
+  "permissions": ["rooms:read", "rooms:create"]
+}
+```
+
+#### Response
+
+```json
+{
+  "id": "key_xyz789",
+  "name": "Calendar Integration",
+  "key": "meet_k1_a8b9c2d3e4f5g6h7i8j9k0l1m2n3o4p5",
+  "keyPrefix": "meet_k1_a8",
+  "permissions": ["rooms:read", "rooms:create"],
+  "createdAt": "2024-01-15T10:30:00.000Z"
+}
+```
+
+> **Important**: The full `key` value is only returned once at creation time. Store it securely.
+
+---
+
+### Revoke API Key
+
+Revoke an existing API key.
+
+```http
+DELETE /api/admin/api-keys/:id
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "success": true,
+  "message": "API key revoked"
+}
+```
+
+#### Status Codes
+
+| Code | Description |
+|------|-------------|
+| 200 | Key revoked successfully |
+| 404 | Key not found |
+
+---
+
+## Webhooks
+
+Webhooks allow you to receive real-time notifications when events occur in your MEET instance.
+
+### Webhook Events
+
+| Event | Description | Payload |
+|-------|-------------|---------|
+| `room.created` | A new room was created | `{ roomName, createdAt }` |
+| `room.deleted` | A room was deleted/ended | `{ roomName, deletedAt }` |
+| `participant.joined` | A participant joined a room | `{ roomName, participant, joinedAt }` |
+| `participant.left` | A participant left a room | `{ roomName, participant, leftAt }` |
+| `recording.started` | Recording started in a room | `{ roomName, recordingId, startedAt }` |
+| `recording.stopped` | Recording stopped in a room | `{ roomName, recordingId, stoppedAt }` |
+
+---
+
+### List Webhooks
+
+Get all configured webhooks.
+
+```http
+GET /api/admin/webhooks
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "webhooks": [
+    {
+      "id": "wh_abc123",
+      "name": "Slack Notifications",
+      "url": "https://hooks.slack.com/services/...",
+      "events": ["room.created", "room.deleted"],
+      "enabled": true,
+      "secret": "whsec_...",
+      "createdAt": "2024-01-15T10:00:00.000Z",
+      "lastTriggeredAt": "2024-01-15T12:30:00.000Z",
+      "failureCount": 0
+    }
+  ]
+}
+```
+
+---
+
+### Create Webhook
+
+Configure a new webhook endpoint.
+
+```http
+POST /api/admin/webhooks
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+#### Request Body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Descriptive name |
+| `url` | string | Yes | HTTPS endpoint URL |
+| `events` | string[] | Yes | Events to subscribe to |
+| `enabled` | boolean | No | Whether webhook is active (default: true) |
+
+#### Example Request
+
+```json
+{
+  "name": "Analytics Service",
+  "url": "https://analytics.example.com/webhooks/meet",
+  "events": ["participant.joined", "participant.left"],
+  "enabled": true
+}
+```
+
+#### Response
+
+```json
+{
+  "id": "wh_xyz789",
+  "name": "Analytics Service",
+  "url": "https://analytics.example.com/webhooks/meet",
+  "events": ["participant.joined", "participant.left"],
+  "enabled": true,
+  "secret": "whsec_a1b2c3d4e5f6g7h8i9j0",
+  "createdAt": "2024-01-15T10:30:00.000Z",
+  "lastTriggeredAt": null,
+  "failureCount": 0
+}
+```
+
+---
+
+### Update Webhook
+
+Update an existing webhook configuration.
+
+```http
+PUT /api/admin/webhooks/:id
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+#### Request Body
+
+All fields are optional - only include fields you want to update.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | New name |
+| `url` | string | New endpoint URL |
+| `events` | string[] | New event subscriptions |
+| `enabled` | boolean | Enable/disable webhook |
+
+#### Example Request
+
+```json
+{
+  "enabled": false
+}
+```
+
+#### Response
+
+Returns the updated webhook object.
+
+---
+
+### Delete Webhook
+
+Remove a webhook configuration.
+
+```http
+DELETE /api/admin/webhooks/:id
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "success": true,
+  "message": "Webhook deleted"
+}
+```
+
+---
+
+### Test Webhook
+
+Send a test event to verify webhook configuration.
+
+```http
+POST /api/admin/webhooks/:id/test
+Authorization: Bearer <token>
+```
+
+#### Response
+
+```json
+{
+  "success": true,
+  "message": "Test webhook sent"
+}
+```
+
+---
+
+### Webhook Payload Format
+
+All webhook payloads follow this structure:
+
+```json
+{
+  "id": "evt_abc123xyz",
+  "event": "participant.joined",
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "data": {
+    "roomName": "ABC123",
+    "participant": {
+      "identity": "John Doe_m8x3k",
+      "name": "John Doe"
+    },
+    "joinedAt": "2024-01-15T10:30:00.000Z"
+  }
+}
+```
+
+### Webhook Security
+
+Each webhook includes a signature for verification:
+
+```http
+X-Webhook-Signature: sha256=a1b2c3d4e5f6...
+X-Webhook-Timestamp: 1705316400
+```
+
+#### Verifying Signatures (Node.js)
+
+```javascript
+const crypto = require('crypto');
+
+function verifyWebhookSignature(payload, signature, timestamp, secret) {
+  const signedPayload = `${timestamp}.${JSON.stringify(payload)}`;
+  const expectedSignature = crypto
+    .createHmac('sha256', secret)
+    .update(signedPayload)
+    .digest('hex');
+
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(`sha256=${expectedSignature}`)
+  );
+}
+```
+
+#### Verifying Signatures (Python)
+
+```python
+import hmac
+import hashlib
+import json
+
+def verify_webhook_signature(payload, signature, timestamp, secret):
+    signed_payload = f"{timestamp}.{json.dumps(payload)}"
+    expected = hmac.new(
+        secret.encode(),
+        signed_payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature, f"sha256={expected}")
+```
 
 ---
 
@@ -815,6 +1351,8 @@ room.on(RoomEvent.Disconnected, (reason) => {
 | `LIVEKIT_API_SECRET` | secret | LiveKit API secret |
 | `LIVEKIT_URL` | http://localhost:7880 | LiveKit server URL |
 | `CORS_ORIGIN` | * | Allowed CORS origins |
+| `MEET_ADMIN_PASSWORD` | (none) | Admin password (if not set, first login sets it) |
+| `MEET_SUPER_ADMIN` | (none) | Reserved for future super admin email |
 
 ### Frontend
 
