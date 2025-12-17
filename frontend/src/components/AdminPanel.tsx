@@ -54,6 +54,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   } = useAdminStore();
 
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const wsRef = useRef<WebSocket | null>(null);
@@ -215,8 +216,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setLoginError('');
 
     try {
-      const response = await adminLogin(password);
+      const response = await adminLogin(username, password);
       setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setUsername('');
       setPassword('');
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : 'Login failed');
@@ -392,17 +394,24 @@ function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
 
           <p className="text-meet-text-secondary mb-6 text-sm">
-            Enter the admin password to access the admin panel. If this is your first login, the password you enter will be set as the admin password.
+            Enter your admin credentials to access the admin panel. If this is your first login, the credentials you enter will be set as the admin account.
           </p>
 
           <form onSubmit={handleLogin} className="space-y-4">
             <input
+              type="text"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder="Username"
+              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+              autoFocus
+            />
+            <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Admin password"
+              placeholder="Password"
               className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-              autoFocus
             />
 
             {loginError && (

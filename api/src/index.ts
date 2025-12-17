@@ -21,10 +21,9 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL || 'http://localhost:7880';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 
 // Admin configuration
-// MEET_ADMIN_PASSWORD: If not set, the first login attempt sets the password
-// MEET_SUPER_ADMIN: Email/identifier of the super admin (optional)
+// MEET_ADMIN_USERNAME/MEET_ADMIN_PASSWORD: If not set, first login sets credentials
+const ADMIN_USERNAME = process.env.MEET_ADMIN_USERNAME || '';
 const ADMIN_PASSWORD = process.env.MEET_ADMIN_PASSWORD || '';
-const SUPER_ADMIN = process.env.MEET_SUPER_ADMIN || '';
 
 const API_VERSION = '1.0.0';
 const SERVER_START_TIME = Date.now();
@@ -71,8 +70,9 @@ interface RoomMetadata {
 }
 
 // Storage
+let adminUsername: string = ADMIN_USERNAME;
 let adminPassword: string = ADMIN_PASSWORD;
-let isFirstLogin = !ADMIN_PASSWORD;
+let isFirstLogin = !ADMIN_USERNAME || !ADMIN_PASSWORD;
 const apiKeys: Map<string, ApiKey> = new Map();
 const webhooks: Map<string, Webhook> = new Map();
 const adminSessions: Map<string, AdminSession> = new Map();
@@ -448,26 +448,33 @@ app.post('/api/end-meeting', async (req: Request<object, object, EndMeetingReque
 
 // Admin login
 interface AdminLoginRequest {
+  username: string;
   password: string;
 }
 
 app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, res: Response) => {
-  const { password } = req.body;
+  const { username, password } = req.body;
+
+  if (!username || typeof username !== 'string') {
+    res.status(400).json({ error: 'Username is required' });
+    return;
+  }
 
   if (!password || typeof password !== 'string') {
     res.status(400).json({ error: 'Password is required' });
     return;
   }
 
-  // If no admin password is set, first login sets it
-  if (isFirstLogin && !adminPassword) {
+  // If no admin credentials are set, first login sets them
+  if (isFirstLogin) {
+    adminUsername = username;
     adminPassword = password;
     isFirstLogin = false;
-    console.log('Admin password set by first login');
+    console.log(`Admin credentials set by first login: ${username}`);
   }
 
-  if (password !== adminPassword) {
-    res.status(401).json({ error: 'Invalid password' });
+  if (username !== adminUsername || password !== adminPassword) {
+    res.status(401).json({ error: 'Invalid username or password' });
     return;
   }
 
@@ -492,8 +499,8 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
     success: true,
     token,
     expiresAt: expiresAt.toISOString(),
-    isFirstLogin: !ADMIN_PASSWORD && adminSessions.size === 1,
-    superAdmin: SUPER_ADMIN || undefined,
+    isFirstLogin: !ADMIN_USERNAME && adminSessions.size === 1,
+    username: adminUsername,
   });
 });
 
@@ -1115,7 +1122,7 @@ server.listen(PORT, () => {
 ║  Port:       ${String(PORT).padEnd(48)}║
 ║  CORS:       ${CORS_ORIGIN.slice(0, 48).padEnd(48)}║
 ║  LiveKit:    Ready                                              ║
-║  Admin:      ${(ADMIN_PASSWORD ? 'Password set' : 'First login sets password').padEnd(48)}║
+║  Admin:      ${(ADMIN_USERNAME ? `User: ${ADMIN_USERNAME}` : 'First login sets credentials').padEnd(48)}║
 ║  WebSocket:  ws://localhost:${PORT}/ws/admin${' '.repeat(27)}║
 ║  OpenAPI:    http://localhost:${PORT}/api/openapi.yaml${' '.repeat(20)}║
 ╚════════════════════════════════════════════════════════════════╝
