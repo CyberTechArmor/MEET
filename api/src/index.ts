@@ -298,15 +298,576 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// Serve OpenAPI spec
-app.get('/api/openapi.yaml', (_req: Request, res: Response) => {
-  const specPath = path.join(__dirname, '..', 'openapi.yaml');
-  if (fs.existsSync(specPath)) {
-    res.setHeader('Content-Type', 'application/x-yaml');
-    res.sendFile(specPath);
-  } else {
-    res.status(404).json({ error: 'OpenAPI spec not found' });
-  }
+// OpenAPI Documentation
+const openApiSpec = {
+  openapi: '3.0.3',
+  info: {
+    title: 'MEET Video Conferencing API',
+    description: `
+## Overview
+MEET is a WebRTC-based video conferencing API powered by LiveKit. This API allows you to:
+- Generate room tokens for participants
+- Manage active rooms and participants
+- Configure webhooks for real-time event notifications
+- Manage API keys for programmatic access
+
+## Authentication
+Most endpoints require authentication via one of:
+- **Bearer Token**: Admin session token from \`/api/admin/login\`
+- **API Key**: Pass in \`X-API-Key\` header
+
+## Webhooks
+Configure webhooks to receive real-time notifications for events like:
+- Room created/deleted
+- Participant joined/left
+- Recording started/stopped
+    `,
+    version: '1.0.0',
+    contact: {
+      name: 'MEET Support',
+    },
+  },
+  servers: [
+    {
+      url: '/',
+      description: 'Current server',
+    },
+  ],
+  tags: [
+    { name: 'Public', description: 'Public endpoints for meeting participants' },
+    { name: 'Admin', description: 'Admin authentication and management' },
+    { name: 'Rooms', description: 'Room management' },
+    { name: 'API Keys', description: 'API key management' },
+    { name: 'Webhooks', description: 'Webhook configuration' },
+  ],
+  paths: {
+    '/health': {
+      get: {
+        tags: ['Public'],
+        summary: 'Health check',
+        description: 'Check if the API server is running',
+        responses: {
+          '200': {
+            description: 'Server is healthy',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    status: { type: 'string', example: 'ok' },
+                    timestamp: { type: 'string', format: 'date-time' },
+                    version: { type: 'string', example: '1.0.0' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/token': {
+      post: {
+        tags: ['Public'],
+        summary: 'Generate room token',
+        description: 'Generate a LiveKit access token to join a room',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['roomName', 'participantName'],
+                properties: {
+                  roomName: { type: 'string', description: 'Room code/name', example: 'ABC123' },
+                  participantName: { type: 'string', description: 'Display name', example: 'John Doe' },
+                  deviceId: { type: 'string', description: 'Optional device identifier' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Token generated successfully',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    token: { type: 'string', description: 'LiveKit JWT token' },
+                    roomName: { type: 'string' },
+                    participantName: { type: 'string' },
+                    participantIdentity: { type: 'string' },
+                    isHost: { type: 'boolean' },
+                  },
+                },
+              },
+            },
+          },
+          '400': { description: 'Invalid request parameters' },
+        },
+      },
+    },
+    '/api/room-code': {
+      get: {
+        tags: ['Public'],
+        summary: 'Generate random room code',
+        description: 'Generate a random 6-character room code',
+        responses: {
+          '200': {
+            description: 'Room code generated',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    roomCode: { type: 'string', example: 'ABC123' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/end-meeting': {
+      post: {
+        tags: ['Public'],
+        summary: 'End meeting for all',
+        description: 'End the meeting and disconnect all participants (host only)',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['roomName', 'participantIdentity'],
+                properties: {
+                  roomName: { type: 'string' },
+                  participantIdentity: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Meeting ended successfully' },
+          '500': { description: 'Failed to end meeting' },
+        },
+      },
+    },
+    '/api/admin/login': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Admin login',
+        description: 'Login with admin credentials. First login sets the credentials.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['username', 'password'],
+                properties: {
+                  username: { type: 'string' },
+                  password: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Login successful',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    token: { type: 'string', description: 'Session token (24h validity)' },
+                    expiresAt: { type: 'string', format: 'date-time' },
+                    isFirstLogin: { type: 'boolean' },
+                  },
+                },
+              },
+            },
+          },
+          '401': { description: 'Invalid credentials' },
+        },
+      },
+    },
+    '/api/admin/logout': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Admin logout',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Logged out successfully' },
+        },
+      },
+    },
+    '/api/admin/stats': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Get server statistics',
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Server statistics',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    activeRooms: { type: 'integer' },
+                    totalParticipants: { type: 'integer' },
+                    apiKeysCount: { type: 'integer' },
+                    webhooksCount: { type: 'integer' },
+                    uptime: { type: 'integer', description: 'Uptime in seconds' },
+                    version: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/rooms': {
+      get: {
+        tags: ['Rooms'],
+        summary: 'List active rooms',
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+        responses: {
+          '200': {
+            description: 'List of active rooms',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    rooms: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          name: { type: 'string' },
+                          displayName: { type: 'string', nullable: true },
+                          numParticipants: { type: 'integer' },
+                          createdAt: { type: 'string', format: 'date-time', nullable: true },
+                          maxParticipants: { type: 'integer' },
+                        },
+                      },
+                    },
+                    total: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/rooms/{roomName}': {
+      put: {
+        tags: ['Rooms'],
+        summary: 'Update room',
+        security: [{ bearerAuth: [] }, { apiKeyAuth: [] }],
+        parameters: [
+          { name: 'roomName', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  displayName: { type: 'string', description: 'Friendly name for the room' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Room updated' },
+          '404': { description: 'Room not found' },
+        },
+      },
+    },
+    '/api/admin/api-keys': {
+      get: {
+        tags: ['API Keys'],
+        summary: 'List API keys',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'List of API keys',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    apiKeys: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string' },
+                          name: { type: 'string' },
+                          keyPrefix: { type: 'string', description: 'Masked key (first/last chars)' },
+                          permissions: { type: 'array', items: { type: 'string' } },
+                          createdAt: { type: 'string', format: 'date-time' },
+                          lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      post: {
+        tags: ['API Keys'],
+        summary: 'Create API key',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name'],
+                properties: {
+                  name: { type: 'string' },
+                  permissions: {
+                    type: 'array',
+                    items: { type: 'string', enum: ['read', 'write', 'admin'] },
+                    default: ['read'],
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'API key created',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    key: { type: 'string', description: 'Full API key (only shown once)' },
+                    permissions: { type: 'array', items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/api-keys/{keyId}': {
+      delete: {
+        tags: ['API Keys'],
+        summary: 'Revoke API key',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'keyId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'API key revoked' },
+          '404': { description: 'API key not found' },
+        },
+      },
+    },
+    '/api/admin/webhooks': {
+      get: {
+        tags: ['Webhooks'],
+        summary: 'List webhooks',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'List of webhooks',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    webhooks: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string' },
+                          name: { type: 'string' },
+                          url: { type: 'string', format: 'uri' },
+                          events: { type: 'array', items: { type: 'string' } },
+                          enabled: { type: 'boolean' },
+                          failureCount: { type: 'integer' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Create webhook',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['name', 'url', 'events'],
+                properties: {
+                  name: { type: 'string' },
+                  url: { type: 'string', format: 'uri' },
+                  events: {
+                    type: 'array',
+                    items: {
+                      type: 'string',
+                      enum: ['room.created', 'room.deleted', 'participant.joined', 'participant.left', 'recording.started', 'recording.stopped'],
+                    },
+                  },
+                  enabled: { type: 'boolean', default: true },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '201': {
+            description: 'Webhook created',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    secret: { type: 'string', description: 'Webhook secret for signature verification (only shown once)' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/webhooks/{webhookId}': {
+      get: {
+        tags: ['Webhooks'],
+        summary: 'Get webhook details',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'webhookId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'Webhook details' },
+          '404': { description: 'Webhook not found' },
+        },
+      },
+      put: {
+        tags: ['Webhooks'],
+        summary: 'Update webhook',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'webhookId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  url: { type: 'string', format: 'uri' },
+                  events: { type: 'array', items: { type: 'string' } },
+                  enabled: { type: 'boolean' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Webhook updated' },
+          '404': { description: 'Webhook not found' },
+        },
+      },
+      delete: {
+        tags: ['Webhooks'],
+        summary: 'Delete webhook',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'webhookId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'Webhook deleted' },
+          '404': { description: 'Webhook not found' },
+        },
+      },
+    },
+    '/api/admin/webhooks/{webhookId}/test': {
+      post: {
+        tags: ['Webhooks'],
+        summary: 'Test webhook',
+        description: 'Send a test event to the webhook URL',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'webhookId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': {
+            description: 'Test result',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    statusCode: { type: 'integer' },
+                    responseTime: { type: 'integer', description: 'Response time in ms' },
+                    error: { type: 'string', nullable: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        description: 'Admin session token from /api/admin/login',
+      },
+      apiKeyAuth: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-API-Key',
+        description: 'API key created via admin panel',
+      },
+    },
+  },
+};
+
+// Serve OpenAPI spec as JSON
+app.get('/api/docs', (_req: Request, res: Response) => {
+  res.json(openApiSpec);
 });
 
 // Token generation endpoint
@@ -1125,7 +1686,7 @@ server.listen(PORT, () => {
 ║  LiveKit:    Ready                                              ║
 ║  Admin:      ${(ADMIN_USERNAME ? `User: ${ADMIN_USERNAME}` : 'First login sets credentials').padEnd(48)}║
 ║  WebSocket:  ws://localhost:${PORT}/ws/admin${' '.repeat(27)}║
-║  OpenAPI:    http://localhost:${PORT}/api/openapi.yaml${' '.repeat(20)}║
+║  API Docs:   http://localhost:${PORT}/api/docs${' '.repeat(26)}║
 ╚════════════════════════════════════════════════════════════════╝
   `);
 });

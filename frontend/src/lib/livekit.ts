@@ -670,7 +670,7 @@ export function getOpenApiUrl(): string {
   // Always return absolute URL since this may be used in iframe srcDoc context
   // where relative URLs won't work (origin is about:srcdoc)
   const base = API_URL || `${window.location.protocol}//${window.location.host}`;
-  return `${base}/api/openapi.yaml`;
+  return `${base}/api/docs`;
 }
 
 /**
