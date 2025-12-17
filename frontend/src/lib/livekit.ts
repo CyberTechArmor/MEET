@@ -463,6 +463,174 @@ export function parseRoomCode(input: string): string {
   return input.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 6);
 }
 
+// ============================================================================
+// JOIN LINK API
+// ============================================================================
+
+/**
+ * Join link parameters parsed from URL
+ */
+export interface JoinLinkParams {
+  /** Room code to join */
+  room: string | null;
+  /** Display name for the participant */
+  name: string | null;
+  /** Whether to auto-join when both room and name are provided */
+  autojoin: boolean;
+  /** Video quality preset to use */
+  quality: VideoQualityPreset | null;
+}
+
+/**
+ * Options for generating a join link
+ */
+export interface JoinLinkOptions {
+  /** Room code (required) */
+  room: string;
+  /** Pre-filled display name (optional) */
+  name?: string;
+  /** Auto-join when link is opened (default: true if name is provided) */
+  autojoin?: boolean;
+  /** Video quality preset (optional) */
+  quality?: VideoQualityPreset;
+}
+
+/**
+ * Parse join link parameters from the current URL
+ *
+ * Supported URL formats:
+ * - `?room=ABCDEF` - Pre-fill room code only
+ * - `?room=ABCDEF&name=John` - Pre-fill both, prompt to join
+ * - `?room=ABCDEF&name=John&autojoin=true` - Auto-join immediately
+ * - `?room=ABCDEF&name=John&quality=max` - Join with specific quality
+ *
+ * @returns Parsed join link parameters
+ *
+ * @example
+ * ```typescript
+ * const params = parseJoinLink();
+ * if (params.room && params.name && params.autojoin) {
+ *   // Auto-join the meeting
+ *   await connect(params.room, params.name);
+ * }
+ * ```
+ */
+export function parseJoinLink(): JoinLinkParams {
+  const urlParams = new URLSearchParams(window.location.search);
+
+  const room = urlParams.get('room');
+  const name = urlParams.get('name');
+  const autojoinParam = urlParams.get('autojoin');
+  const qualityParam = urlParams.get('quality');
+
+  // Parse autojoin - defaults to true if name is provided
+  let autojoin = name !== null;
+  if (autojoinParam !== null) {
+    autojoin = autojoinParam === 'true' || autojoinParam === '1';
+  }
+
+  // Validate quality preset
+  let quality: VideoQualityPreset | null = null;
+  if (qualityParam && ['auto', 'high', 'max', 'balanced', 'low'].includes(qualityParam)) {
+    quality = qualityParam as VideoQualityPreset;
+  }
+
+  return {
+    room: room ? parseRoomCode(room) : null,
+    name: name ? name.slice(0, 50) : null,
+    autojoin,
+    quality,
+  };
+}
+
+/**
+ * Generate a join link URL for a meeting
+ *
+ * Creates a shareable URL that can be used to join a meeting directly.
+ * When the link is opened, it will pre-fill the room code and optionally
+ * the display name, and can auto-join the meeting.
+ *
+ * @param options - Join link options
+ * @returns Full URL for joining the meeting
+ *
+ * @example
+ * ```typescript
+ * // Basic join link (user enters their name)
+ * const link = generateJoinLink({ room: 'ABC123' });
+ * // => "https://meet.example.com/?room=ABC123"
+ *
+ * // Pre-filled name, auto-joins
+ * const link = generateJoinLink({ room: 'ABC123', name: 'John Doe' });
+ * // => "https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true"
+ *
+ * // Pre-filled name, but don't auto-join
+ * const link = generateJoinLink({ room: 'ABC123', name: 'John', autojoin: false });
+ * // => "https://meet.example.com/?room=ABC123&name=John&autojoin=false"
+ *
+ * // With quality preset
+ * const link = generateJoinLink({ room: 'ABC123', name: 'John', quality: 'max' });
+ * // => "https://meet.example.com/?room=ABC123&name=John&autojoin=true&quality=max"
+ * ```
+ */
+export function generateJoinLink(options: JoinLinkOptions): string {
+  const { room, name, autojoin, quality } = options;
+
+  const params = new URLSearchParams();
+  params.set('room', parseRoomCode(room));
+
+  if (name) {
+    params.set('name', name);
+    // Default autojoin to true when name is provided
+    params.set('autojoin', autojoin !== false ? 'true' : 'false');
+  } else if (autojoin !== undefined) {
+    params.set('autojoin', autojoin ? 'true' : 'false');
+  }
+
+  if (quality) {
+    params.set('quality', quality);
+  }
+
+  const baseUrl = window.location.origin + window.location.pathname;
+  return `${baseUrl}?${params.toString()}`;
+}
+
+/**
+ * Generate a simple join link with just the room code
+ *
+ * @param roomCode - The room code
+ * @returns Join link URL
+ *
+ * @example
+ * ```typescript
+ * const link = getJoinLink('ABC123');
+ * // => "https://meet.example.com/?room=ABC123"
+ * ```
+ */
+export function getJoinLink(roomCode: string): string {
+  return generateJoinLink({ room: roomCode });
+}
+
+/**
+ * Clear join link parameters from the URL without page reload
+ *
+ * Call this after processing join link parameters to clean up the URL.
+ */
+export function clearJoinLinkParams(): void {
+  const url = new URL(window.location.href);
+  url.search = '';
+  window.history.replaceState({}, '', url.toString());
+}
+
+/**
+ * Check if the current URL has join link parameters
+ *
+ * @returns true if URL contains room parameter
+ */
+export function hasJoinLinkParams(): boolean {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.has('room') || urlParams.has('name');
+}
+
 /**
  * End meeting for all participants (host only)
  */

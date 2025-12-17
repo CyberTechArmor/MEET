@@ -1,8 +1,8 @@
-import { useState, FormEvent, useCallback } from 'react';
+import { useState, useEffect, FormEvent, useCallback } from 'react';
 import { ConnectionState } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
-import { generateRoomCode, formatRoomCode, parseRoomCode } from '../lib/livekit';
+import { generateRoomCode, formatRoomCode, parseRoomCode, getJoinLink } from '../lib/livekit';
 
 function JoinForm() {
   const { displayName, setDisplayName, roomCode, setRoomCode, connectionState } = useRoomStore();
@@ -11,8 +11,16 @@ function JoinForm() {
   const [mode, setMode] = useState<'create' | 'join' | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showCopied, setShowCopied] = useState(false);
 
   const isConnecting = connectionState === ConnectionState.Connecting;
+
+  // Auto-switch to join mode if room code is pre-filled (from URL params)
+  useEffect(() => {
+    if (roomCode && roomCode.length >= 4 && mode === null) {
+      setMode('join');
+    }
+  }, [roomCode, mode]);
 
   const handleGenerateCode = useCallback(async () => {
     setIsGenerating(true);
@@ -161,9 +169,37 @@ function JoinForm() {
                 readOnly={mode === 'create'}
               />
               {mode === 'create' && roomCode && (
-                <p className="mt-2 text-sm text-meet-text-tertiary text-center">
-                  Share this code with others to join
-                </p>
+                <div className="mt-3 space-y-2">
+                  <p className="text-sm text-meet-text-tertiary text-center">
+                    Share this code or link with others to join
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const link = getJoinLink(roomCode);
+                      navigator.clipboard.writeText(link);
+                      setShowCopied(true);
+                      setTimeout(() => setShowCopied(false), 2000);
+                    }}
+                    className="w-full flex items-center justify-center gap-2 text-sm text-meet-accent hover:text-meet-accent-light transition-smooth py-2"
+                  >
+                    {showCopied ? (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        Link copied!
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                        </svg>
+                        Copy invite link
+                      </>
+                    )}
+                  </button>
+                </div>
               )}
             </div>
 

@@ -5,6 +5,10 @@ Complete API reference for the MEET video conferencing platform.
 ## Table of Contents
 
 - [Overview](#overview)
+- [Join Links](#join-links)
+  - [URL Parameters](#url-parameters)
+  - [Generating Join Links](#generating-join-links)
+  - [Programmatic Join Links](#programmatic-join-links)
 - [REST API](#rest-api)
   - [Health Check](#health-check)
   - [Token Generation](#token-generation)
@@ -34,6 +38,144 @@ MEET provides two API layers:
 |-------------|----------|---------------------|
 | Demo Mode | `http://localhost:8080` | `ws://localhost:7880` |
 | With Proxy | `https://your-domain.com/api` | `wss://your-domain.com/livekit` |
+
+---
+
+## Join Links
+
+MEET supports URL-based join links that allow you to create shareable meeting invitations. Users can click a link to automatically join a meeting with pre-configured settings.
+
+### URL Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `room` | string | Yes | Room code (6 characters, e.g., `ABC123`) |
+| `name` | string | No | Display name for the participant (max 50 chars) |
+| `autojoin` | boolean | No | Auto-join when page loads (default: `true` if name provided) |
+| `quality` | string | No | Video quality preset: `max`, `high`, `auto`, `balanced`, `low` |
+
+### URL Examples
+
+```
+# Basic join link - user enters their name
+https://meet.example.com/?room=ABC123
+
+# Pre-filled name, auto-joins immediately
+https://meet.example.com/?room=ABC123&name=John%20Doe
+
+# Pre-filled name, but show join form first
+https://meet.example.com/?room=ABC123&name=John&autojoin=false
+
+# Join with specific video quality
+https://meet.example.com/?room=ABC123&name=John&quality=max
+
+# Full example with all parameters
+https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true&quality=high
+```
+
+### Generating Join Links
+
+You can generate join links in multiple ways:
+
+#### 1. In the UI
+
+When creating a room, click the **"Copy invite link"** button to copy a shareable link.
+
+#### 2. Manually Construct URL
+
+Simply append query parameters to your MEET base URL:
+
+```
+https://your-meet-domain.com/?room=ROOMCODE&name=USERNAME
+```
+
+#### 3. Using the Client SDK
+
+```typescript
+import { generateJoinLink, getJoinLink } from './lib/livekit';
+
+// Simple link with just room code
+const link = getJoinLink('ABC123');
+// => "https://meet.example.com/?room=ABC123"
+
+// Full options
+const link = generateJoinLink({
+  room: 'ABC123',
+  name: 'John Doe',
+  autojoin: true,
+  quality: 'high'
+});
+// => "https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true&quality=high"
+```
+
+### Programmatic Join Links
+
+For programmatic/automated meeting invitations (e.g., calendar integrations, email invites):
+
+#### Server-Side Link Generation (Any Language)
+
+```python
+# Python example
+from urllib.parse import urlencode, quote
+
+def generate_meet_link(base_url, room_code, name=None, autojoin=True, quality=None):
+    params = {'room': room_code.upper().replace('-', '')}
+    if name:
+        params['name'] = name
+        params['autojoin'] = 'true' if autojoin else 'false'
+    if quality:
+        params['quality'] = quality
+    return f"{base_url}?{urlencode(params)}"
+
+# Usage
+link = generate_meet_link(
+    'https://meet.example.com',
+    'ABC-123',
+    name='John Doe',
+    quality='high'
+)
+# => "https://meet.example.com?room=ABC123&name=John+Doe&autojoin=true&quality=high"
+```
+
+```javascript
+// Node.js example
+function generateMeetLink(baseUrl, roomCode, options = {}) {
+  const params = new URLSearchParams();
+  params.set('room', roomCode.toUpperCase().replace(/-/g, ''));
+
+  if (options.name) {
+    params.set('name', options.name);
+    params.set('autojoin', options.autojoin !== false ? 'true' : 'false');
+  }
+
+  if (options.quality) {
+    params.set('quality', options.quality);
+  }
+
+  return `${baseUrl}?${params.toString()}`;
+}
+
+// Usage
+const link = generateMeetLink('https://meet.example.com', 'ABC-123', {
+  name: 'John Doe',
+  quality: 'high'
+});
+```
+
+#### Use Cases
+
+1. **Calendar Invitations**: Include join link in meeting description
+2. **Email Invites**: Send personalized links with recipient's name pre-filled
+3. **Embedded Links**: Add "Join Meeting" buttons to your application
+4. **Kiosk Mode**: Create auto-join links for conference room displays
+5. **API Integrations**: Generate links for third-party scheduling tools
+
+#### Security Considerations
+
+- Join links are **not authenticated** - anyone with the link can join
+- For sensitive meetings, combine with room passwords (future feature)
+- Links don't expire - consider generating new room codes for each meeting
+- The `name` parameter is user-provided and should be treated as untrusted input
 
 ---
 
@@ -407,6 +549,117 @@ import { getDeviceId } from './lib/livekit';
 
 const deviceId = getDeviceId();
 // 'lx5k3m_a8b2c9d'
+```
+
+---
+
+### Join Link API
+
+Functions for creating and parsing shareable meeting links.
+
+#### Type Definitions
+
+```typescript
+interface JoinLinkParams {
+  room: string | null;      // Parsed room code
+  name: string | null;      // Display name
+  autojoin: boolean;        // Whether to auto-join
+  quality: VideoQualityPreset | null;  // Quality preset
+}
+
+interface JoinLinkOptions {
+  room: string;             // Room code (required)
+  name?: string;            // Display name (optional)
+  autojoin?: boolean;       // Auto-join flag (default: true if name provided)
+  quality?: VideoQualityPreset;  // Quality preset (optional)
+}
+```
+
+#### `parseJoinLink(): JoinLinkParams`
+
+Parse join link parameters from the current URL.
+
+```typescript
+import { parseJoinLink } from './lib/livekit';
+
+// URL: https://meet.example.com/?room=ABC123&name=John&autojoin=true
+const params = parseJoinLink();
+console.log(params);
+// {
+//   room: 'ABC123',
+//   name: 'John',
+//   autojoin: true,
+//   quality: null
+// }
+
+// Auto-join if all required params present
+if (params.room && params.name && params.autojoin) {
+  await connect(params.room, params.name);
+}
+```
+
+#### `generateJoinLink(options: JoinLinkOptions): string`
+
+Generate a full join link URL with the specified options.
+
+```typescript
+import { generateJoinLink } from './lib/livekit';
+
+// Basic link
+const link = generateJoinLink({ room: 'ABC123' });
+// => "https://meet.example.com/?room=ABC123"
+
+// With pre-filled name (auto-joins by default)
+const link = generateJoinLink({
+  room: 'ABC123',
+  name: 'John Doe'
+});
+// => "https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true"
+
+// With all options
+const link = generateJoinLink({
+  room: 'ABC123',
+  name: 'John Doe',
+  autojoin: false,  // Show form instead of auto-joining
+  quality: 'max'
+});
+// => "https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=false&quality=max"
+```
+
+#### `getJoinLink(roomCode: string): string`
+
+Simple helper to generate a basic join link with just the room code.
+
+```typescript
+import { getJoinLink } from './lib/livekit';
+
+const link = getJoinLink('ABC123');
+// => "https://meet.example.com/?room=ABC123"
+```
+
+#### `hasJoinLinkParams(): boolean`
+
+Check if the current URL contains join link parameters.
+
+```typescript
+import { hasJoinLinkParams } from './lib/livekit';
+
+if (hasJoinLinkParams()) {
+  const params = parseJoinLink();
+  // Handle join link...
+}
+```
+
+#### `clearJoinLinkParams(): void`
+
+Remove join link parameters from the URL without page reload.
+
+```typescript
+import { clearJoinLinkParams } from './lib/livekit';
+
+// After processing join link, clean up the URL
+clearJoinLinkParams();
+// URL changes from /?room=ABC123&name=John to /
 ```
 
 ---
