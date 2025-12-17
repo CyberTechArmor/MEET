@@ -1,0 +1,975 @@
+openapi: 3.0.3
+info:
+  title: MEET API
+  description: |
+    REST API for the MEET video conferencing platform.
+
+    ## Authentication
+
+    Most endpoints are public and don't require authentication. Admin endpoints require
+    either a super admin password or an API key.
+
+    ### API Key Authentication
+    Use the `X-API-Key` header for programmatic access:
+    ```
+    X-API-Key: your-api-key-here
+    ```
+
+    ### Admin Authentication
+    Use the `Authorization` header with the admin password:
+    ```
+    Authorization: Bearer your-admin-password
+    ```
+
+    ## Join Links
+
+    MEET supports URL-based join links for programmatic meeting invitations:
+    - `?room=ABC123` - Pre-fill room code
+    - `?name=John` - Pre-fill display name
+    - `?autojoin=true` - Auto-join when page loads
+    - `?quality=high` - Set video quality preset
+
+  version: 1.0.0
+  contact:
+    name: MEET Support
+    url: https://github.com/CyberTechArmor/MEET
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Demo Mode (local development)
+  - url: https://meet.example.com/api
+    description: Production (behind reverse proxy)
+
+tags:
+  - name: Health
+    description: Server health and status
+  - name: Meetings
+    description: Meeting room management
+  - name: Admin
+    description: Administrative operations (requires authentication)
+  - name: API Keys
+    description: API key management (requires admin authentication)
+  - name: Webhooks
+    description: Webhook configuration for real-time events
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Check if the API server is running and healthy
+      operationId: getHealth
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                timestamp: '2024-01-15T10:30:00.000Z'
+                version: '1.0.0'
+
+  /api/token:
+    post:
+      tags:
+        - Meetings
+      summary: Generate meeting token
+      description: |
+        Generate a LiveKit JWT token for joining a video meeting room.
+        The first participant to join a room becomes the host.
+      operationId: createToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+            example:
+              roomName: ABC123
+              participantName: John Doe
+              deviceId: m8x3k_a7b9c2d
+      responses:
+        '200':
+          description: Token generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/room-code:
+    get:
+      tags:
+        - Meetings
+      summary: Generate room code
+      description: Generate a random 6-character room code for creating a new meeting
+      operationId: generateRoomCode
+      responses:
+        '200':
+          description: Room code generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomCodeResponse'
+              example:
+                roomCode: ABC123
+
+  /api/end-meeting:
+    post:
+      tags:
+        - Meetings
+      summary: End meeting for all
+      description: End the meeting and disconnect all participants (host only)
+      operationId: endMeeting
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EndMeetingRequest'
+      responses:
+        '200':
+          description: Meeting ended successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/rooms:
+    get:
+      tags:
+        - Meetings
+      summary: List active rooms
+      description: Get a list of all currently active meeting rooms
+      operationId: listRooms
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of active rooms
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomsListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/rooms/{roomName}:
+    put:
+      tags:
+        - Meetings
+      summary: Update room display name
+      description: Set or update the display name for an active meeting room
+      operationId: updateRoom
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: roomName
+          in: path
+          required: true
+          description: The room code (e.g., ABC123)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayName:
+                  type: string
+                  description: Display name for the meeting (optional, can be empty to clear)
+                  maxLength: 100
+                  example: "Team Weekly Standup"
+      responses:
+        '200':
+          description: Room updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomInfo'
+        '404':
+          description: Room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/login:
+    post:
+      tags:
+        - Admin
+      summary: Admin login
+      description: Authenticate as admin and receive a session token
+      operationId: adminLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdminLoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminLoginResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/stats:
+    get:
+      tags:
+        - Admin
+      summary: Get server statistics
+      description: Get current server statistics including active rooms and participants
+      operationId: getStats
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Server statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/api-keys:
+    get:
+      tags:
+        - API Keys
+      summary: List API keys
+      description: Get a list of all API keys (keys are masked)
+      operationId: listApiKeys
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of API keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeysListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags:
+        - API Keys
+      summary: Create API key
+      description: Generate a new API key for programmatic access
+      operationId: createApiKey
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '201':
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateApiKeyResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/api-keys/{keyId}:
+    delete:
+      tags:
+        - API Keys
+      summary: Revoke API key
+      description: Revoke an existing API key
+      operationId: revokeApiKey
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: keyId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The API key ID to revoke
+      responses:
+        '200':
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: API key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/webhooks:
+    get:
+      tags:
+        - Webhooks
+      summary: List webhooks
+      description: Get a list of all configured webhooks
+      operationId: listWebhooks
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of webhooks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhooksListResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags:
+        - Webhooks
+      summary: Create webhook
+      description: Create a new webhook for receiving real-time events
+      operationId: createWebhook
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookRequest'
+      responses:
+        '201':
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/webhooks/{webhookId}:
+    get:
+      tags:
+        - Webhooks
+      summary: Get webhook
+      description: Get details of a specific webhook
+      operationId: getWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '404':
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags:
+        - Webhooks
+      summary: Update webhook
+      description: Update an existing webhook configuration
+      operationId: updateWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookRequest'
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookResponse'
+        '404':
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags:
+        - Webhooks
+      summary: Delete webhook
+      description: Delete a webhook
+      operationId: deleteWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Webhook deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/webhooks/{webhookId}/test:
+    post:
+      tags:
+        - Webhooks
+      summary: Test webhook
+      description: Send a test event to the webhook endpoint
+      operationId: testWebhook
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: webhookId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Test event sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookTestResponse'
+        '404':
+          description: Webhook not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/openapi.yaml:
+    get:
+      tags:
+        - Health
+      summary: OpenAPI specification
+      description: Get the OpenAPI 3.0 specification for this API
+      operationId: getOpenApiSpec
+      responses:
+        '200':
+          description: OpenAPI specification
+          content:
+            application/x-yaml:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for programmatic access
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: Admin password or session token
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+      required:
+        - status
+        - timestamp
+
+    TokenRequest:
+      type: object
+      properties:
+        roomName:
+          type: string
+          description: Room code (max 50 chars, alphanumeric)
+          maxLength: 50
+        participantName:
+          type: string
+          description: Display name (max 50 chars)
+          maxLength: 50
+        deviceId:
+          type: string
+          description: Unique device identifier for handling duplicate names
+          maxLength: 30
+      required:
+        - roomName
+        - participantName
+
+    TokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT token for LiveKit connection
+        roomName:
+          type: string
+          description: Sanitized room name
+        participantName:
+          type: string
+          description: Display name
+        participantIdentity:
+          type: string
+          description: Unique participant identifier
+        isHost:
+          type: boolean
+          description: True if this participant is the meeting host
+      required:
+        - token
+        - roomName
+        - participantName
+        - participantIdentity
+        - isHost
+
+    RoomCodeResponse:
+      type: object
+      properties:
+        roomCode:
+          type: string
+          description: 6-character room code
+          pattern: '^[A-Z0-9]{6}$'
+      required:
+        - roomCode
+
+    EndMeetingRequest:
+      type: object
+      properties:
+        roomName:
+          type: string
+          description: Room to end
+        participantIdentity:
+          type: string
+          description: Identity of the requesting participant
+      required:
+        - roomName
+        - participantIdentity
+
+    RoomsListResponse:
+      type: object
+      properties:
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomInfo'
+        total:
+          type: integer
+      required:
+        - rooms
+        - total
+
+    RoomInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Room code (e.g., ABC123)
+        displayName:
+          type: string
+          nullable: true
+          description: Optional display name for the meeting
+        numParticipants:
+          type: integer
+          description: Current number of participants
+        createdAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Room creation timestamp
+        maxParticipants:
+          type: integer
+          description: Maximum allowed participants (0 = unlimited)
+
+    AdminLoginRequest:
+      type: object
+      properties:
+        password:
+          type: string
+          description: Admin password
+      required:
+        - password
+
+    AdminLoginResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        token:
+          type: string
+          description: Session token for subsequent requests
+        expiresAt:
+          type: string
+          format: date-time
+      required:
+        - success
+        - token
+
+    StatsResponse:
+      type: object
+      properties:
+        activeRooms:
+          type: integer
+        totalParticipants:
+          type: integer
+        apiKeysCount:
+          type: integer
+        webhooksCount:
+          type: integer
+        uptime:
+          type: integer
+          description: Server uptime in seconds
+        version:
+          type: string
+      required:
+        - activeRooms
+        - totalParticipants
+        - uptime
+
+    ApiKeysListResponse:
+      type: object
+      properties:
+        apiKeys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiKeyInfo'
+      required:
+        - apiKeys
+
+    ApiKeyInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        keyPrefix:
+          type: string
+          description: First 8 characters of the key
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [read, write, admin]
+      required:
+        - id
+        - name
+        - keyPrefix
+        - createdAt
+        - permissions
+
+    CreateApiKeyRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Descriptive name for the API key
+          maxLength: 100
+        permissions:
+          type: array
+          items:
+            type: string
+            enum: [read, write, admin]
+          default: [read]
+      required:
+        - name
+
+    CreateApiKeyResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        key:
+          type: string
+          description: The full API key (only shown once)
+        permissions:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - key
+        - permissions
+        - createdAt
+
+    WebhooksListResponse:
+      type: object
+      properties:
+        webhooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookResponse'
+      required:
+        - webhooks
+
+    WebhookResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - room.created
+              - room.deleted
+              - participant.joined
+              - participant.left
+              - recording.started
+              - recording.stopped
+        enabled:
+          type: boolean
+        secret:
+          type: string
+          description: Webhook signing secret (masked except on creation)
+        createdAt:
+          type: string
+          format: date-time
+        lastTriggeredAt:
+          type: string
+          format: date-time
+          nullable: true
+        failureCount:
+          type: integer
+      required:
+        - id
+        - name
+        - url
+        - events
+        - enabled
+        - createdAt
+
+    CreateWebhookRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Descriptive name for the webhook
+          maxLength: 100
+        url:
+          type: string
+          format: uri
+          description: HTTPS URL to receive webhook events
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - room.created
+              - room.deleted
+              - participant.joined
+              - participant.left
+              - recording.started
+              - recording.stopped
+          description: Events to subscribe to
+        enabled:
+          type: boolean
+          default: true
+      required:
+        - name
+        - url
+        - events
+
+    UpdateWebhookRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+
+    WebhookTestResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        statusCode:
+          type: integer
+        responseTime:
+          type: integer
+          description: Response time in milliseconds
+        error:
+          type: string
+          nullable: true
+      required:
+        - success
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+      required:
+        - success
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+      required:
+        - error
+
+    WebhookEvent:
+      type: object
+      description: Event payload sent to webhook endpoints
+      properties:
+        id:
+          type: string
+          description: Unique event ID
+        type:
+          type: string
+          enum:
+            - room.created
+            - room.deleted
+            - participant.joined
+            - participant.left
+            - recording.started
+            - recording.stopped
+        timestamp:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+      required:
+        - id
+        - type
+        - timestamp
+        - data
