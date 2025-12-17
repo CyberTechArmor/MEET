@@ -58,7 +58,10 @@
 
     # Security headers
     header {
-        X-Frame-Options "SAMEORIGIN"
+        # Allow iframe embedding from any domain (controlled via admin panel)
+        # Use Content-Security-Policy frame-ancestors instead of X-Frame-Options
+        Content-Security-Policy "frame-ancestors *"
+        -X-Frame-Options
         X-Content-Type-Options "nosniff"
         X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
