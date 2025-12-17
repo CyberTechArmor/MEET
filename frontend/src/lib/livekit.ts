@@ -632,6 +632,29 @@ export function hasJoinLinkParams(): boolean {
 }
 
 /**
+ * Public status response
+ */
+export interface PublicStatusResponse {
+  publicAccessEnabled: boolean;
+  version: string;
+}
+
+/**
+ * Check public access status (no authentication required)
+ * Returns whether the public web interface is enabled
+ */
+export async function getPublicStatus(): Promise<PublicStatusResponse> {
+  const response = await fetch(`${API_URL}/api/status`);
+
+  if (!response.ok) {
+    // Default to enabled if we can't reach the status endpoint
+    return { publicAccessEnabled: true, version: '1.0.0' };
+  }
+
+  return response.json();
+}
+
+/**
  * End meeting for all participants (host only)
  */
 export async function endMeetingForAll(roomName: string, participantIdentity: string): Promise<void> {

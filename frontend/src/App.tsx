@@ -7,6 +7,7 @@ import {
   parseJoinLink,
   clearJoinLinkParams,
   setVideoQualityPreset,
+  getPublicStatus,
 } from './lib/livekit';
 import JoinForm from './components/JoinForm';
 import VideoRoom from './components/VideoRoom';
@@ -18,6 +19,23 @@ function App() {
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
   const [showAdmin, setShowAdmin] = useState(false);
+  const [publicAccessEnabled, setPublicAccessEnabled] = useState<boolean | null>(null);
+  const [isCheckingStatus, setIsCheckingStatus] = useState(true);
+
+  // Check public access status on mount
+  useEffect(() => {
+    getPublicStatus()
+      .then((status) => {
+        setPublicAccessEnabled(status.publicAccessEnabled);
+      })
+      .catch(() => {
+        // If we can't reach the API, assume public access is enabled
+        setPublicAccessEnabled(true);
+      })
+      .finally(() => {
+        setIsCheckingStatus(false);
+      });
+  }, []);
 
   // Handle join links and auto-rejoin on page load
   useEffect(() => {
@@ -67,6 +85,68 @@ function App() {
     }
   }, [connect, setDisplayName, setRoomCode]);
 
+
+  // Show loading state while checking status
+  if (isCheckingStatus) {
+    return (
+      <div className="h-full w-full bg-meet-bg flex items-center justify-center">
+        <div className="animate-spin h-8 w-8 border-4 border-meet-accent border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
+  // Show disabled message when public access is off
+  if (publicAccessEnabled === false && view === 'join') {
+    return (
+      <div className="h-full w-full bg-meet-bg flex flex-col items-center justify-center p-8">
+        <div className="text-center max-w-md">
+          {/* MEET Logo/Title */}
+          <h1 className="text-5xl font-bold text-meet-text-primary mb-4">MEET</h1>
+
+          {/* Disabled icon */}
+          <div className="mb-6 flex justify-center">
+            <div className="w-20 h-20 rounded-full bg-meet-error/20 flex items-center justify-center">
+              <svg className="w-10 h-10 text-meet-error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+              </svg>
+            </div>
+          </div>
+
+          {/* Message */}
+          <h2 className="text-2xl font-semibold text-meet-text-primary mb-3">
+            Public Access Disabled
+          </h2>
+          <p className="text-meet-text-secondary mb-6">
+            The public video conferencing service is currently unavailable.
+            Please contact an administrator if you need access.
+          </p>
+
+          {/* Info box */}
+          <div className="glass rounded-xl p-4 text-left">
+            <p className="text-sm text-meet-text-tertiary">
+              <strong className="text-meet-text-secondary">For integrations:</strong> API access with valid API keys is still available.
+              Contact your administrator for API credentials.
+            </p>
+          </div>
+        </div>
+
+        {/* Admin Button - always accessible */}
+        <button
+          onClick={() => setShowAdmin(true)}
+          className="fixed bottom-4 right-4 p-2 text-meet-text-tertiary hover:text-meet-text-secondary transition-smooth opacity-50 hover:opacity-100"
+          title="Admin Panel"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </button>
+
+        {/* Admin Panel */}
+        {showAdmin && <AdminPanel onClose={() => setShowAdmin(false)} />}
+      </div>
+    );
+  }
 
   return (
     <div className="h-full w-full bg-meet-bg">

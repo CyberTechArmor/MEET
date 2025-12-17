@@ -26,6 +26,7 @@ import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookRespon
 import type { RoomInfo } from '../stores/adminStore';
 
 type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
+type DocsSubTab = 'api' | 'iframe';
 
 interface AdminPanelProps {
   onClose: () => void;
@@ -97,6 +98,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   } | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+
+  // Docs sub-tab state
+  const [docsSubTab, setDocsSubTab] = useState<DocsSubTab>('api');
 
   // Check session validity on mount
   useEffect(() => {
@@ -1220,12 +1224,39 @@ function AdminPanel({ onClose }: AdminPanelProps) {
               </div>
             )}
 
-            {/* Docs Tab - Swagger UI */}
+            {/* Docs Tab - API and Iframe Integration */}
             {activeTab === 'docs' && (
               <div className="space-y-6">
-                <div className="glass rounded-xl overflow-hidden" style={{ height: 'calc(100vh - 250px)' }}>
-                  <iframe
-                    srcDoc={`<!DOCTYPE html>
+                {/* Sub-tabs */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setDocsSubTab('api')}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-smooth ${
+                      docsSubTab === 'api'
+                        ? 'bg-meet-bg-tertiary text-meet-text-primary'
+                        : 'text-meet-text-secondary hover:text-meet-text-primary'
+                    }`}
+                  >
+                    API Reference
+                  </button>
+                  <button
+                    onClick={() => setDocsSubTab('iframe')}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-smooth ${
+                      docsSubTab === 'iframe'
+                        ? 'bg-meet-bg-tertiary text-meet-text-primary'
+                        : 'text-meet-text-secondary hover:text-meet-text-primary'
+                    }`}
+                  >
+                    Iframe Integration
+                  </button>
+                </div>
+
+                {/* API Reference */}
+                {docsSubTab === 'api' && (
+                  <>
+                    <div className="glass rounded-xl overflow-hidden" style={{ height: 'calc(100vh - 300px)' }}>
+                      <iframe
+                        srcDoc={`<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1280,28 +1311,208 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   </script>
 </body>
 </html>`}
-                    title="API Documentation"
-                    className="w-full h-full border-0"
-                  />
-                </div>
-                <div className="glass rounded-xl p-4">
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm text-meet-text-secondary">
-                      API Docs URL: <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary">{getOpenApiUrl()}</code>
+                        title="API Documentation"
+                        className="w-full h-full border-0"
+                      />
                     </div>
-                    <a
-                      href={getOpenApiUrl()}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm text-meet-accent hover:underline flex items-center gap-1"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                      </svg>
-                      View JSON
-                    </a>
+                    <div className="glass rounded-xl p-4">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm text-meet-text-secondary">
+                          API Docs URL: <code className="bg-meet-bg-tertiary px-2 py-1 rounded text-meet-text-primary">{getOpenApiUrl()}</code>
+                        </div>
+                        <a
+                          href={getOpenApiUrl()}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-meet-accent hover:underline flex items-center gap-1"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                          View JSON
+                        </a>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                {/* Iframe Integration Documentation */}
+                {docsSubTab === 'iframe' && (
+                  <div className="glass rounded-xl p-6 overflow-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
+                    <div className="prose prose-invert max-w-none">
+                      <h2 className="text-2xl font-bold text-meet-text-primary mb-4">Iframe Integration Guide</h2>
+                      <p className="text-meet-text-secondary mb-6">
+                        Embed MEET video conferencing into your application using iframes. This is the simplest integration method and requires minimal setup.
+                      </p>
+
+                      {/* Quick Start */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Quick Start</h3>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
+                        <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
+  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  allow="camera; microphone; display-capture; autoplay"
+  style="width: 100%; height: 600px; border: none;"
+></iframe>`}</code></pre>
+                      </div>
+
+                      {/* URL Parameters */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">URL Parameters</h3>
+                      <table className="w-full text-sm mb-6">
+                        <thead>
+                          <tr className="border-b border-meet-border">
+                            <th className="text-left py-2 text-meet-text-secondary">Parameter</th>
+                            <th className="text-left py-2 text-meet-text-secondary">Required</th>
+                            <th className="text-left py-2 text-meet-text-secondary">Description</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="border-b border-meet-border/50">
+                            <td className="py-2 font-mono text-meet-accent">room</td>
+                            <td className="py-2 text-meet-text-primary">Yes</td>
+                            <td className="py-2 text-meet-text-secondary">Room code/ID to join</td>
+                          </tr>
+                          <tr className="border-b border-meet-border/50">
+                            <td className="py-2 font-mono text-meet-accent">name</td>
+                            <td className="py-2 text-meet-text-primary">No</td>
+                            <td className="py-2 text-meet-text-secondary">Pre-filled participant name</td>
+                          </tr>
+                          <tr className="border-b border-meet-border/50">
+                            <td className="py-2 font-mono text-meet-accent">autojoin</td>
+                            <td className="py-2 text-meet-text-primary">No</td>
+                            <td className="py-2 text-meet-text-secondary">Auto-join when both room and name provided (true/false)</td>
+                          </tr>
+                          <tr className="border-b border-meet-border/50">
+                            <td className="py-2 font-mono text-meet-accent">quality</td>
+                            <td className="py-2 text-meet-text-primary">No</td>
+                            <td className="py-2 text-meet-text-secondary">Video quality: auto, high, max, balanced, low</td>
+                          </tr>
+                        </tbody>
+                      </table>
+
+                      {/* Integration Steps */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Integration Steps</h3>
+                      <ol className="list-decimal list-inside space-y-4 text-meet-text-secondary">
+                        <li>
+                          <strong className="text-meet-text-primary">Create an API Key</strong>
+                          <p className="ml-6 mt-1">Go to the "API Keys" tab and create a new API key with appropriate permissions.</p>
+                        </li>
+                        <li>
+                          <strong className="text-meet-text-primary">Create a Room (Optional)</strong>
+                          <p className="ml-6 mt-1">Use the API to create rooms programmatically with custom IDs.</p>
+                          <div className="bg-meet-bg-tertiary rounded-lg p-3 ml-6 mt-2">
+                            <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`POST /api/rooms
+{
+  "roomName": "my-meeting-123",
+  "displayName": "Team Standup",
+  "maxParticipants": 10
+}`}</code></pre>
+                          </div>
+                        </li>
+                        <li>
+                          <strong className="text-meet-text-primary">Embed the Iframe</strong>
+                          <p className="ml-6 mt-1">Add the iframe to your application with the room code.</p>
+                        </li>
+                      </ol>
+
+                      {/* Required Permissions */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Required Iframe Permissions</h3>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
+                        <code className="text-sm text-meet-text-primary">allow="camera; microphone; display-capture; autoplay"</code>
+                      </div>
+                      <ul className="list-disc list-inside space-y-1 text-meet-text-secondary mb-6">
+                        <li><code className="text-meet-accent">camera</code> - Access to user's camera</li>
+                        <li><code className="text-meet-accent">microphone</code> - Access to user's microphone</li>
+                        <li><code className="text-meet-accent">display-capture</code> - Screen sharing capability</li>
+                        <li><code className="text-meet-accent">autoplay</code> - Auto-play audio/video streams</li>
+                      </ul>
+
+                      {/* JavaScript Example */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">JavaScript Integration</h3>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
+                        <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`class MeetIntegration {
+  constructor(apiKey, serverUrl = '${window.location.origin}') {
+    this.apiKey = apiKey;
+    this.serverUrl = serverUrl;
+  }
+
+  // Create a new meeting room
+  async createMeeting(options = {}) {
+    const response = await fetch(\`\${this.serverUrl}/api/rooms\`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': this.apiKey
+      },
+      body: JSON.stringify({
+        roomName: options.roomId || \`meeting-\${Date.now()}\`,
+        displayName: options.displayName || 'Video Meeting',
+        maxParticipants: options.maxParticipants || 100
+      })
+    });
+    return response.json();
+  }
+
+  // Generate join URL
+  getJoinUrl(roomName, participantName) {
+    const params = new URLSearchParams({ room: roomName });
+    if (participantName) params.set('name', participantName);
+    return \`\${this.serverUrl}/?\${params.toString()}\`;
+  }
+
+  // Embed meeting in a container
+  embedMeeting(containerId, roomName, participantName) {
+    const container = document.getElementById(containerId);
+    const iframe = document.createElement('iframe');
+    iframe.src = this.getJoinUrl(roomName, participantName);
+    iframe.allow = 'camera; microphone; display-capture; autoplay';
+    iframe.allowFullscreen = true;
+    iframe.style.cssText = 'width: 100%; height: 100%; border: none;';
+    container.innerHTML = '';
+    container.appendChild(iframe);
+    return iframe;
+  }
+}
+
+// Usage
+const meet = new MeetIntegration('your-api-key');
+const meeting = await meet.createMeeting({ roomId: 'standup-123' });
+meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre>
+                      </div>
+
+                      {/* React Example */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">React Component Example</h3>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
+                        <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`function MeetEmbed({ roomId, participantName }) {
+  const [isLoading, setIsLoading] = useState(true);
+  const meetUrl = \`${window.location.origin}/?room=\${roomId}\${
+    participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
+  }\`;
+
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '600px' }}>
+      {isLoading && <div>Loading...</div>}
+      <iframe
+        src={meetUrl}
+        allow="camera; microphone; display-capture; autoplay"
+        allowFullScreen
+        onLoad={() => setIsLoading(false)}
+        style={{ width: '100%', height: '100%', border: 'none' }}
+      />
+    </div>
+  );
+}`}</code></pre>
+                      </div>
+
+                      {/* Troubleshooting */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Troubleshooting</h3>
+                      <ul className="list-disc list-inside space-y-2 text-meet-text-secondary">
+                        <li><strong className="text-meet-text-primary">Camera/Microphone not working:</strong> Ensure iframe has correct <code className="text-meet-accent">allow</code> attributes and page is served over HTTPS.</li>
+                        <li><strong className="text-meet-text-primary">Iframe not loading:</strong> Check browser console for CSP errors. Verify CORS is configured properly.</li>
+                        <li><strong className="text-meet-text-primary">Room not found:</strong> Rooms are created on first join unless pre-created via API. Check room name uses only alphanumeric characters, hyphens, and underscores.</li>
+                      </ul>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
           </>

@@ -339,6 +339,14 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
+// Public status endpoint (no auth required) - returns whether public access is enabled
+app.get('/api/status', (_req: Request, res: Response) => {
+  res.json({
+    publicAccessEnabled: serverSettings.publicAccessEnabled,
+    version: API_VERSION,
+  });
+});
+
 // OpenAPI Documentation
 const openApiSpec = {
   openapi: '3.0.3',
@@ -397,6 +405,29 @@ Configure webhooks to receive real-time notifications for events like:
                   properties: {
                     status: { type: 'string', example: 'ok' },
                     timestamp: { type: 'string', format: 'date-time' },
+                    version: { type: 'string', example: '1.0.0' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/status': {
+      get: {
+        tags: ['Public'],
+        summary: 'Public access status',
+        description: 'Check if the public web interface is enabled. No authentication required.',
+        responses: {
+          '200': {
+            description: 'Public access status',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    publicAccessEnabled: { type: 'boolean', description: 'Whether public (non-API) access is allowed' },
                     version: { type: 'string', example: '1.0.0' },
                   },
                 },
