@@ -36,18 +36,18 @@ MEET is a self-hosted video conferencing platform built with modern web technolo
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Framework | React 18 + TypeScript | UI rendering and type safety |
-| Build Tool | Vite | Fast development and optimized builds |
-| State Management | Zustand | Lightweight global state |
+| Framework | React 19 + TypeScript | UI rendering and type safety |
+| Build Tool | Vite 8 | Fast development and optimized builds (Rolldown bundler) |
+| State Management | Zustand 5 | Lightweight global state |
 | WebRTC Client | livekit-client | Real-time media handling |
-| Styling | Tailwind CSS | Utility-first styling |
+| Styling | Tailwind CSS 4 | Utility-first styling (CSS-first config, Oxide engine) |
 | Notifications | react-hot-toast | User feedback |
 
 ### Backend Stack
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| API Server | Express.js + TypeScript | REST endpoints |
+| API Server | Express 5 + TypeScript | REST endpoints |
 | WebRTC Server | LiveKit (Go) | Media server (SFU architecture) |
 | Token Auth | livekit-server-sdk | JWT token generation |
 | Orchestration | Docker Compose | Service coordination |
@@ -57,29 +57,46 @@ MEET is a self-hosted video conferencing platform built with modern web technolo
 ```
 frontend/src/
 ├── components/
-│   ├── JoinForm.tsx       # Room creation/joining UI
-│   ├── VideoRoom.tsx      # Main video conferencing view
-│   ├── VideoTile.tsx      # Individual participant video
-│   ├── ControlBar.tsx     # Media controls (mic, camera, etc.)
-│   ├── SelfViewPip.tsx    # Picture-in-picture self view
-│   └── ConfirmModal.tsx   # Reusable confirmation dialogs
+│   ├── JoinForm.tsx         # Room creation/joining UI
+│   ├── VideoRoom.tsx        # Main video conferencing view
+│   ├── VideoTile.tsx        # Individual participant video
+│   ├── ScreenShareView.tsx  # Screen share display component
+│   ├── ControlBar.tsx       # Media controls (mic, camera, screen share, end call)
+│   ├── SelfViewPip.tsx      # Picture-in-picture self view
+│   ├── AdminPanel.tsx       # Admin dashboard (settings, API keys, webhooks, docs)
+│   └── ConfirmModal.tsx     # Reusable confirmation dialogs
 ├── hooks/
-│   └── useLiveKit.ts      # LiveKit connection management
+│   └── useLiveKit.ts        # LiveKit connection management
 ├── stores/
-│   └── roomStore.ts       # Zustand state store
+│   ├── roomStore.ts         # Room/call state store
+│   └── adminStore.ts        # Admin panel state store (persisted)
 ├── lib/
-│   └── livekit.ts         # API calls and utilities
-└── App.tsx                # Root component with routing
+│   └── livekit.ts           # API calls, join links, and utilities
+└── App.tsx                  # Root component with routing
 ```
 
 ### API Endpoints
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/token` | POST | Generate LiveKit JWT token |
-| `/api/room-code` | GET | Generate random room code |
-| `/api/end-meeting` | POST | End meeting for all (host only) |
-| `/health` | GET | Health check |
+| Endpoint | Method | Auth | Purpose |
+|----------|--------|------|---------|
+| `/health` | GET | No | Health check |
+| `/api/status` | GET | No | Public access status |
+| `/api/docs` | GET | No | OpenAPI specification |
+| `/api/token` | POST | Optional | Generate LiveKit JWT token |
+| `/api/room-code` | GET | No | Generate random room code |
+| `/api/end-meeting` | POST | No | End meeting for all (host only) |
+| `/api/rooms` | GET | API Key/Admin | List active rooms |
+| `/api/rooms` | POST | API Key/Admin | Create a room |
+| `/api/rooms/:roomName` | PUT | API Key/Admin | Update room settings |
+| `/api/admin/login` | POST | No | Admin login |
+| `/api/admin/logout` | POST | Admin | Admin logout |
+| `/api/admin/stats` | GET | API Key/Admin | Server statistics |
+| `/api/admin/settings` | GET/PUT | Admin | Server settings (incl. iframe domains) |
+| `/api/admin/api-keys` | GET/POST | Admin | Manage API keys |
+| `/api/admin/api-keys/:id` | DELETE | Admin | Revoke API key |
+| `/api/admin/webhooks` | GET/POST | Admin | Manage webhooks |
+| `/api/admin/webhooks/:id` | GET/PUT/DELETE | Admin | Webhook CRUD |
+| `/api/admin/webhooks/:id/test` | POST | Admin | Test webhook delivery |
 
 ---
 

@@ -8,11 +8,25 @@ MEET can be embedded into your application via an iframe, allowing you to add vi
 
 ## Quick Start
 
-### Basic Iframe Embedding
+### Full-Featured Embed (with end call controls)
+
+Includes leave call and end meeting buttons. Best for standalone embeds.
 
 ```html
 <iframe
   src="https://your-meet-server.com/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  allow="camera; microphone; display-capture; autoplay"
+  style="width: 100%; height: 600px; border: none;"
+></iframe>
+```
+
+### Embed Without End Call (for custom interfaces)
+
+Hides leave call and end meeting buttons. Use this when your application manages the call lifecycle (e.g., your page has its own "End Call" button that removes or navigates away from the iframe).
+
+```html
+<iframe
+  src="https://your-meet-server.com/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>
@@ -24,6 +38,9 @@ MEET can be embedded into your application via an iframe, allowing you to add vi
 |-----------|----------|-------------|---------|
 | `room` | Yes | Room code/ID to join | `ABC123` |
 | `name` | No | Pre-filled participant name | `John%20Doe` |
+| `autojoin` | No | Auto-join when both room and name provided (true/false) | `true` |
+| `quality` | No | Video quality preset | `auto`, `high`, `max`, `balanced`, `low` |
+| `hideEndCall` | No | Hide leave/end call buttons for iframe embeds | `true` |
 
 ## Integration Steps
 
@@ -110,21 +127,25 @@ class MeetIntegration {
   }
 
   // Generate join URL for a participant
-  getJoinUrl(roomName, participantName) {
+  getJoinUrl(roomName, participantName, options = {}) {
     const params = new URLSearchParams();
     params.set('room', roomName);
     if (participantName) {
       params.set('name', participantName);
     }
+    if (options.hideEndCall) {
+      params.set('hideEndCall', 'true');
+    }
     return `${this.serverUrl}/?${params.toString()}`;
   }
 
   // Embed meeting in a container
-  embedMeeting(containerId, roomName, participantName) {
+  // Set hideEndCall: true to hide leave/end buttons (manage call lifecycle from your UI)
+  embedMeeting(containerId, roomName, participantName, options = {}) {
     const container = document.getElementById(containerId);
     const iframe = document.createElement('iframe');
 
-    iframe.src = this.getJoinUrl(roomName, participantName);
+    iframe.src = this.getJoinUrl(roomName, participantName, options);
     iframe.allow = 'camera; microphone; display-capture; autoplay';
     iframe.allowFullscreen = true;
     iframe.style.cssText = 'width: 100%; height: 100%; border: none;';
@@ -145,8 +166,11 @@ const meeting = await meet.createMeeting({
   displayName: 'Daily Standup'
 });
 
-// Embed in your page
+// Embed in your page (full-featured)
 meet.embedMeeting('meeting-container', meeting.room.name, 'John Doe');
+
+// Embed without end call buttons (your app manages call lifecycle)
+meet.embedMeeting('meeting-container', meeting.room.name, 'John Doe', { hideEndCall: true });
 ```
 
 ### React Component Example
@@ -154,13 +178,13 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John Doe');
 ```jsx
 import React, { useEffect, useRef, useState } from 'react';
 
-function MeetEmbed({ roomId, participantName, serverUrl = 'https://your-meet-server.com' }) {
+function MeetEmbed({ roomId, participantName, hideEndCall = false, serverUrl = 'https://your-meet-server.com' }) {
   const iframeRef = useRef(null);
   const [isLoading, setIsLoading] = useState(true);
 
   const meetUrl = `${serverUrl}/?room=${encodeURIComponent(roomId)}${
     participantName ? `&name=${encodeURIComponent(participantName)}` : ''
-  }`;
+  }${hideEndCall ? '&hideEndCall=true' : ''}`;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '600px' }}>
@@ -198,9 +222,17 @@ function App() {
   return (
     <div>
       <h1>Video Meeting</h1>
+      {/* Full-featured embed */}
       <MeetEmbed
         roomId="my-meeting-123"
         participantName="John Doe"
+      />
+
+      {/* Embed without end call buttons */}
+      <MeetEmbed
+        roomId="my-meeting-123"
+        participantName="John Doe"
+        hideEndCall
       />
     </div>
   );
@@ -231,6 +263,7 @@ export default {
   props: {
     roomId: { type: String, required: true },
     participantName: { type: String, default: '' },
+    hideEndCall: { type: Boolean, default: false },
     serverUrl: { type: String, default: 'https://your-meet-server.com' }
   },
   data() {
@@ -243,6 +276,9 @@ export default {
       const params = new URLSearchParams({ room: this.roomId });
       if (this.participantName) {
         params.set('name', this.participantName);
+      }
+      if (this.hideEndCall) {
+        params.set('hideEndCall', 'true');
       }
       return `${this.serverUrl}/?${params.toString()}`;
     }

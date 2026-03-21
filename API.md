@@ -98,6 +98,7 @@ MEET supports URL-based join links that allow you to create shareable meeting in
 | `name` | string | No | Display name for the participant (max 50 chars) |
 | `autojoin` | boolean | No | Auto-join when page loads (default: `true` if name provided) |
 | `quality` | string | No | Video quality preset: `max`, `high`, `auto`, `balanced`, `low` |
+| `hideEndCall` | boolean | No | Hide leave/end call buttons (for iframe embeds where the host page manages call lifecycle) |
 
 ### URL Examples
 
@@ -116,6 +117,9 @@ https://meet.example.com/?room=ABC123&name=John&quality=max
 
 # Full example with all parameters
 https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true&quality=high
+
+# Iframe embed without end call buttons
+https://meet.example.com/?room=ABC123&name=John&hideEndCall=true
 ```
 
 ### Generating Join Links
