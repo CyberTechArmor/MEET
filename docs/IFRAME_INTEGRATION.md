@@ -6,6 +6,100 @@ This document describes how to integrate MEET video conferencing into your appli
 
 MEET can be embedded into your application via an iframe, allowing you to add video conferencing capabilities without building a custom video UI. This is the simplest integration method and requires minimal setup.
 
+## Server URL Configuration by Deployment Type
+
+MEET supports multiple deployment modes, and the URL structure differs between them. Understanding which deployment you're using is critical for configuring iframe embeds and API calls correctly.
+
+### Caddy or Host-Installed NGINX (Single URL)
+
+Both Caddy (`docker-compose.proxy.yml`) and host-installed NGINX (`docker-compose.nginx.yml`) use **path-based routing** on a single domain:
+
+| Service   | URL                                   |
+|-----------|---------------------------------------|
+| Frontend  | `https://meet.example.com/`           |
+| API       | `https://meet.example.com/api/`       |
+| LiveKit   | `wss://meet.example.com/livekit/`     |
+
+**You only need one URL.** The iframe URL and API URL share the same base:
+
+```
+MEET server URL:  https://meet.example.com
+Iframe embed:     https://meet.example.com/?room=ROOM_CODE
+API calls:        https://meet.example.com/api/rooms
+```
+
+### ProxyPilot / External Reverse Proxy (Subdomain Routing)
+
+External proxy managers (ProxyPilot, Nginx Proxy Manager, Traefik, etc.) that don't support path-based routing use **separate subdomains** for each service:
+
+| Service   | URL                                     |
+|-----------|-----------------------------------------|
+| Frontend  | `https://meet.example.com`              |
+| API       | `https://api.meet.example.com`          |
+| LiveKit   | `wss://livekit.meet.example.com`        |
+
+**The API is on a different subdomain.** When configuring integrations:
+
+```
+MEET server URL:  https://meet.example.com
+Iframe embed:     https://meet.example.com/?room=ROOM_CODE
+API calls:        https://api.meet.example.com/api/rooms   ← different host!
+```
+
+> **Common mistake:** Using `https://meet.example.com` for API calls on a ProxyPilot deployment will hit the frontend (not the API server), resulting in `405 Not Allowed` errors from nginx.
+
+### How to Determine Your API URL
+
+If you only know the MEET server URL (e.g., `https://meet.example.com`), you can determine the API URL:
+
+1. **Try the same URL first** (Caddy/NGINX path-based routing):
+   ```
+   GET https://meet.example.com/api/health
+   ```
+
+2. **If that fails, try the subdomain pattern** (ProxyPilot/external proxy):
+   ```
+   GET https://api.meet.example.com/api/health
+   ```
+
+For programmatic integrations, you can auto-detect:
+
+```javascript
+async function detectApiUrl(meetServerUrl) {
+  const url = new URL(meetServerUrl);
+
+  // Try path-based routing first (Caddy / host NGINX)
+  try {
+    const resp = await fetch(`${url.origin}/api/health`, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) return url.origin;
+  } catch {}
+
+  // Fall back to subdomain routing (ProxyPilot / external proxy)
+  const apiUrl = `${url.protocol}//api.${url.host}`;
+  try {
+    const resp = await fetch(`${apiUrl}/api/health`, { signal: AbortSignal.timeout(5000) });
+    if (resp.ok) return apiUrl;
+  } catch {}
+
+  throw new Error('Could not detect MEET API URL');
+}
+
+// Usage:
+// const apiUrl = await detectApiUrl('https://meet.example.com');
+// fetch(`${apiUrl}/api/rooms`, { ... });
+```
+
+### Quick Reference
+
+| Deployment                      | Compose File                       | URLs Needed | API URL Pattern         |
+|---------------------------------|------------------------------------|-------------|-------------------------|
+| Caddy (recommended)             | `docker-compose.proxy.yml`         | 1           | Same as frontend        |
+| Host-installed NGINX            | `docker-compose.nginx.yml`         | 1           | Same as frontend        |
+| ProxyPilot / External proxy     | `docker-compose.proxypilot.yml`    | 1*          | `api.{frontend domain}` |
+| Demo (no proxy)                 | `docker-compose.yml`               | 1           | `http://host:8080`      |
+
+\* You only need to enter the frontend URL. The API URL is always `api.` prefixed to the frontend domain.
+
 ## Quick Start
 
 ### Full-Featured Embed (with end call controls)
@@ -52,13 +146,24 @@ Hides leave call and end meeting buttons. Use this when your application manages
 4. Create a new API key with appropriate permissions
 5. Save the API key securely
 
-### Step 2: Create a Room (Optional)
+### Step 2: Determine Your API URL
+
+See [Server URL Configuration by Deployment Type](#server-url-configuration-by-deployment-type) above.
+
+- **Caddy / Host NGINX:** API URL is the same as your MEET server URL (e.g., `https://meet.example.com`)
+- **ProxyPilot / External proxy:** API URL is `https://api.meet.example.com` (the `api.` subdomain of your MEET server)
+
+### Step 3: Create a Room (Optional)
 
 You can create rooms programmatically using the API:
 
 ```javascript
-// Create a room with a specific ID
-const response = await fetch('https://your-meet-server.com/api/rooms', {
+// For Caddy / Host NGINX:
+const apiUrl = 'https://your-meet-server.com';
+// For ProxyPilot / external proxy:
+// const apiUrl = 'https://api.your-meet-server.com';
+
+const response = await fetch(`${apiUrl}/api/rooms`, {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
@@ -76,7 +181,7 @@ const { room, joinUrl } = await response.json();
 // joinUrl = "https://your-meet-server.com/?room=my-meeting-123"
 ```
 
-### Step 3: Embed the Iframe
+### Step 4: Embed the Iframe
 
 ```html
 <div id="meeting-container">
@@ -98,14 +203,39 @@ Here's a complete example of creating a room and embedding it:
 
 ```javascript
 class MeetIntegration {
-  constructor(apiKey, serverUrl = 'https://your-meet-server.com') {
+  /**
+   * @param {string} apiKey - Your MEET API key
+   * @param {string} serverUrl - The MEET frontend URL (e.g., 'https://meet.example.com')
+   * @param {string} [apiUrl] - Optional API URL override. If omitted, auto-detected:
+   *   - Caddy / Host NGINX: same as serverUrl (path-based routing)
+   *   - ProxyPilot / External proxy: 'https://api.meet.example.com' (subdomain routing)
+   */
+  constructor(apiKey, serverUrl = 'https://your-meet-server.com', apiUrl = null) {
     this.apiKey = apiKey;
     this.serverUrl = serverUrl;
+    this.apiUrl = apiUrl; // resolved lazily in _getApiUrl()
+  }
+
+  // Auto-detect API URL by trying path-based first, then subdomain
+  async _getApiUrl() {
+    if (this.apiUrl) return this.apiUrl;
+
+    // Try path-based routing (Caddy / host NGINX)
+    try {
+      const resp = await fetch(`${this.serverUrl}/api/health`, { signal: AbortSignal.timeout(5000) });
+      if (resp.ok) { this.apiUrl = this.serverUrl; return this.apiUrl; }
+    } catch {}
+
+    // Fall back to subdomain routing (ProxyPilot / external proxy)
+    const url = new URL(this.serverUrl);
+    this.apiUrl = `${url.protocol}//api.${url.host}`;
+    return this.apiUrl;
   }
 
   // Create a new meeting room
   async createMeeting(options = {}) {
-    const response = await fetch(`${this.serverUrl}/api/rooms`, {
+    const apiUrl = await this._getApiUrl();
+    const response = await fetch(`${apiUrl}/api/rooms`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -157,8 +287,11 @@ class MeetIntegration {
   }
 }
 
-// Usage
-const meet = new MeetIntegration('your-api-key');
+// Usage - auto-detects API URL (works with any deployment type)
+const meet = new MeetIntegration('your-api-key', 'https://meet.example.com');
+
+// Or explicitly set the API URL for ProxyPilot / external proxy deployments:
+// const meet = new MeetIntegration('your-api-key', 'https://meet.example.com', 'https://api.meet.example.com');
 
 // Create a meeting
 const meeting = await meet.createMeeting({
@@ -178,7 +311,13 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John Doe', { hideEndC
 ```jsx
 import React, { useEffect, useRef, useState } from 'react';
 
-function MeetEmbed({ roomId, participantName, hideEndCall = false, serverUrl = 'https://your-meet-server.com' }) {
+/**
+ * @param serverUrl - MEET frontend URL (used for iframe src)
+ * @param apiUrl - Optional API URL override for ProxyPilot deployments.
+ *                 If omitted, defaults to serverUrl (Caddy / host NGINX).
+ *                 For ProxyPilot, pass 'https://api.meet.example.com'.
+ */
+function MeetEmbed({ roomId, participantName, hideEndCall = false, serverUrl = 'https://your-meet-server.com', apiUrl }) {
   const iframeRef = useRef(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -264,7 +403,10 @@ export default {
     roomId: { type: String, required: true },
     participantName: { type: String, default: '' },
     hideEndCall: { type: Boolean, default: false },
-    serverUrl: { type: String, default: 'https://your-meet-server.com' }
+    serverUrl: { type: String, default: 'https://your-meet-server.com' },
+    // For ProxyPilot / external proxy, pass 'https://api.meet.example.com'
+    // For Caddy / host NGINX, leave empty (uses serverUrl)
+    apiUrl: { type: String, default: '' }
   },
   data() {
     return {
@@ -427,6 +569,21 @@ POST /api/token
 ```
 
 ## Troubleshooting
+
+### 405 Not Allowed from nginx
+
+This almost always means you're sending API requests to the **frontend URL** on a ProxyPilot / external proxy deployment. The frontend nginx only serves static files and returns 405 for POST/PUT requests.
+
+**Fix:** Use the API subdomain for API calls:
+```
+# Wrong (hits frontend nginx):
+POST https://meet.example.com/api/rooms  → 405 Not Allowed
+
+# Correct (hits API server):
+POST https://api.meet.example.com/api/rooms  → 200 OK
+```
+
+If you're using Caddy or host-installed NGINX, the same URL works for both frontend and API. See [Server URL Configuration by Deployment Type](#server-url-configuration-by-deployment-type).
 
 ### Camera/Microphone Not Working
 
