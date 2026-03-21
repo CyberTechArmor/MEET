@@ -20,6 +20,41 @@ if [ "$EUID" -ne 0 ]; then
     SUDO="sudo"
 fi
 
+# Find the first available port starting from a given port
+find_available_port() {
+    local port=$1
+    local max_port=$((port + 100))
+
+    while [ "$port" -le "$max_port" ]; do
+        # Check if port is in use using multiple methods for compatibility
+        if command -v ss &> /dev/null; then
+            if ! ss -tlnH 2>/dev/null | grep -q ":${port} "; then
+                echo "$port"
+                return 0
+            fi
+        elif command -v netstat &> /dev/null; then
+            if ! netstat -tln 2>/dev/null | grep -q ":${port} "; then
+                echo "$port"
+                return 0
+            fi
+        else
+            # Fallback: try to bind to the port briefly
+            if (echo > /dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+                # Port is in use (something responded)
+                :
+            else
+                echo "$port"
+                return 0
+            fi
+        fi
+        port=$((port + 1))
+    done
+
+    # If nothing found, return the original (will fail at docker level)
+    echo "$1"
+    return 1
+}
+
 # ASCII Banner
 print_banner() {
     echo -e "${CYAN}"
@@ -607,11 +642,41 @@ install_demo() {
         else
             echo ""
             echo -e "${GREEN}✓ MEET is already running!${NC}"
-            echo -e "  ${BOLD}→ Open ${CYAN}http://localhost:3000${NC}"
+            # Read port from .env if available
+            local existing_port=$(grep MEET_FRONTEND_PORT .env 2>/dev/null | cut -d= -f2)
+            existing_port=${existing_port:-3000}
+            echo -e "  ${BOLD}→ Open ${CYAN}http://localhost:${existing_port}${NC}"
             exit 0
         fi
     fi
 
+    # Find available ports
+    echo -e "${DIM}Checking for available ports...${NC}"
+
+    local frontend_port
+    frontend_port=$(find_available_port 3000)
+    local api_port
+    api_port=$(find_available_port 8080)
+
+    if [ "$frontend_port" != "3000" ]; then
+        echo -e "${YELLOW}!${NC} Port 3000 is in use, using port ${CYAN}$frontend_port${NC} for frontend"
+    else
+        echo -e "${GREEN}✓${NC} Port 3000 available for frontend"
+    fi
+
+    if [ "$api_port" != "8080" ]; then
+        echo -e "${YELLOW}!${NC} Port 8080 is in use, using port ${CYAN}$api_port${NC} for API"
+    else
+        echo -e "${GREEN}✓${NC} Port 8080 available for API"
+    fi
+
+    # Write port config to .env
+    cat > .env << EOF
+MEET_FRONTEND_PORT=$frontend_port
+MEET_API_PORT=$api_port
+EOF
+
+    echo ""
     echo "Building and starting containers..."
     echo ""
 
@@ -623,7 +688,7 @@ install_demo() {
         echo -e "${GREEN}  ✓ MEET is running!${NC}"
         echo ""
         echo -e "  ${BOLD}Open your browser:${NC}"
-        echo -e "    → ${CYAN}http://localhost:3000${NC}"
+        echo -e "    → ${CYAN}http://localhost:${frontend_port}${NC}"
         echo ""
         echo -e "  ${BOLD}Quick start:${NC}"
         echo -e "    1. Enter your name"
@@ -898,21 +963,46 @@ install_with_nginx() {
         livekit_ip=""
     fi
 
+    # Find available ports
+    echo -e "${DIM}Checking for available ports...${NC}"
+
+    local frontend_port
+    frontend_port=$(find_available_port 3000)
+    local api_port
+    api_port=$(find_available_port 8080)
+
+    if [ "$frontend_port" != "3000" ]; then
+        echo -e "${YELLOW}!${NC} Port 3000 is in use, using port ${CYAN}$frontend_port${NC} for frontend"
+    else
+        echo -e "${GREEN}✓${NC} Port 3000 available for frontend"
+    fi
+
+    if [ "$api_port" != "8080" ]; then
+        echo -e "${YELLOW}!${NC} Port 8080 is in use, using port ${CYAN}$api_port${NC} for API"
+    else
+        echo -e "${GREEN}✓${NC} Port 8080 available for API"
+    fi
+
     # Create .env file
     cat > .env << EOF
 MEET_DOMAIN=$domain
 LIVEKIT_NODE_IP=$livekit_ip
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
+MEET_FRONTEND_PORT=$frontend_port
+MEET_API_PORT=$api_port
 EOF
 
     echo ""
     echo -e "${DIM}Configuration saved to .env${NC}"
     echo ""
 
-    # Generate Nginx config from template
+    # Generate Nginx config from template, replacing domain and ports
     echo -e "${DIM}Generating Nginx configuration...${NC}"
-    sed "s/MEET_DOMAIN_PLACEHOLDER/$domain/g" nginx.meet.conf > "nginx.meet.$domain.conf"
+    sed -e "s/MEET_DOMAIN_PLACEHOLDER/$domain/g" \
+        -e "s/127\.0\.0\.1:3000/127.0.0.1:$frontend_port/g" \
+        -e "s/127\.0\.0\.1:8080/127.0.0.1:$api_port/g" \
+        nginx.meet.conf > "nginx.meet.$domain.conf"
 
     # Install Nginx config
     $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"

@@ -11,7 +11,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:3000:80"
+      - "127.0.0.1:${MEET_FRONTEND_PORT:-3000}:80"
     depends_on:
       - meet-api
       - livekit
@@ -25,7 +25,7 @@ services:
       context: ./api
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${MEET_API_PORT:-8080}:8080"
     environment:
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
