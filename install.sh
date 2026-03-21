@@ -1169,6 +1169,12 @@ NGINX_TEMP
             echo "  install the full Nginx config:"
             echo "    sudo cp nginx.meet.$domain.conf /etc/nginx/sites-available/meet"
             echo "    sudo nginx -t && sudo systemctl reload nginx"
+
+            # Clean up the temporary nginx config so it doesn't interfere
+            # with other reverse proxies (e.g., ProxyPilot) on the same server
+            $SUDO rm -f /etc/nginx/sites-enabled/meet
+            $SUDO rm -f /etc/nginx/sites-available/meet
+            $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
         fi
     fi
 
