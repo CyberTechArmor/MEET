@@ -1051,17 +1051,54 @@ EOF
         exit 1
     fi
 
-    # Obtain SSL certificate with Certbot
+    # Check for existing SSL certificate
     echo ""
-    echo -e "${BOLD}Obtaining SSL certificate...${NC}"
-    echo ""
-    echo "  Certbot will now request a certificate from Let's Encrypt."
-    echo "  Make sure your domain ($domain) points to this server's IP."
-    echo ""
+    if [ -f "/etc/letsencrypt/live/$domain/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/$domain/privkey.pem" ]; then
+        # Existing certificate found — check if it's still valid
+        local cert_expiry
+        cert_expiry=$($SUDO openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$domain/fullchain.pem" 2>/dev/null | cut -d= -f2)
 
-    # First, start Nginx with just the HTTP config for the ACME challenge
-    # We need a temporary config that doesn't reference SSL certs yet
-    $SUDO tee /etc/nginx/sites-available/meet > /dev/null << NGINX_TEMP
+        if [ -n "$cert_expiry" ] && $SUDO openssl x509 -checkend 86400 -noout -in "/etc/letsencrypt/live/$domain/fullchain.pem" 2>/dev/null; then
+            echo -e "${GREEN}✓${NC} Valid SSL certificate found for $domain"
+            echo -e "${DIM}  Expires: $cert_expiry${NC}"
+
+            # Install the full Nginx config (certs already exist)
+            $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
+
+            if $SUDO nginx -t 2>/dev/null; then
+                $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+                echo -e "${GREEN}✓${NC} Nginx configured with existing SSL certificate"
+            else
+                echo -e "${YELLOW}!${NC} Nginx config test failed — check /etc/nginx/sites-available/meet"
+            fi
+        else
+            echo -e "${YELLOW}!${NC} SSL certificate for $domain exists but is expired or expiring soon"
+            echo -e "${DIM}  Attempting renewal...${NC}"
+            if $SUDO certbot renew --cert-name "$domain" --non-interactive 2>&1; then
+                echo -e "${GREEN}✓${NC} SSL certificate renewed successfully"
+
+                $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
+
+                if $SUDO nginx -t 2>/dev/null; then
+                    $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+                    echo -e "${GREEN}✓${NC} Nginx configured with renewed SSL certificate"
+                else
+                    echo -e "${YELLOW}!${NC} Nginx config test failed — check /etc/nginx/sites-available/meet"
+                fi
+            else
+                echo -e "${RED}✗${NC} Certificate renewal failed. Try manually: sudo certbot renew"
+            fi
+        fi
+    else
+        # No existing certificate — obtain a new one
+        echo -e "${BOLD}Obtaining SSL certificate...${NC}"
+        echo ""
+        echo "  Certbot will request a certificate from Let's Encrypt."
+        echo "  Make sure your domain ($domain) points to this server's IP."
+        echo ""
+
+        # Start Nginx with a temporary HTTP-only config for the ACME challenge
+        $SUDO tee /etc/nginx/sites-available/meet > /dev/null << NGINX_TEMP
 server {
     listen 80;
     listen [::]:80;
@@ -1078,40 +1115,41 @@ server {
 }
 NGINX_TEMP
 
-    # Reload Nginx with the temporary config
-    $SUDO nginx -t 2>/dev/null && $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+        # Reload Nginx with the temporary config
+        $SUDO nginx -t 2>/dev/null && $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
 
-    # Run Certbot
-    if $SUDO certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --redirect 2>&1; then
-        echo ""
-        echo -e "${GREEN}✓${NC} SSL certificate obtained successfully"
+        # Run Certbot
+        if $SUDO certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --redirect 2>&1; then
+            echo ""
+            echo -e "${GREEN}✓${NC} SSL certificate obtained successfully"
 
-        # Now install the full Nginx config (with SSL paths)
-        $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
+            # Now install the full Nginx config (with SSL paths)
+            $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
 
-        # Reload Nginx with the full config
-        if $SUDO nginx -t 2>/dev/null; then
-            $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
-            echo -e "${GREEN}✓${NC} Nginx configured with SSL"
+            # Reload Nginx with the full config
+            if $SUDO nginx -t 2>/dev/null; then
+                $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+                echo -e "${GREEN}✓${NC} Nginx configured with SSL"
+            else
+                echo -e "${YELLOW}!${NC} Nginx config test failed, keeping Certbot-managed config"
+            fi
         else
-            echo -e "${YELLOW}!${NC} Nginx config test failed, keeping Certbot-managed config"
+            echo ""
+            echo -e "${YELLOW}! SSL certificate could not be obtained automatically.${NC}"
+            echo ""
+            echo "  This usually means:"
+            echo "    - DNS for $domain does not point to this server"
+            echo "    - Port 80 is blocked by a firewall"
+            echo "    - Let's Encrypt rate limits have been reached"
+            echo ""
+            echo "  You can retry manually later:"
+            echo "    sudo certbot --nginx -d $domain"
+            echo ""
+            echo "  The Docker services are running. Once SSL is configured,"
+            echo "  install the full Nginx config:"
+            echo "    sudo cp nginx.meet.$domain.conf /etc/nginx/sites-available/meet"
+            echo "    sudo nginx -t && sudo systemctl reload nginx"
         fi
-    else
-        echo ""
-        echo -e "${YELLOW}! SSL certificate could not be obtained automatically.${NC}"
-        echo ""
-        echo "  This usually means:"
-        echo "    • DNS for $domain does not point to this server"
-        echo "    • Port 80 is blocked by a firewall"
-        echo "    • Let's Encrypt rate limits have been reached"
-        echo ""
-        echo "  You can retry manually later:"
-        echo "    sudo certbot --nginx -d $domain"
-        echo ""
-        echo "  The Docker services are running. Once SSL is configured,"
-        echo "  install the full Nginx config:"
-        echo "    sudo cp nginx.meet.$domain.conf /etc/nginx/sites-available/meet"
-        echo "    sudo nginx -t && sudo systemctl reload nginx"
     fi
 
     # Clean up generated config file
