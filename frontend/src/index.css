@@ -55,26 +55,24 @@
   }
 }
 
-/* Base styles */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* Base styles - margin/padding/box-sizing reset is handled by Tailwind v4 preflight.
+   Do NOT add an unlayered * { margin: 0; padding: 0 } here — in CSS Cascade Layers,
+   unlayered styles override all @layer utilities (p-8, mb-12, space-y-3, etc.) */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    width: 100%;
+  }
 
-html,
-body,
-#root {
-  height: 100%;
-  width: 100%;
-}
-
-body {
-  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
-  background-color: #0a0a0a;
-  color: #ffffff;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  body {
+    font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    background-color: #0a0a0a;
+    color: #ffffff;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
 }
 
 /* Custom scrollbar */
