@@ -1208,6 +1208,140 @@ NGINX_TEMP
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# ProxyPilot / External Reverse Proxy mode
+install_with_proxypilot() {
+    echo ""
+    echo -e "${BOLD}Deploy with External Reverse Proxy (ProxyPilot, NPM, etc.)${NC}"
+    echo ""
+    echo "  This mode is for servers that already run a reverse proxy manager"
+    echo "  like ProxyPilot or Nginx Proxy Manager."
+    echo ""
+    echo "  Each service gets its own subdomain:"
+    echo "    • meet.example.com         → Frontend"
+    echo "    • api.meet.example.com     → API"
+    echo "    • livekit.meet.example.com → LiveKit (WebRTC signaling)"
+    echo ""
+
+    read -p "Enter your domain (e.g., meet.example.com): " domain
+    if [ -z "$domain" ]; then
+        echo -e "${RED}Domain is required.${NC}"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}Required DNS records:${NC}"
+    echo "  • ${CYAN}$domain${NC}            → this server's IP"
+    echo "  • ${CYAN}api.$domain${NC}        → this server's IP"
+    echo "  • ${CYAN}livekit.$domain${NC}    → this server's IP"
+    echo ""
+    read -p "Are DNS records configured? [y/N]: " dns_ok
+    if [[ ! "$dns_ok" =~ ^[Yy]$ ]]; then
+        echo ""
+        echo "  Please configure DNS records first, then re-run the installer."
+        exit 0
+    fi
+
+    # Detect public IP for LiveKit
+    local public_ip
+    public_ip=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://ipecho.net/plain 2>/dev/null || \
+                echo "")
+
+    if [ -n "$public_ip" ]; then
+        echo -e "${GREEN}✓${NC} Detected public IP: $public_ip"
+    else
+        read -p "Could not detect public IP. Enter your server's public IPv4: " public_ip
+    fi
+
+    # Set frontend port (default 3002 to avoid conflicts)
+    local frontend_port
+    frontend_port=$(find_available_port 3002)
+
+    # Create .env
+    cat > .env << ENV_FILE
+# MEET Configuration — ProxyPilot / External Reverse Proxy Mode
+MEET_DOMAIN=$domain
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+LIVEKIT_NODE_IP=$public_ip
+MEET_FRONTEND_PORT=$frontend_port
+MEET_API_PORT=8080
+ENV_FILE
+
+    echo -e "${GREEN}✓${NC} Configuration saved to .env"
+
+    # Check if containers are already running
+    if docker compose -f docker-compose.proxypilot.yml ps 2>/dev/null | grep -q "meet"; then
+        echo -e "${YELLOW}! MEET containers already exist${NC}"
+        read -p "  Stop and rebuild? [y/N]: " rebuild
+        if [[ "$rebuild" =~ ^[Yy]$ ]]; then
+            docker compose -f docker-compose.proxypilot.yml down --remove-orphans
+        else
+            echo ""
+            echo -e "${GREEN}✓ MEET is already running!${NC}"
+            exit 0
+        fi
+    fi
+
+    echo ""
+    echo "Building and starting Docker containers..."
+    echo ""
+
+    if docker compose -f docker-compose.proxypilot.yml build --no-cache && docker compose -f docker-compose.proxypilot.yml up -d; then
+        echo ""
+        echo -e "${GREEN}✓${NC} Docker containers started"
+    else
+        echo ""
+        echo -e "${RED}✗ Failed to start Docker containers${NC}"
+        echo "  Check logs with: docker compose -f docker-compose.proxypilot.yml logs"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${GREEN}  ✓ MEET containers are running!${NC}"
+    echo ""
+    echo -e "  ${BOLD}Now create 3 proxy services in your reverse proxy manager:${NC}"
+    echo ""
+    echo -e "  ${CYAN}1. Frontend${NC}"
+    echo "     Domain:    $domain"
+    echo "     Target:    127.0.0.1:$frontend_port"
+    echo "     WebSocket: ON"
+    echo "     SSL:       ON (auto-obtain)"
+    echo ""
+    echo -e "  ${CYAN}2. API${NC}"
+    echo "     Domain:    api.$domain"
+    echo "     Target:    127.0.0.1:8080"
+    echo "     WebSocket: ON"
+    echo "     SSL:       ON (auto-obtain)"
+    echo ""
+    echo -e "  ${CYAN}3. LiveKit${NC}"
+    echo "     Domain:    livekit.$domain"
+    echo "     Target:    127.0.0.1:7880"
+    echo "     WebSocket: ON"
+    echo "     SSL:       ON (auto-obtain)"
+    echo ""
+    echo -e "  ${BOLD}Firewall:${NC} Ensure these ports are open:"
+    echo "     80/tcp, 443/tcp    (HTTP/HTTPS for proxy)"
+    echo "     7881/tcp           (LiveKit RTC over TCP)"
+    echo "     50000-50100/udp    (LiveKit RTC media)"
+    echo ""
+    echo -e "  ${BOLD}After creating proxies, open:${NC}"
+    echo -e "    → ${CYAN}https://$domain${NC}"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo -e "    Stop:    ${YELLOW}docker compose -f docker-compose.proxypilot.yml down${NC}"
+    echo -e "    Logs:    ${YELLOW}docker compose -f docker-compose.proxypilot.yml logs -f${NC}"
+    echo -e "    Restart: ${YELLOW}docker compose -f docker-compose.proxypilot.yml restart${NC}"
+    echo ""
+    echo -e "  ${BOLD}Configuration:${NC}"
+    echo -e "    Edit ${YELLOW}.env${NC} to change settings"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
 # Production mode placeholder
 install_production() {
     echo ""
@@ -1255,7 +1389,11 @@ main() {
     echo "      Uses host-installed Nginx with Certbot for SSL"
     echo "      Installs Nginx and Certbot if not present"
     echo ""
-    echo -e "  ${CYAN}[4]${NC} Production Mode"
+    echo -e "  ${CYAN}[4]${NC} Deploy with ProxyPilot / External Proxy"
+    echo "      For servers already running ProxyPilot, NPM, or similar"
+    echo "      Uses subdomains (api.*, livekit.*) for each service"
+    echo ""
+    echo -e "  ${CYAN}[5]${NC} Production Mode"
     echo "      Full deployment with persistence, auth, etc."
     echo -e "      ${YELLOW}(Coming soon)${NC}"
     echo ""
@@ -1275,6 +1413,9 @@ main() {
             install_with_nginx
             ;;
         4)
+            install_with_proxypilot
+            ;;
+        5)
             install_production
             ;;
         *)
