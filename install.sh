@@ -321,6 +321,87 @@ install_git() {
     echo -e "${GREEN}✓${NC} git installed"
 }
 
+# Install Nginx
+install_nginx() {
+    echo -e "${YELLOW}Installing Nginx...${NC}"
+
+    case "$PKG_MANAGER" in
+        apt)
+            $SUDO apt-get update -qq && $SUDO apt-get install -y -qq nginx > /dev/null
+            ;;
+        dnf)
+            $SUDO dnf install -y nginx > /dev/null 2>&1
+            ;;
+        yum)
+            $SUDO yum install -y nginx > /dev/null 2>&1
+            ;;
+        pacman)
+            $SUDO pacman -Sy --noconfirm nginx > /dev/null 2>&1
+            ;;
+        zypper)
+            $SUDO zypper install -y nginx > /dev/null 2>&1
+            ;;
+        apk)
+            $SUDO apk add --no-cache nginx > /dev/null 2>&1
+            ;;
+        brew)
+            brew install nginx > /dev/null 2>&1
+            ;;
+        *)
+            echo -e "${RED}✗ Unsupported package manager for Nginx installation${NC}"
+            echo "  Please install Nginx manually: https://nginx.org/en/docs/install.html"
+            exit 1
+            ;;
+    esac
+
+    # Start and enable Nginx (Linux only)
+    if [ "$OS" = "linux" ]; then
+        $SUDO systemctl start nginx 2>/dev/null || $SUDO service nginx start 2>/dev/null || true
+        $SUDO systemctl enable nginx 2>/dev/null || true
+    fi
+
+    echo -e "${GREEN}✓${NC} Nginx installed successfully"
+}
+
+# Install Certbot for Let's Encrypt
+install_certbot() {
+    echo -e "${YELLOW}Installing Certbot...${NC}"
+
+    case "$PKG_MANAGER" in
+        apt)
+            $SUDO apt-get update -qq
+            $SUDO apt-get install -y -qq certbot python3-certbot-nginx > /dev/null
+            ;;
+        dnf)
+            $SUDO dnf install -y certbot python3-certbot-nginx > /dev/null 2>&1
+            ;;
+        yum)
+            # EPEL required for certbot on CentOS/RHEL
+            $SUDO yum install -y epel-release > /dev/null 2>&1 || true
+            $SUDO yum install -y certbot python3-certbot-nginx > /dev/null 2>&1
+            ;;
+        pacman)
+            $SUDO pacman -Sy --noconfirm certbot certbot-nginx > /dev/null 2>&1
+            ;;
+        zypper)
+            $SUDO zypper install -y certbot python3-certbot-nginx > /dev/null 2>&1
+            ;;
+        apk)
+            $SUDO apk add --no-cache certbot certbot-nginx > /dev/null 2>&1
+            ;;
+        brew)
+            brew install certbot > /dev/null 2>&1
+            ;;
+        *)
+            echo -e "${RED}✗ Unsupported package manager for Certbot installation${NC}"
+            echo "  Please install Certbot manually: https://certbot.eff.org/"
+            exit 1
+            ;;
+    esac
+
+    echo -e "${GREEN}✓${NC} Certbot installed successfully"
+}
+
 # Repository URL
 MEET_REPO="https://github.com/CyberTechArmor/MEET.git"
 MEET_DIR="MEET"
@@ -714,6 +795,271 @@ EOF
     fi
 }
 
+# Nginx reverse proxy mode installation
+install_with_nginx() {
+    echo -e "${BOLD}Starting MEET with Nginx Reverse Proxy...${NC}"
+    echo ""
+
+    # macOS is not supported for this mode
+    if [ "$OS" = "macos" ]; then
+        echo -e "${RED}✗ Nginx reverse proxy mode is designed for Linux servers.${NC}"
+        echo "  Use Demo Mode or Caddy Reverse Proxy mode on macOS."
+        exit 1
+    fi
+
+    # Check for Nginx
+    if ! command -v nginx &> /dev/null; then
+        echo -e "${YELLOW}!${NC} Nginx is not installed."
+        echo ""
+        read -p "  Install Nginx? [Y/n]: " install_nginx_choice
+        install_nginx_choice=${install_nginx_choice:-Y}
+
+        if [[ "$install_nginx_choice" =~ ^[Yy]$ ]]; then
+            install_nginx
+        else
+            echo ""
+            echo -e "${RED}✗ Nginx is required for this installation mode.${NC}"
+            echo "  Install it manually: https://nginx.org/en/docs/install.html"
+            echo "  Or choose a different installation mode."
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✓${NC} Nginx found ($(nginx -v 2>&1 | cut -d'/' -f2))"
+    fi
+
+    # Get domain configuration
+    echo ""
+    echo -e "${BOLD}Domain Configuration${NC}"
+    echo ""
+    echo "  Enter your domain name for Let's Encrypt SSL certificates."
+    echo "  Your domain's DNS must already point to this server."
+    echo ""
+    read -p "  Domain: " domain
+
+    if [ -z "$domain" ]; then
+        echo -e "${RED}  A domain name is required for Nginx + Let's Encrypt mode.${NC}"
+        echo "  For local development, use Demo Mode instead."
+        exit 1
+    fi
+
+    if [ "$domain" = "localhost" ]; then
+        echo -e "${RED}  Cannot use 'localhost' with Let's Encrypt.${NC}"
+        echo "  For local development, use Demo Mode instead."
+        exit 1
+    fi
+
+    # Check for Certbot
+    if ! command -v certbot &> /dev/null; then
+        echo ""
+        echo -e "${YELLOW}!${NC} Certbot (Let's Encrypt client) is not installed."
+        echo -e "${DIM}  Certbot is required for automatic SSL certificates.${NC}"
+        echo ""
+        read -p "  Install Certbot with Nginx plugin? [Y/n]: " install_certbot_choice
+        install_certbot_choice=${install_certbot_choice:-Y}
+
+        if [[ "$install_certbot_choice" =~ ^[Yy]$ ]]; then
+            install_certbot
+        else
+            echo ""
+            echo -e "${RED}✗ Certbot is required for SSL certificates.${NC}"
+            echo "  Install it manually: https://certbot.eff.org/"
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✓${NC} Certbot found"
+    fi
+
+    # Check that certbot-nginx plugin is available
+    if ! certbot plugins 2>/dev/null | grep -q nginx; then
+        echo -e "${YELLOW}!${NC} Certbot Nginx plugin not found. Installing..."
+        install_certbot
+    fi
+
+    # Detect server's public IPv4 for LiveKit
+    livekit_ip=""
+    echo -e "${DIM}Detecting server's public IPv4...${NC}"
+
+    livekit_ip=$(curl -4 -s --connect-timeout 5 ifconfig.me 2>/dev/null)
+    if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        livekit_ip=$(curl -4 -s --connect-timeout 5 icanhazip.com 2>/dev/null)
+    fi
+    if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        livekit_ip=$(curl -4 -s --connect-timeout 5 ipinfo.io/ip 2>/dev/null)
+    fi
+    if [ -z "$livekit_ip" ] || ! [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        livekit_ip=$(curl -4 -s --connect-timeout 5 api.ipify.org 2>/dev/null)
+    fi
+
+    if [[ "$livekit_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${GREEN}✓${NC} Detected public IPv4: $livekit_ip"
+    else
+        echo -e "${YELLOW}  Warning: Could not detect server's public IPv4${NC}"
+        echo "  LiveKit will attempt auto-detection. If WebRTC fails, set LIVEKIT_NODE_IP manually in .env"
+        livekit_ip=""
+    fi
+
+    # Create .env file
+    cat > .env << EOF
+MEET_DOMAIN=$domain
+LIVEKIT_NODE_IP=$livekit_ip
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+EOF
+
+    echo ""
+    echo -e "${DIM}Configuration saved to .env${NC}"
+    echo ""
+
+    # Generate Nginx config from template
+    echo -e "${DIM}Generating Nginx configuration...${NC}"
+    sed "s/MEET_DOMAIN_PLACEHOLDER/$domain/g" nginx.meet.conf > "nginx.meet.$domain.conf"
+
+    # Install Nginx config
+    $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
+
+    # Enable the site
+    if [ -d /etc/nginx/sites-enabled ]; then
+        $SUDO ln -sf /etc/nginx/sites-available/meet /etc/nginx/sites-enabled/meet
+        # Remove default site if it exists (it would conflict on port 80)
+        if [ -L /etc/nginx/sites-enabled/default ]; then
+            echo -e "${DIM}Disabling default Nginx site to avoid port conflicts...${NC}"
+            $SUDO rm -f /etc/nginx/sites-enabled/default
+        fi
+    elif [ -d /etc/nginx/conf.d ]; then
+        # Some distros use conf.d instead of sites-available
+        $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/conf.d/meet.conf"
+    fi
+
+    echo -e "${GREEN}✓${NC} Nginx configuration installed"
+
+    # Check if containers are already running
+    if docker compose -f docker-compose.nginx.yml ps 2>/dev/null | grep -q "meet"; then
+        echo -e "${YELLOW}! MEET containers already exist${NC}"
+        read -p "  Stop and rebuild? [y/N]: " rebuild
+        if [[ "$rebuild" =~ ^[Yy]$ ]]; then
+            docker compose -f docker-compose.nginx.yml down --remove-orphans
+        else
+            echo ""
+            echo -e "${GREEN}✓ MEET is already running!${NC}"
+            echo -e "  ${BOLD}→ Open ${CYAN}https://$domain${NC}"
+            exit 0
+        fi
+    fi
+
+    echo ""
+    echo "Building and starting Docker containers..."
+    echo ""
+
+    # Build and start Docker services
+    if docker compose -f docker-compose.nginx.yml build --no-cache && docker compose -f docker-compose.nginx.yml up -d; then
+        echo ""
+        echo -e "${GREEN}✓${NC} Docker containers started"
+    else
+        echo ""
+        echo -e "${RED}✗ Failed to start Docker containers${NC}"
+        echo "  Check logs with: docker compose -f docker-compose.nginx.yml logs"
+        exit 1
+    fi
+
+    # Obtain SSL certificate with Certbot
+    echo ""
+    echo -e "${BOLD}Obtaining SSL certificate...${NC}"
+    echo ""
+    echo "  Certbot will now request a certificate from Let's Encrypt."
+    echo "  Make sure your domain ($domain) points to this server's IP."
+    echo ""
+
+    # First, start Nginx with just the HTTP config for the ACME challenge
+    # We need a temporary config that doesn't reference SSL certs yet
+    $SUDO tee /etc/nginx/sites-available/meet > /dev/null << NGINX_TEMP
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 200 'MEET is being configured...';
+        add_header Content-Type text/plain;
+    }
+}
+NGINX_TEMP
+
+    # Reload Nginx with the temporary config
+    $SUDO nginx -t 2>/dev/null && $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+
+    # Run Certbot
+    if $SUDO certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --redirect 2>&1; then
+        echo ""
+        echo -e "${GREEN}✓${NC} SSL certificate obtained successfully"
+
+        # Now install the full Nginx config (with SSL paths)
+        $SUDO cp "nginx.meet.$domain.conf" "/etc/nginx/sites-available/meet"
+
+        # Reload Nginx with the full config
+        if $SUDO nginx -t 2>/dev/null; then
+            $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
+            echo -e "${GREEN}✓${NC} Nginx configured with SSL"
+        else
+            echo -e "${YELLOW}!${NC} Nginx config test failed, keeping Certbot-managed config"
+        fi
+    else
+        echo ""
+        echo -e "${YELLOW}! SSL certificate could not be obtained automatically.${NC}"
+        echo ""
+        echo "  This usually means:"
+        echo "    • DNS for $domain does not point to this server"
+        echo "    • Port 80 is blocked by a firewall"
+        echo "    • Let's Encrypt rate limits have been reached"
+        echo ""
+        echo "  You can retry manually later:"
+        echo "    sudo certbot --nginx -d $domain"
+        echo ""
+        echo "  The Docker services are running. Once SSL is configured,"
+        echo "  install the full Nginx config:"
+        echo "    sudo cp nginx.meet.$domain.conf /etc/nginx/sites-available/meet"
+        echo "    sudo nginx -t && sudo systemctl reload nginx"
+    fi
+
+    # Clean up generated config file
+    rm -f "nginx.meet.$domain.conf"
+
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${GREEN}  ✓ MEET is running with Nginx reverse proxy!${NC}"
+    echo ""
+    echo -e "  ${BOLD}Open your browser:${NC}"
+    echo -e "    → ${CYAN}https://$domain${NC}"
+    echo ""
+    echo -e "  ${BOLD}Quick start:${NC}"
+    echo -e "    1. Enter your name"
+    echo -e "    2. Create or join a room"
+    echo -e "    3. Share the room code with others"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo -e "    Stop:    ${YELLOW}docker compose -f docker-compose.nginx.yml down${NC}"
+    echo -e "    Logs:    ${YELLOW}docker compose -f docker-compose.nginx.yml logs -f${NC}"
+    echo -e "    Restart: ${YELLOW}docker compose -f docker-compose.nginx.yml restart${NC}"
+    echo ""
+    echo -e "  ${BOLD}SSL:${NC}"
+    echo -e "    Renew:   ${YELLOW}sudo certbot renew${NC}"
+    echo -e "    Status:  ${YELLOW}sudo certbot certificates${NC}"
+    echo ""
+    echo -e "  ${BOLD}Nginx:${NC}"
+    echo -e "    Config:  ${YELLOW}/etc/nginx/sites-available/meet${NC}"
+    echo -e "    Test:    ${YELLOW}sudo nginx -t${NC}"
+    echo -e "    Reload:  ${YELLOW}sudo systemctl reload nginx${NC}"
+    echo ""
+    echo -e "  ${BOLD}Configuration:${NC}"
+    echo -e "    Edit ${YELLOW}.env${NC} to change settings"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
 # Production mode placeholder
 install_production() {
     echo ""
@@ -753,11 +1099,15 @@ main() {
     echo "      Quick start for local development and testing"
     echo "      Access via http://localhost:3000"
     echo ""
-    echo -e "  ${CYAN}[2]${NC} Demo + Reverse Proxy (Caddy)"
-    echo "      Includes Caddy for automatic HTTPS"
-    echo "      Perfect for deployment with custom domain"
+    echo -e "  ${CYAN}[2]${NC} Deploy with Caddy (automatic HTTPS)"
+    echo "      Caddy reverse proxy with automatic Let's Encrypt"
+    echo "      Supports domain names, IPs, and localhost"
     echo ""
-    echo -e "  ${CYAN}[3]${NC} Production Mode"
+    echo -e "  ${CYAN}[3]${NC} Deploy with Nginx + Let's Encrypt"
+    echo "      Uses host-installed Nginx with Certbot for SSL"
+    echo "      Installs Nginx and Certbot if not present"
+    echo ""
+    echo -e "  ${CYAN}[4]${NC} Production Mode"
     echo "      Full deployment with persistence, auth, etc."
     echo -e "      ${YELLOW}(Coming soon)${NC}"
     echo ""
@@ -774,6 +1124,9 @@ main() {
             install_with_proxy
             ;;
         3)
+            install_with_nginx
+            ;;
+        4)
             install_production
             ;;
         *)
