@@ -14,6 +14,7 @@ function VideoRoom() {
     localParticipant,
     remoteParticipants,
     isScreenSharing,
+    activeScreenShareIdentity,
     controlsVisible,
     setControlsVisible,
     controlsPinned,
@@ -70,9 +71,31 @@ function VideoRoom() {
     };
   }, [resetHideTimer]);
 
-  // Find participant who is screen sharing (if any)
+  // Find participant who is screen sharing — last person to start sharing wins
   const screenShareParticipant = useMemo((): { participant: Participant; isLocal: boolean } | null => {
-    // Check if local participant is sharing
+    // If we have a tracked active sharer, prefer that participant
+    if (activeScreenShareIdentity) {
+      // Check if it's the local participant
+      if (localParticipant && localParticipant.identity === activeScreenShareIdentity) {
+        const localScreenShare = localParticipant.getTrackPublication(Track.Source.ScreenShare);
+        if (localScreenShare?.track && !localScreenShare.isMuted) {
+          return { participant: localParticipant, isLocal: true };
+        }
+      }
+
+      // Check remote participants
+      for (const remote of remoteParticipants) {
+        if (remote.identity === activeScreenShareIdentity) {
+          const remoteScreenShare = remote.getTrackPublication(Track.Source.ScreenShare);
+          if (remoteScreenShare?.track && !remoteScreenShare.isMuted && remoteScreenShare.isSubscribed) {
+            return { participant: remote, isLocal: false };
+          }
+          break;
+        }
+      }
+    }
+
+    // Fallback: find any participant sharing (handles edge cases)
     if (localParticipant) {
       const localScreenShare = localParticipant.getTrackPublication(Track.Source.ScreenShare);
       if (localScreenShare?.track && !localScreenShare.isMuted) {
@@ -80,7 +103,6 @@ function VideoRoom() {
       }
     }
 
-    // Check remote participants
     for (const remote of remoteParticipants) {
       const remoteScreenShare = remote.getTrackPublication(Track.Source.ScreenShare);
       if (remoteScreenShare?.track && !remoteScreenShare.isMuted && remoteScreenShare.isSubscribed) {
@@ -89,7 +111,7 @@ function VideoRoom() {
     }
 
     return null;
-  }, [localParticipant, remoteParticipants, isScreenSharing]);
+  }, [localParticipant, remoteParticipants, isScreenSharing, activeScreenShareIdentity]);
 
   // Determine grid layout based on participant count
   const gridClass = useMemo(() => {

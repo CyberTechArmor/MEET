@@ -4,7 +4,7 @@ import { useLiveKit } from '../hooks/useLiveKit';
 import ConfirmModal from './ConfirmModal';
 
 function ControlBar() {
-  const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost, controlsPinned, setControlsPinned } = useRoomStore();
+  const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost, controlsPinned, setControlsPinned, hideEndCall } = useRoomStore();
   const { toggleMic, toggleCamera, toggleScreenShare, disconnect, endMeeting } = useLiveKit();
 
   const [isLeaving, setIsLeaving] = useState(false);
@@ -169,81 +169,86 @@ function ControlBar() {
           )}
         </button>
 
-        {/* Divider */}
-        <div className="w-px h-8 bg-meet-border mx-2" />
+        {/* End call controls - hidden in embed mode with hideEndCall */}
+        {!hideEndCall && (
+          <>
+            {/* Divider */}
+            <div className="w-px h-8 bg-meet-border mx-2" />
 
-        {/* Leave Call */}
-        <button
-          onClick={handleLeaveClick}
-          disabled={isLeaving}
-          className="p-4 rounded-xl bg-meet-error hover:bg-meet-error/80 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Leave call"
-        >
-          {isLeaving ? (
-            <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
-              <circle
-                className="opacity-25"
-                cx="12"
-                cy="12"
-                r="10"
-                stroke="currentColor"
-                strokeWidth="4"
-                fill="none"
-              />
-              <path
-                className="opacity-75"
-                fill="currentColor"
-                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-              />
-            </svg>
-          ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.28 3H5z"
-              />
-            </svg>
-          )}
-        </button>
+            {/* Leave Call */}
+            <button
+              onClick={handleLeaveClick}
+              disabled={isLeaving}
+              className="p-4 rounded-xl bg-meet-error hover:bg-meet-error/80 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Leave call"
+            >
+              {isLeaving ? (
+                <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                  />
+                </svg>
+              ) : (
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.28 3H5z"
+                  />
+                </svg>
+              )}
+            </button>
 
-        {/* End Meeting for All (Host only) */}
-        {isHost && (
-          <button
-            onClick={handleEndClick}
-            disabled={isEnding}
-            className="p-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
-            title="End meeting for all"
-          >
-            {isEnding ? (
-              <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                  fill="none"
-                />
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                />
-              </svg>
-            ) : (
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
-                />
-              </svg>
+            {/* End Meeting for All (Host only) */}
+            {isHost && (
+              <button
+                onClick={handleEndClick}
+                disabled={isEnding}
+                className="p-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
+                title="End meeting for all"
+              >
+                {isEnding ? (
+                  <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                    />
+                  </svg>
+                ) : (
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"
+                    />
+                  </svg>
+                )}
+              </button>
             )}
-          </button>
+          </>
         )}
       </div>
 

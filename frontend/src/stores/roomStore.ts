@@ -36,6 +36,10 @@ interface RoomState {
   isScreenSharing: boolean;
   setScreenSharing: (sharing: boolean) => void;
 
+  // Screen share tracking - identity of the participant whose share should be displayed
+  activeScreenShareIdentity: string | null;
+  setActiveScreenShareIdentity: (identity: string | null) => void;
+
   // Host state
   isHost: boolean;
   setIsHost: (isHost: boolean) => void;
@@ -45,6 +49,10 @@ interface RoomState {
   setControlsVisible: (visible: boolean) => void;
   controlsPinned: boolean;
   setControlsPinned: (pinned: boolean) => void;
+
+  // Embed mode
+  hideEndCall: boolean;
+  setHideEndCall: (hide: boolean) => void;
 
   // Reset state
   reset: () => void;
@@ -65,6 +73,8 @@ const initialState = {
   isHost: false,
   controlsVisible: true,
   controlsPinned: false,
+  activeScreenShareIdentity: null,
+  hideEndCall: false,
 };
 
 export const useRoomStore = create<RoomState>((set) => ({
@@ -93,10 +103,14 @@ export const useRoomStore = create<RoomState>((set) => ({
   setCameraEnabled: (isCameraEnabled) => set({ isCameraEnabled }),
   setScreenSharing: (isScreenSharing) => set({ isScreenSharing }),
 
+  setActiveScreenShareIdentity: (activeScreenShareIdentity) => set({ activeScreenShareIdentity }),
+
   setIsHost: (isHost) => set({ isHost }),
 
   setControlsVisible: (controlsVisible) => set({ controlsVisible }),
   setControlsPinned: (controlsPinned) => set({ controlsPinned }),
+
+  setHideEndCall: (hideEndCall) => set({ hideEndCall }),
 
   reset: () => set(initialState),
   resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),
