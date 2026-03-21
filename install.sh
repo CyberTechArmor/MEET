@@ -1118,8 +1118,26 @@ NGINX_TEMP
         # Reload Nginx with the temporary config
         $SUDO nginx -t 2>/dev/null && $SUDO systemctl reload nginx 2>/dev/null || $SUDO service nginx reload 2>/dev/null || true
 
-        # Run Certbot
-        if $SUDO certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --redirect 2>&1; then
+        # Pre-check: test nginx config before using --nginx plugin
+        # The --nginx plugin requires ALL nginx configs to be valid, not just ours.
+        # If another site has a broken config, --nginx will fail entirely.
+        local certbot_ok=false
+        if $SUDO nginx -t 2>&1; then
+            echo -e "${DIM}  Nginx config OK — using nginx plugin${NC}"
+            if $SUDO certbot --nginx -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email --redirect 2>&1; then
+                certbot_ok=true
+            fi
+        else
+            echo -e "${YELLOW}!${NC} Existing nginx configuration has errors (from another site)"
+            echo -e "${DIM}  Falling back to webroot authentication...${NC}"
+            echo ""
+            $SUDO mkdir -p /var/www/html
+            if $SUDO certbot certonly --webroot -w /var/www/html -d "$domain" --non-interactive --agree-tos --register-unsafely-without-email 2>&1; then
+                certbot_ok=true
+            fi
+        fi
+
+        if [ "$certbot_ok" = true ]; then
             echo ""
             echo -e "${GREEN}✓${NC} SSL certificate obtained successfully"
 
@@ -1141,8 +1159,10 @@ NGINX_TEMP
             echo "    - DNS for $domain does not point to this server"
             echo "    - Port 80 is blocked by a firewall"
             echo "    - Let's Encrypt rate limits have been reached"
+            echo "    - Another site's nginx config has syntax errors (fix with: sudo nginx -t)"
             echo ""
             echo "  You can retry manually later:"
+            echo "    sudo certbot certonly --webroot -w /var/www/html -d $domain"
             echo "    sudo certbot --nginx -d $domain"
             echo ""
             echo "  The Docker services are running. Once SSL is configured,"
