@@ -1431,7 +1431,19 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                 )}
 
                 {/* Iframe Integration Documentation */}
-                {docsSubTab === 'iframe' && (
+                {docsSubTab === 'iframe' && (() => {
+                  // Detect deployment type based on how the frontend was built
+                  const viteApiUrl = import.meta.env.VITE_API_URL;
+                  const isSubdomainDeployment = !!(viteApiUrl && viteApiUrl.trim() !== '');
+                  const frontendUrl = window.location.origin;
+                  // For subdomain deployments (ProxyPilot), derive API URL from VITE_API_URL
+                  // For path-based deployments (Caddy/NGINX), API is on the same origin
+                  const apiBaseUrl = isSubdomainDeployment ? viteApiUrl : frontendUrl;
+                  const deploymentLabel = isSubdomainDeployment
+                    ? 'ProxyPilot / External Reverse Proxy (subdomain routing)'
+                    : 'Caddy / Host-Installed NGINX (path-based routing)';
+
+                  return (
                   <div className="glass rounded-xl p-6 overflow-auto" style={{ maxHeight: 'calc(100vh - 300px)' }}>
                     <div className="prose prose-invert max-w-none">
                       <div className="flex items-center justify-between mb-4">
@@ -1442,6 +1454,31 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
 Embed MEET video conferencing into your application using iframes. This is the simplest integration method and requires minimal setup.
 
+## Server URLs for Your Deployment
+
+Your MEET server uses **${deploymentLabel}**.
+
+| Service   | URL |
+|-----------|-----|
+| Frontend (iframe src) | \`${frontendUrl}\` |
+| API (room management) | \`${apiBaseUrl}\` |
+${isSubdomainDeployment ? `
+> **Important:** Because your deployment uses subdomain routing, the API URL (\`${apiBaseUrl}\`) is different from the frontend URL (\`${frontendUrl}\`). API calls (creating rooms, listing rooms, etc.) must use the API URL. The iframe \`src\` still uses the frontend URL.
+` : `
+> Your deployment uses path-based routing, so the frontend and API share the same base URL. All API calls go to \`${frontendUrl}/api/*\`.
+`}
+### If integrating into another application
+
+When configuring MEET in another application (e.g., XRay), you may be asked for:
+
+- **MEET server URL**: \`${frontendUrl}\` (used for iframe embeds)
+- **API URL**: \`${apiBaseUrl}\` (used for API calls like creating rooms)
+${isSubdomainDeployment ? `
+Since your deployment uses subdomain routing, these are different URLs. If the integration only asks for one URL, use the **frontend URL** (\`${frontendUrl}\`) for the iframe and know that the API is at \`${apiBaseUrl}\`.
+
+**Common mistake:** Sending API requests (POST, PUT) to \`${frontendUrl}/api/rooms\` will return \`405 Not Allowed\` because that hits the frontend nginx, not the API server. API requests must go to \`${apiBaseUrl}/api/rooms\`.
+` : `These are the same base URL for your deployment.
+`}
 ## Quick Start
 
 ### Full-Featured (with end call controls)
@@ -1450,7 +1487,7 @@ Includes leave call and end meeting buttons. Best for standalone embeds.
 
 \`\`\`html
 <iframe
-  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  src="${frontendUrl}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>
@@ -1462,7 +1499,7 @@ Hides leave call and end meeting buttons. Use this when your application manages
 
 \`\`\`html
 <iframe
-  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
+  src="${frontendUrl}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>
@@ -1486,7 +1523,7 @@ Hides leave call and end meeting buttons. Use this when your application manages
 2. **Create a Room (Optional)**
    Use the API to create rooms programmatically with custom IDs:
    \`\`\`
-   POST /api/rooms
+   POST ${apiBaseUrl}/api/rooms
    {
      "roomName": "my-meeting-123",
      "displayName": "Team Standup",
@@ -1512,21 +1549,22 @@ allow="camera; microphone; display-capture; autoplay"
 
 \`\`\`javascript
 class MeetIntegration {
-  constructor(apiKey, serverUrl = '${window.location.origin}') {
+  constructor(apiKey, serverUrl = '${frontendUrl}', apiUrl = '${apiBaseUrl}') {
     this.apiKey = apiKey;
-    this.serverUrl = serverUrl;
+    this.serverUrl = serverUrl;  // Frontend URL (for iframe src)
+    this.apiUrl = apiUrl;        // API URL (for room management)
   }
 
   // Create a new meeting room
   async createMeeting(options = {}) {
-    const response = await fetch(\`\${this.serverUrl}/api/rooms\`, {
+    const response = await fetch(\\\`\\\${this.apiUrl}/api/rooms\\\`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': this.apiKey
       },
       body: JSON.stringify({
-        roomName: options.roomId || \`meeting-\${Date.now()}\`,
+        roomName: options.roomId || \\\`meeting-\\\${Date.now()}\\\`,
         displayName: options.displayName || 'Video Meeting',
         maxParticipants: options.maxParticipants || 100
       })
@@ -1534,11 +1572,11 @@ class MeetIntegration {
     return response.json();
   }
 
-  // Generate join URL
+  // Generate join URL (uses frontend URL for iframe)
   getJoinUrl(roomName, participantName) {
     const params = new URLSearchParams({ room: roomName });
     if (participantName) params.set('name', participantName);
-    return \`\${this.serverUrl}/?\${params.toString()}\`;
+    return \\\`\\\${this.serverUrl}/?\\\${params.toString()}\\\`;
   }
 
   // Embed meeting in a container
@@ -1566,9 +1604,9 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');
 \`\`\`jsx
 function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \`${window.location.origin}/?room=\${roomId}\${
-    participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
-  }\`;
+  const meetUrl = \\\`${frontendUrl}/?room=\\\${roomId}\\\${
+    participantName ? \\\`&name=\\\${encodeURIComponent(participantName)}\\\` : ''
+  }\\\`;
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '600px' }}>
@@ -1586,7 +1624,8 @@ function MeetEmbed({ roomId, participantName }) {
 \`\`\`
 
 ## Troubleshooting
-
+${isSubdomainDeployment ? `
+- **405 Not Allowed from nginx:** You're sending API requests to the frontend URL (\`${frontendUrl}\`). API calls must go to \`${apiBaseUrl}\`. The frontend nginx only serves static files and returns 405 for POST/PUT requests.` : ''}
 - **Camera/Microphone not working:** Ensure iframe has correct \`allow\` attributes and page is served over HTTPS.
 - **Iframe not loading:** Check browser console for CSP errors. Verify CORS is configured properly.
 - **Room not found:** Rooms are created on first join unless pre-created via API. Check room name uses only alphanumeric characters, hyphens, and underscores.
@@ -1613,6 +1652,62 @@ function MeetEmbed({ roomId, participantName }) {
                         Embed MEET video conferencing into your application using iframes. This is the simplest integration method and requires minimal setup.
                       </p>
 
+                      {/* Server URLs Section */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Server URLs for Your Deployment</h3>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
+                        <p className="text-meet-text-secondary text-sm mb-3">
+                          Your MEET server uses <strong className="text-meet-text-primary">{deploymentLabel}</strong>.
+                        </p>
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-meet-border">
+                              <th className="text-left py-2 text-meet-text-secondary">Service</th>
+                              <th className="text-left py-2 text-meet-text-secondary">URL</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr className="border-b border-meet-border/50">
+                              <td className="py-2 text-meet-text-primary">Frontend (iframe src)</td>
+                              <td className="py-2 font-mono text-meet-accent">{frontendUrl}</td>
+                            </tr>
+                            <tr className="border-b border-meet-border/50">
+                              <td className="py-2 text-meet-text-primary">API (room management)</td>
+                              <td className="py-2 font-mono text-meet-accent">{apiBaseUrl}</td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {isSubdomainDeployment && (
+                        <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4 mb-4">
+                          <p className="text-yellow-300 text-sm">
+                            <strong>Important:</strong> Your deployment uses subdomain routing, so the API URL (<code className="text-yellow-200">{apiBaseUrl}</code>) is different from the frontend URL (<code className="text-yellow-200">{frontendUrl}</code>). API calls (creating rooms, listing rooms, etc.) must use the API URL. The iframe <code>src</code> still uses the frontend URL.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* Integration into other apps */}
+                      <h4 className="text-lg font-semibold text-meet-text-primary mt-4 mb-2">If integrating into another application</h4>
+                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4 text-sm text-meet-text-secondary">
+                        <p className="mb-2">When configuring MEET in another application, you may be asked for:</p>
+                        <ul className="list-disc list-inside space-y-1 mb-3">
+                          <li><strong className="text-meet-text-primary">MEET server URL:</strong> <code className="text-meet-accent">{frontendUrl}</code></li>
+                          <li><strong className="text-meet-text-primary">API URL:</strong> <code className="text-meet-accent">{apiBaseUrl}</code></li>
+                        </ul>
+                        {isSubdomainDeployment ? (
+                          <>
+                            <p className="mb-2">Since your deployment uses subdomain routing, these are <strong className="text-meet-text-primary">different URLs</strong>. If the integration only asks for one URL, use the frontend URL and know that the API is at <code className="text-meet-accent">{apiBaseUrl}</code>.</p>
+                            <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3 mt-2">
+                              <p className="text-red-300 text-xs">
+                                <strong>Common mistake:</strong> Sending API requests (POST, PUT) to <code>{frontendUrl}/api/rooms</code> will return <strong>405 Not Allowed</strong> because that hits the frontend nginx, not the API server. API requests must go to <code>{apiBaseUrl}/api/rooms</code>.
+                              </p>
+                            </div>
+                          </>
+                        ) : (
+                          <p>These are the same base URL for your deployment.</p>
+                        )}
+                      </div>
+
                       {/* Quick Start */}
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Quick Start</h3>
                       <p className="text-meet-text-secondary text-sm mb-3">Choose an embed mode based on your integration needs:</p>
@@ -1628,7 +1723,7 @@ function MeetEmbed({ roomId, participantName }) {
                         </p>
                         <div className="bg-meet-bg-tertiary rounded-lg p-4">
                           <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
-  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  src="${frontendUrl}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>`}</code></pre>
@@ -1647,7 +1742,7 @@ function MeetEmbed({ roomId, participantName }) {
                         </p>
                         <div className="bg-meet-bg-tertiary rounded-lg p-4">
                           <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
-  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
+  src="${frontendUrl}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>`}</code></pre>
@@ -1704,7 +1799,7 @@ function MeetEmbed({ roomId, participantName }) {
                           <strong className="text-meet-text-primary">Create a Room (Optional)</strong>
                           <p className="ml-6 mt-1">Use the API to create rooms programmatically with custom IDs.</p>
                           <div className="bg-meet-bg-tertiary rounded-lg p-3 ml-6 mt-2">
-                            <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`POST /api/rooms
+                            <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`POST ${apiBaseUrl}/api/rooms
 {
   "roomName": "my-meeting-123",
   "displayName": "Team Standup",
@@ -1734,14 +1829,15 @@ function MeetEmbed({ roomId, participantName }) {
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">JavaScript Integration</h3>
                       <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
                         <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`class MeetIntegration {
-  constructor(apiKey, serverUrl = '${window.location.origin}') {
+  constructor(apiKey, serverUrl = '${frontendUrl}', apiUrl = '${apiBaseUrl}') {
     this.apiKey = apiKey;
-    this.serverUrl = serverUrl;
+    this.serverUrl = serverUrl;  // Frontend URL (for iframe src)
+    this.apiUrl = apiUrl;        // API URL (for room management)
   }
 
   // Create a new meeting room
   async createMeeting(options = {}) {
-    const response = await fetch(\`\${this.serverUrl}/api/rooms\`, {
+    const response = await fetch(\`\${this.apiUrl}/api/rooms\`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1756,7 +1852,7 @@ function MeetEmbed({ roomId, participantName }) {
     return response.json();
   }
 
-  // Generate join URL
+  // Generate join URL (uses frontend URL for iframe)
   getJoinUrl(roomName, participantName) {
     const params = new URLSearchParams({ room: roomName });
     if (participantName) params.set('name', participantName);
@@ -1788,7 +1884,7 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
                       <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
                         <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \`${window.location.origin}/?room=\${roomId}\${
+  const meetUrl = \`${frontendUrl}/?room=\${roomId}\${
     participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
   }\`;
 
@@ -1810,13 +1906,17 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
                       {/* Troubleshooting */}
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Troubleshooting</h3>
                       <ul className="list-disc list-inside space-y-2 text-meet-text-secondary">
+                        {isSubdomainDeployment && (
+                          <li><strong className="text-red-400">405 Not Allowed from nginx:</strong> You're sending API requests to the frontend URL (<code className="text-meet-accent">{frontendUrl}</code>). API calls must go to <code className="text-meet-accent">{apiBaseUrl}</code>. The frontend nginx only serves static files and returns 405 for POST/PUT requests.</li>
+                        )}
                         <li><strong className="text-meet-text-primary">Camera/Microphone not working:</strong> Ensure iframe has correct <code className="text-meet-accent">allow</code> attributes and page is served over HTTPS.</li>
                         <li><strong className="text-meet-text-primary">Iframe not loading:</strong> Check browser console for CSP errors. Verify CORS is configured properly.</li>
                         <li><strong className="text-meet-text-primary">Room not found:</strong> Rooms are created on first join unless pre-created via API. Check room name uses only alphanumeric characters, hyphens, and underscores.</li>
                       </ul>
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </div>
             )}
           </>
