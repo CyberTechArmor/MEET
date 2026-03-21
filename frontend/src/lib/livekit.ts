@@ -479,6 +479,8 @@ export interface JoinLinkParams {
   autojoin: boolean;
   /** Video quality preset to use */
   quality: VideoQualityPreset | null;
+  /** Whether to hide end call buttons (for iframe embeds) */
+  hideEndCall: boolean;
 }
 
 /**
@@ -522,6 +524,7 @@ export function parseJoinLink(): JoinLinkParams {
   const name = urlParams.get('name');
   const autojoinParam = urlParams.get('autojoin');
   const qualityParam = urlParams.get('quality');
+  const hideEndCallParam = urlParams.get('hideEndCall');
 
   // Parse autojoin - defaults to true if name is provided
   let autojoin = name !== null;
@@ -535,11 +538,15 @@ export function parseJoinLink(): JoinLinkParams {
     quality = qualityParam as VideoQualityPreset;
   }
 
+  // Parse hideEndCall - for iframe embeds that manage their own call lifecycle
+  const hideEndCall = hideEndCallParam === 'true' || hideEndCallParam === '1';
+
   return {
     room: room ? parseRoomCode(room) : null,
     name: name ? name.slice(0, 50) : null,
     autojoin,
     quality,
+    hideEndCall,
   };
 }
 

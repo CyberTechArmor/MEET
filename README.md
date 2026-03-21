@@ -225,7 +225,6 @@ meet/
 │   ├── nginx.conf
 │   ├── package.json
 │   ├── vite.config.ts
-│   ├── tailwind.config.js
 │   └── src/
 │       ├── main.tsx
 │       ├── App.tsx
@@ -234,13 +233,17 @@ meet/
 │       │   ├── JoinForm.tsx
 │       │   ├── VideoRoom.tsx
 │       │   ├── VideoTile.tsx
+│       │   ├── ScreenShareView.tsx
 │       │   ├── ControlBar.tsx
+│       │   ├── SelfViewPip.tsx
+│       │   ├── AdminPanel.tsx
+│       │   ├── ConfirmModal.tsx
 │       │   └── ParticipantOverlay.tsx
 │       ├── hooks/
-│       │   ├── useLiveKit.ts
-│       │   └── useMediaDevices.ts
+│       │   └── useLiveKit.ts
 │       ├── stores/
-│       │   └── roomStore.ts
+│       │   ├── roomStore.ts
+│       │   └── adminStore.ts
 │       └── lib/
 │           └── livekit.ts
 ├── api/

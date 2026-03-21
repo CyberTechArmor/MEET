@@ -15,7 +15,7 @@ import AdminPanel from './components/AdminPanel';
 
 function App() {
   const view = useRoomStore((state) => state.view);
-  const { setDisplayName, setRoomCode } = useRoomStore();
+  const { setDisplayName, setRoomCode, setHideEndCall } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
   const [showAdmin, setShowAdmin] = useState(false);
@@ -53,6 +53,11 @@ function App() {
         setVideoQualityPreset(joinParams.quality);
       }
 
+      // Set hideEndCall for iframe embeds
+      if (joinParams.hideEndCall) {
+        setHideEndCall(true);
+      }
+
       // Pre-fill the form fields
       setRoomCode(joinParams.room);
       if (joinParams.name) {
@@ -83,7 +88,7 @@ function App() {
         clearSession();
       });
     }
-  }, [connect, setDisplayName, setRoomCode]);
+  }, [connect, setDisplayName, setRoomCode, setHideEndCall]);
 
 
   // Show loading state while checking status

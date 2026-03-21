@@ -1444,9 +1444,25 @@ Embed MEET video conferencing into your application using iframes. This is the s
 
 ## Quick Start
 
+### Full-Featured (with end call controls)
+
+Includes leave call and end meeting buttons. Best for standalone embeds.
+
 \`\`\`html
 <iframe
   src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
+  allow="camera; microphone; display-capture; autoplay"
+  style="width: 100%; height: 600px; border: none;"
+></iframe>
+\`\`\`
+
+### Without End Call (for custom interfaces)
+
+Hides leave call and end meeting buttons. Use this when your application manages the call lifecycle (e.g., your page has its own "End Call" button that removes/navigates away from the iframe).
+
+\`\`\`html
+<iframe
+  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>
@@ -1460,6 +1476,7 @@ Embed MEET video conferencing into your application using iframes. This is the s
 | \`name\` | No | Pre-filled participant name |
 | \`autojoin\` | No | Auto-join when both room and name provided (true/false) |
 | \`quality\` | No | Video quality: auto, high, max, balanced, low |
+| \`hideEndCall\` | No | Hide leave/end call buttons (true/false). Use when your app manages the call lifecycle. |
 
 ## Integration Steps
 
@@ -1598,12 +1615,43 @@ function MeetEmbed({ roomId, participantName }) {
 
                       {/* Quick Start */}
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Quick Start</h3>
-                      <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
-                        <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
+                      <p className="text-meet-text-secondary text-sm mb-3">Choose an embed mode based on your integration needs:</p>
+
+                      {/* Full-featured embed */}
+                      <div className="mb-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-2 h-2 rounded-full bg-meet-accent" />
+                          <h4 className="text-sm font-semibold text-meet-text-primary">Full-Featured (with end call controls)</h4>
+                        </div>
+                        <p className="text-meet-text-tertiary text-xs mb-2 ml-4">
+                          Includes leave call and end meeting buttons. Best for standalone embeds.
+                        </p>
+                        <div className="bg-meet-bg-tertiary rounded-lg p-4">
+                          <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
   src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME"
   allow="camera; microphone; display-capture; autoplay"
   style="width: 100%; height: 600px; border: none;"
 ></iframe>`}</code></pre>
+                        </div>
+                      </div>
+
+                      {/* Embed without end call */}
+                      <div className="mb-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-2 h-2 rounded-full bg-meet-warning" />
+                          <h4 className="text-sm font-semibold text-meet-text-primary">Without End Call (for custom interfaces)</h4>
+                        </div>
+                        <p className="text-meet-text-tertiary text-xs mb-2 ml-4">
+                          Hides leave call and end meeting buttons. Use this when your application manages the call lifecycle
+                          (e.g., your page has its own "End Call" button that removes/navigates away from the iframe).
+                        </p>
+                        <div className="bg-meet-bg-tertiary rounded-lg p-4">
+                          <pre className="text-sm text-meet-text-primary overflow-x-auto"><code>{`<iframe
+  src="${window.location.origin}/?room=ROOM_CODE&name=PARTICIPANT_NAME&hideEndCall=true"
+  allow="camera; microphone; display-capture; autoplay"
+  style="width: 100%; height: 600px; border: none;"
+></iframe>`}</code></pre>
+                        </div>
                       </div>
 
                       {/* URL Parameters */}
@@ -1636,6 +1684,11 @@ function MeetEmbed({ roomId, participantName }) {
                             <td className="py-2 font-mono text-meet-accent">quality</td>
                             <td className="py-2 text-meet-text-primary">No</td>
                             <td className="py-2 text-meet-text-secondary">Video quality: auto, high, max, balanced, low</td>
+                          </tr>
+                          <tr className="border-b border-meet-border/50">
+                            <td className="py-2 font-mono text-meet-accent">hideEndCall</td>
+                            <td className="py-2 text-meet-text-primary">No</td>
+                            <td className="py-2 text-meet-text-secondary">Hide leave/end call buttons (true/false). Use when your app manages the call lifecycle.</td>
                           </tr>
                         </tbody>
                       </table>

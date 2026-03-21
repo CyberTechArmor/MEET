@@ -1628,7 +1628,7 @@ app.post('/api/admin/api-keys', authenticateAdmin, (req: Request<object, object,
 });
 
 // Revoke API key
-app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request, res: Response) => {
+app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyId: string }>, res: Response) => {
   const { keyId } = req.params;
 
   if (!apiKeys.has(keyId)) {
@@ -1731,7 +1731,7 @@ app.post('/api/admin/webhooks', authenticateAdmin, (req: Request<object, object,
 });
 
 // Get webhook
-app.get('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request, res: Response) => {
+app.get('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
   const webhook = webhooks.get(webhookId);
 
@@ -1813,7 +1813,7 @@ app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ web
 });
 
 // Delete webhook
-app.delete('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request, res: Response) => {
+app.delete('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
 
   if (!webhooks.has(webhookId)) {
@@ -1826,7 +1826,7 @@ app.delete('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request, r
 });
 
 // Test webhook
-app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: Request, res: Response) => {
+app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
   const webhook = webhooks.get(webhookId);
 

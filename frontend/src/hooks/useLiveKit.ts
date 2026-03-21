@@ -29,6 +29,7 @@ export function useLiveKit() {
     setMicEnabled,
     setCameraEnabled,
     setScreenSharing,
+    setActiveScreenShareIdentity,
     setIsHost,
     setRoomCode,
     setView,
@@ -69,8 +70,39 @@ export function useLiveKit() {
       setRemoteParticipants(Array.from(room.remoteParticipants.values()));
     };
 
-    room.on(RoomEvent.TrackSubscribed, updateParticipants);
-    room.on(RoomEvent.TrackUnsubscribed, updateParticipants);
+    room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
+      updateParticipants();
+      // When a remote participant starts screen sharing, they become the active sharer (last wins)
+      if (track.source === Track.Source.ScreenShare) {
+        setActiveScreenShareIdentity(participant.identity);
+      }
+    });
+    room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
+      updateParticipants();
+      // If the active sharer stops, find the next available or clear
+      if (track.source === Track.Source.ScreenShare) {
+        const currentActive = useRoomStore.getState().activeScreenShareIdentity;
+        if (currentActive === participant.identity) {
+          // Check if local is sharing
+          const localPub = room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+          if (localPub?.track && !localPub.isMuted) {
+            setActiveScreenShareIdentity(room.localParticipant.identity);
+          } else {
+            // Find another remote still sharing
+            let nextSharer: string | null = null;
+            for (const remote of room.remoteParticipants.values()) {
+              if (remote.identity === participant.identity) continue;
+              const pub = remote.getTrackPublication(Track.Source.ScreenShare);
+              if (pub?.track && !pub.isMuted) {
+                nextSharer = remote.identity;
+                break;
+              }
+            }
+            setActiveScreenShareIdentity(nextSharer);
+          }
+        }
+      }
+    });
     room.on(RoomEvent.TrackMuted, updateParticipants);
     room.on(RoomEvent.TrackUnmuted, updateParticipants);
     room.on(RoomEvent.TrackPublished, updateParticipants);
@@ -80,6 +112,8 @@ export function useLiveKit() {
       if (publication.track?.kind === Track.Kind.Video) {
         if (publication.track.source === Track.Source.ScreenShare) {
           setScreenSharing(true);
+          // Last screen share wins — set this as the active screen share for everyone
+          setActiveScreenShareIdentity(room.localParticipant.identity);
         } else if (publication.track.source === Track.Source.Camera) {
           setCameraEnabled(true);
         }
@@ -94,6 +128,20 @@ export function useLiveKit() {
       if (publication.track?.kind === Track.Kind.Video) {
         if (publication.track.source === Track.Source.ScreenShare) {
           setScreenSharing(false);
+          // If the local user was the active sharer, find the next available or clear
+          const currentActive = useRoomStore.getState().activeScreenShareIdentity;
+          if (currentActive === room.localParticipant.identity) {
+            // Look for another participant still sharing
+            let nextSharer: string | null = null;
+            for (const remote of room.remoteParticipants.values()) {
+              const pub = remote.getTrackPublication(Track.Source.ScreenShare);
+              if (pub?.track && !pub.isMuted) {
+                nextSharer = remote.identity;
+                break;
+              }
+            }
+            setActiveScreenShareIdentity(nextSharer);
+          }
         } else if (publication.track.source === Track.Source.Camera) {
           setCameraEnabled(false);
         }
@@ -147,6 +195,7 @@ export function useLiveKit() {
     removeRemoteParticipant,
     setRemoteParticipants,
     setScreenSharing,
+    setActiveScreenShareIdentity,
     setMicEnabled,
     setCameraEnabled,
     resetKeepingName,
