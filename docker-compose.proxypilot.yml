@@ -1,0 +1,72 @@
+# Docker Compose for ProxyPilot / External Reverse Proxy
+# Use this when a reverse proxy manager (ProxyPilot, Nginx Proxy Manager, etc.)
+# handles SSL and domain routing externally.
+#
+# ProxyPilot doesn't support path-based routing, so each service gets its own subdomain:
+#   - meet.example.com       → meet-frontend (port 3002)
+#   - api.meet.example.com   → meet-api (port 8080)
+#   - livekit.meet.example.com → livekit (port 7880)
+#
+# Setup:
+#   1. Set MEET_DOMAIN in .env (e.g., meet.example.com)
+#   2. Create DNS A records for the domain and api.*/livekit.* subdomains
+#   3. docker compose -f docker-compose.proxypilot.yml up -d --build
+#   4. In ProxyPilot, create 3 services pointing to the ports below
+#   5. Enable SSL + Auto-obtain + WebSocket for each
+
+services:
+  # Frontend - React + Vite application
+  meet-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=https://api.${MEET_DOMAIN:-localhost}
+        - VITE_LIVEKIT_URL=wss://livekit.${MEET_DOMAIN:-localhost}
+    ports:
+      - "127.0.0.1:${MEET_FRONTEND_PORT:-3002}:80"
+    depends_on:
+      - meet-api
+      - livekit
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+  # API Server - Token generation and room management
+  meet-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:${MEET_API_PORT:-8080}:8080"
+    environment:
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - LIVEKIT_URL=http://livekit:7880
+      - PORT=8080
+      - CORS_ORIGIN=https://${MEET_DOMAIN:-localhost}
+    depends_on:
+      - livekit
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+  # LiveKit Server - WebRTC backend
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports:
+      - "127.0.0.1:7880:7880"   # WebSocket / HTTP API (proxied by ProxyPilot)
+      - "7881:7881"              # RTC over TCP (direct, needs public access)
+      - "50000-50100:50000-50100/udp"  # RTC over UDP (direct, needs public access)
+    environment:
+      - NODE_IP=${LIVEKIT_NODE_IP:-}
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+networks:
+  meet-network:
+    driver: bridge
