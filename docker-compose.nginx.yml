@@ -1,0 +1,59 @@
+# Docker Compose for Nginx Reverse Proxy (host-installed Nginx)
+# Use this when Nginx is installed directly on the host machine.
+# Nginx handles SSL termination via Let's Encrypt (Certbot).
+# Docker services bind to 127.0.0.1 only — Nginx proxies external traffic to them.
+
+services:
+  # Frontend - React + Vite application
+  # Note: Frontend auto-detects API and LiveKit URLs based on browser location
+  meet-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - meet-api
+      - livekit
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+  # API Server - Token generation and room management
+  meet-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - LIVEKIT_URL=http://livekit:7880
+      - PORT=8080
+      - CORS_ORIGIN=*
+    depends_on:
+      - livekit
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+  # LiveKit Server - WebRTC backend
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports:
+      - "127.0.0.1:7880:7880"   # WebSocket / HTTP API (proxied by Nginx)
+      - "7881:7881"              # RTC over TCP (direct, needs public access)
+      - "50000-50100:50000-50100/udp"  # RTC over UDP (direct, needs public access)
+    environment:
+      - NODE_IP=${LIVEKIT_NODE_IP:-}
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+    networks:
+      - meet-network
+
+networks:
+  meet-network:
+    driver: bridge
