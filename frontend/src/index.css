@@ -1,6 +1,59 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@theme {
+  /* Primary background shades */
+  --color-meet-bg: #0a0a0a;
+  --color-meet-bg-secondary: #111111;
+  --color-meet-bg-tertiary: #1a1a1a;
+  --color-meet-bg-elevated: #222222;
+
+  /* Accent color - Electric Cyan */
+  --color-meet-accent: #00d4ff;
+  --color-meet-accent-dark: #00a8cc;
+  --color-meet-accent-light: #4de5ff;
+  --color-meet-accent-subtle: rgba(0, 212, 255, 0.1);
+
+  /* Status colors */
+  --color-meet-success: #10b981;
+  --color-meet-warning: #f59e0b;
+  --color-meet-error: #ef4444;
+
+  /* Text colors */
+  --color-meet-text-primary: #ffffff;
+  --color-meet-text-secondary: rgba(255, 255, 255, 0.7);
+  --color-meet-text-tertiary: rgba(255, 255, 255, 0.5);
+  --color-meet-text-disabled: rgba(255, 255, 255, 0.3);
+
+  /* Border color */
+  --color-meet-border: rgba(255, 255, 255, 0.1);
+
+  /* Fonts */
+  --font-display: 'Outfit', system-ui, sans-serif;
+  --font-body: 'IBM Plex Sans', system-ui, sans-serif;
+
+  /* Box shadows */
+  --shadow-glow: 0 0 20px rgba(0, 212, 255, 0.3);
+  --shadow-glow-sm: 0 0 10px rgba(0, 212, 255, 0.2);
+  --shadow-soft: 0 4px 30px rgba(0, 0, 0, 0.3);
+
+  /* Backdrop blur */
+  --backdrop-blur-glass: 16px;
+
+  /* Animations */
+  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --animate-fade-in: fadeIn 0.3s ease-in-out;
+  --animate-slide-up: slideUp 0.3s ease-out;
+
+  @keyframes fadeIn {
+    0% { opacity: 0; }
+    100% { opacity: 1; }
+  }
+
+  @keyframes slideUp {
+    0% { opacity: 0; transform: translateY(10px); }
+    100% { opacity: 1; transform: translateY(0); }
+  }
+}
 
 /* Base styles */
 * {
