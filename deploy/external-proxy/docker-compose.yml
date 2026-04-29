@@ -24,8 +24,8 @@ services:
   # frontend/src/lib/livekit.ts uses relative URLs when port is 80/443).
   meet-frontend:
     build:
-      context: ../..
-      dockerfile: frontend/Dockerfile
+      context: ../../frontend
+      dockerfile: Dockerfile
       args:
         - VITE_API_URL=${PUBLIC_API_URL:-}
         - VITE_LIVEKIT_URL=${PUBLIC_LIVEKIT_URL:-}
@@ -48,8 +48,8 @@ services:
   # exposing the API to anyone.
   meet-api:
     build:
-      context: ../..
-      dockerfile: api/Dockerfile
+      context: ../../api
+      dockerfile: Dockerfile
     ports:
       - "${BIND_HOST:-0.0.0.0}:${MEET_API_PORT:-8080}:8080"
     environment:
