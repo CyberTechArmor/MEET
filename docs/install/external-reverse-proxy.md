@@ -55,6 +55,11 @@ directly — the proxy is not in that path.
   container over the bridge.
 - An LXC profile with `security.nesting=true` if you're running Docker
   inside Incus/LXC; otherwise Docker won't start.
+- ≥ 2 GiB RAM available to the LXC. The Vite frontend build is the
+  hungriest step — under-provisioned containers will silently OOM
+  during `npm ci` / `vite build` and the install script will report
+  the failure. Add swap or raise the limit:
+  `incus config set <container> limits.memory 2GiB`.
 
 ## 3. Step-by-step
 
@@ -172,7 +177,9 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
-| `502 Bad Gateway` from the reverse proxy | Component bound to `127.0.0.1` inside the container, proxy can't reach it across the bridge | Confirm `BIND_HOST=0.0.0.0` in `.env`, restart with `docker compose up -d`, re-check with `ss -tlnp` |
+| `502 Bad Gateway` from the reverse proxy, port-scan from the proxy shows only `5355` / mDNS listening on the bridge IP | Containers never came up — `docker compose up -d` exits 0 even if a container crashes immediately, so the script reported success | `docker compose -f deploy/external-proxy/docker-compose.yml ps` to see crashed services; `… logs --tail 100` for the failure. Most common in LXC: OOM during the Vite build (give the container ≥2 GiB RAM or add swap) or missing `security.nesting=true` on the LXC profile |
+| `502 Bad Gateway` from the reverse proxy, `docker compose ps` shows everything `running` | Component bound to `127.0.0.1` inside the container, proxy can't reach it across the bridge | Confirm `BIND_HOST=0.0.0.0` in `.env`, restart with `docker compose up -d`, re-check with `ss -tlnp` |
+| `npm ci` killed during build, exit 137 | LXC out of memory during the Vite/React build | Raise the LXC memory limit (`incus config set <container> limits.memory 2GiB`) or attach swap; rerun installer |
 | Proxy connects but page is blank | `PUBLIC_BASE_URL` empty or wrong scheme; CORS origin mismatch | Set `PUBLIC_BASE_URL=https://meet.example.com` in `.env`, rebuild frontend (`docker compose build meet-frontend && docker compose up -d`) |
 | Frontend loads, API calls return 404 | Wrong `PUBLIC_API_URL` for the chosen mode | Single-domain: leave `PUBLIC_API_URL` blank. Three-domain: set `PUBLIC_API_URL=https://api.meet.example.com`. Rebuild frontend after either change |
 | WebSocket to `/livekit` returns 404 | Proxy isn't stripping the `/livekit` prefix before forwarding to port 7880 | Use the reference Caddyfile / nginx config; if hand-rolled, ensure `handle_path /livekit/*` (Caddy) or `rewrite ^/livekit/(.*) /$1 break;` (nginx) |
