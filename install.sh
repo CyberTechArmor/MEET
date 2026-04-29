@@ -1348,6 +1348,204 @@ ENV_FILE
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# External reverse proxy mode (LXC / bare-metal where the host already
+# terminates TLS — e.g. host Caddy fronting an Incus container).
+install_with_external_proxy() {
+    echo ""
+    echo -e "${BOLD}Behind external reverse proxy (LXC / bare-metal)${NC}"
+    echo ""
+    echo "  This mode is for hosts that already run a reverse proxy"
+    echo "  (host Caddy, host nginx, NPM, …) as the single TLS edge."
+    echo ""
+    echo "  This stack ships NO TLS, NO ACME, NO bundled proxy."
+    echo "  Every externally-routed port binds on 0.0.0.0 so the"
+    echo "  host proxy can reach it across the bridge."
+    echo ""
+
+    local compose_dir="deploy/external-proxy"
+    if [ ! -f "$compose_dir/docker-compose.yml" ] || [ ! -f "$compose_dir/.env.example" ]; then
+        echo -e "${RED}✗ $compose_dir/docker-compose.yml not found.${NC}"
+        echo "  Are you running install.sh from the repo root?"
+        exit 1
+    fi
+
+    read -p "Public hostname (e.g., meet.example.com): " public_host
+    if [ -z "$public_host" ]; then
+        echo -e "${RED}Public hostname is required.${NC}"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}URL layout:${NC}"
+    echo -e "  ${CYAN}[1]${NC} Single-domain (one DNS record, path-prefix routing)"
+    echo "      https://$public_host/, /api, /livekit"
+    echo -e "  ${CYAN}[2]${NC} Three-domain (subdomain split)"
+    echo "      meet.$public_host, api.$public_host, livekit.$public_host"
+    echo ""
+    read -p "Enter choice [1]: " layout
+    layout=${layout:-1}
+
+    local public_base_url=""
+    local public_api_url=""
+    local public_livekit_url=""
+    case "$layout" in
+        1)
+            public_base_url="https://$public_host"
+            public_api_url=""
+            public_livekit_url=""
+            ;;
+        2)
+            public_base_url="https://$public_host"
+            public_api_url="https://api.$public_host"
+            public_livekit_url="wss://livekit.$public_host"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Exiting.${NC}"
+            exit 1
+            ;;
+    esac
+
+    # Detect host public IP (used by LiveKit so ICE candidates point at a
+    # routable address, not the container's bridge IP).
+    local public_ip
+    public_ip=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://ipecho.net/plain 2>/dev/null || \
+                echo "")
+    if [ -n "$public_ip" ]; then
+        echo -e "${GREEN}✓${NC} Detected host public IP: $public_ip"
+        read -p "Use this for LIVEKIT_NODE_IP? [Y/n]: " accept_ip
+        if [[ "$accept_ip" =~ ^[Nn]$ ]]; then
+            read -p "Enter host's public IPv4: " public_ip
+        fi
+    else
+        read -p "Could not auto-detect. Enter host's public IPv4 (blank = STUN auto-detect): " public_ip
+    fi
+
+    # Random LiveKit credentials — never ship devkey/secret to the internet.
+    local lk_key="meet_$(openssl rand -hex 6 2>/dev/null || head -c 12 /dev/urandom | xxd -p)"
+    local lk_secret
+    lk_secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
+
+    cat > "$compose_dir/.env" << ENV_FILE
+# MEET Configuration — External Reverse Proxy Mode
+PUBLIC_BASE_URL=$public_base_url
+PUBLIC_API_URL=$public_api_url
+PUBLIC_LIVEKIT_URL=$public_livekit_url
+
+BIND_HOST=0.0.0.0
+
+MEET_FRONTEND_PORT=3000
+MEET_API_PORT=8080
+MEET_LIVEKIT_WS_PORT=7880
+MEET_LIVEKIT_TCP_PORT=7881
+
+LIVEKIT_UDP_PORT_RANGE_START=50000
+LIVEKIT_UDP_PORT_RANGE_END=60000
+LIVEKIT_NODE_IP=$public_ip
+
+LIVEKIT_API_KEY=$lk_key
+LIVEKIT_API_SECRET=$lk_secret
+ENV_FILE
+    echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
+
+    echo ""
+    echo "Building and starting Docker containers..."
+    echo "(Using cached layers — set FORCE_REBUILD=1 to rebuild from scratch.)"
+    echo ""
+    local build_args=""
+    if [ "${FORCE_REBUILD:-}" = "1" ]; then
+        build_args="--no-cache"
+    fi
+    if ! (cd "$compose_dir" && docker compose build $build_args && docker compose up -d); then
+        echo -e "${RED}✗ Failed to build or start Docker containers${NC}"
+        echo "  Logs: (cd $compose_dir && docker compose logs)"
+        exit 1
+    fi
+
+    # Verify containers actually came up. `docker compose up -d` exits 0 even
+    # if a container immediately crashes, so the proxy ends up probing ports
+    # that nobody is listening on.
+    echo ""
+    echo "Waiting for containers to become healthy..."
+    local healthy=0
+    for i in $(seq 1 24); do
+        local bad
+        bad=$(cd "$compose_dir" && docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' \
+              | awk '$2 != "running" || ($3 != "" && $3 != "healthy" && $3 != "starting") {print $1}')
+        if [ -z "$bad" ]; then
+            healthy=1
+            break
+        fi
+        sleep 5
+    done
+
+    if [ "$healthy" != "1" ]; then
+        echo -e "${RED}✗ One or more containers are not running / not healthy:${NC}"
+        (cd "$compose_dir" && docker compose ps)
+        echo ""
+        echo "  Last 50 log lines per service:"
+        (cd "$compose_dir" && docker compose logs --tail 50)
+        echo ""
+        echo -e "  ${YELLOW}This is usually one of:${NC}"
+        echo "    • Out-of-memory during build (LXC memory limit too low for"
+        echo "      the Vite build — give the container ≥2 GiB or set a swap)"
+        echo "    • Missing security.nesting=true on the LXC profile"
+        echo "    • Port already in use on the host"
+        exit 1
+    fi
+    echo -e "${GREEN}✓${NC} All containers running"
+
+    # Detect the bridge IP — the address the host reverse proxy must dial.
+    local bridge_ip
+    bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                | awk '{print $4}' | cut -d/ -f1 | head -n1)
+    bridge_ip=${bridge_ip:-<bridge-ip>}
+
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${GREEN}  ✓ MEET is running on this host.${NC}"
+    echo ""
+    echo -e "  ${BOLD}Next: point your existing reverse proxy at this stack.${NC}"
+    echo "  Reference snippets:"
+    if [ "$layout" = "1" ]; then
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/single-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/single-domain.conf${NC}"
+    else
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/three-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/three-domain.conf${NC}"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Upstream targets for the host proxy${NC} (this container's IP is ${CYAN}$bridge_ip${NC}):"
+    echo "     Frontend:         $bridge_ip:3000"
+    echo "     API:              $bridge_ip:8080"
+    echo "     LiveKit signal:   $bridge_ip:7880"
+    echo ""
+    echo -e "  ${BOLD}Smoke-test from the host (should all return 200):${NC}"
+    echo -e "    ${YELLOW}curl -fsSI http://$bridge_ip:3000/health${NC}"
+    echo -e "    ${YELLOW}curl -fsS  http://$bridge_ip:8080/health${NC}"
+    echo -e "    ${YELLOW}curl -fsSI http://$bridge_ip:7880/${NC}"
+    echo ""
+    echo -e "  ${BOLD}Firewall on the host (must be open to the internet):${NC}"
+    echo "     tcp/443             (HTTPS via your reverse proxy)"
+    echo "     tcp/7881            (LiveKit RTC TCP fallback)"
+    echo "     udp/50000-60000     (LiveKit RTC media)"
+    echo ""
+    echo -e "  ${BOLD}LXC users:${NC} forward UDP into the container with"
+    echo -e "    ${YELLOW}incus config device add <container> rtcudp proxy \\${NC}"
+    echo -e "    ${YELLOW}    listen=udp:0.0.0.0:50000-60000 connect=udp:127.0.0.1:50000-60000${NC}"
+    echo ""
+    echo -e "  ${BOLD}Walk-through:${NC} ${CYAN}docs/install/external-reverse-proxy.md${NC}"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo -e "    Stop:    ${YELLOW}(cd $compose_dir && docker compose down)${NC}"
+    echo -e "    Logs:    ${YELLOW}(cd $compose_dir && docker compose logs -f)${NC}"
+    echo -e "    Restart: ${YELLOW}(cd $compose_dir && docker compose restart)${NC}"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
 # Production mode placeholder
 install_production() {
     echo ""
@@ -1399,7 +1597,11 @@ main() {
     echo "      For servers already running ProxyPilot, NPM, or similar"
     echo "      Uses subdomains (api.*, livekit.*) for each service"
     echo ""
-    echo -e "  ${CYAN}[5]${NC} Production Mode"
+    echo -e "  ${CYAN}[5]${NC} Behind external reverse proxy (LXC / bare-metal)"
+    echo "      Host already runs Caddy/nginx as the TLS edge"
+    echo "      Stack ships NO TLS, binds 0.0.0.0, host proxy reaches it"
+    echo ""
+    echo -e "  ${CYAN}[6]${NC} Production Mode"
     echo "      Full deployment with persistence, auth, etc."
     echo -e "      ${YELLOW}(Coming soon)${NC}"
     echo ""
@@ -1422,6 +1624,9 @@ main() {
             install_with_proxypilot
             ;;
         5)
+            install_with_external_proxy
+            ;;
+        6)
             install_production
             ;;
         *)
