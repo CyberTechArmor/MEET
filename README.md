@@ -36,11 +36,17 @@ That's it! The installer will automatically install missing dependencies.
 
 ### Installation Modes
 
-The installer offers three modes:
+The installer offers five modes:
 
 1. **Demo Mode** - Quick local development (http://localhost:3000)
-2. **Demo + Reverse Proxy** - Deployment with Caddy for automatic HTTPS
-3. **Production Mode** - Full deployment (coming soon)
+2. **Deploy with Caddy** - Bundled Caddy reverse proxy with automatic Let's Encrypt
+3. **Deploy with host Nginx + Certbot** - Uses host-installed Nginx for SSL
+4. **Deploy with ProxyPilot / NPM** - Each component on its own subdomain
+5. **Behind external reverse proxy (LXC / bare-metal)** - Host already runs
+   Caddy/nginx as the TLS edge; this stack ships no TLS and binds 0.0.0.0
+   so the host proxy can reach it. Walk-through:
+   [`docs/install/external-reverse-proxy.md`](docs/install/external-reverse-proxy.md)
+6. **Production Mode** - Full deployment (coming soon)
 
 ## Features
 

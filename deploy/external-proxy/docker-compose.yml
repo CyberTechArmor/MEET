@@ -1,0 +1,98 @@
+# MEET — External Reverse Proxy install option.
+#
+# Use this when an external reverse proxy (host Caddy on a bare-metal or LXC
+# host, host nginx, NPM, ProxyPilot, …) terminates TLS and forwards plaintext
+# HTTP/WS to this stack. NO bundled Traefik/Caddy/nginx, NO ACME, NO certbot
+# volumes. TLS is the external proxy's job.
+#
+# Every published port binds to ${BIND_HOST:-0.0.0.0} so the host proxy can
+# reach the container's bridge IP. Do NOT change BIND_HOST to 127.0.0.1 in
+# this layout — the proxy lives outside the container's loopback.
+#
+# Two URL layouts are supported, switched by .env:
+#   - Single-domain (path-prefix): set PUBLIC_BASE_URL only.
+#   - Three-domain (subdomain split): set PUBLIC_API_URL / PUBLIC_LIVEKIT_URL
+#     to https://api.<root> / wss://livekit.<root>.
+#
+# Reference reverse-proxy snippets live in deploy/external-proxy/{caddy,nginx}.
+# Full walk-through: docs/install/external-reverse-proxy.md.
+
+services:
+  # Frontend — React + Vite, served by nginx on port 80 inside the container.
+  # VITE_API_URL and VITE_LIVEKIT_URL are baked in at build time. Leave them
+  # empty for single-domain mode (the frontend's runtime detection in
+  # frontend/src/lib/livekit.ts uses relative URLs when port is 80/443).
+  meet-frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${PUBLIC_API_URL:-}
+        - VITE_LIVEKIT_URL=${PUBLIC_LIVEKIT_URL:-}
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${MEET_FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - meet-api
+      - livekit
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - meet-network
+
+  # API — Express, /health and /api/* routes. CORS_ORIGIN is locked to the
+  # public base URL so a misconfigured proxy fails loudly instead of silently
+  # exposing the API to anyone.
+  meet-api:
+    build:
+      context: ../../api
+      dockerfile: Dockerfile
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${MEET_API_PORT:-8080}:8080"
+    environment:
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      - LIVEKIT_URL=http://livekit:7880
+      - PORT=8080
+      - CORS_ORIGIN=${PUBLIC_BASE_URL:-*}
+    depends_on:
+      - livekit
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - meet-network
+
+  # LiveKit — WebRTC backend. Signaling on 7880 (proxied), TCP fallback on
+  # 7881 (direct), UDP media range (direct). The UDP range MUST match
+  # rtc.port_range_start / _end in livekit.yaml; if you change one, change
+  # all three.
+  livekit:
+    image: livekit/livekit-server:latest
+    command: --config /etc/livekit.yaml
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${MEET_LIVEKIT_WS_PORT:-7880}:7880"
+      - "${BIND_HOST:-0.0.0.0}:${MEET_LIVEKIT_TCP_PORT:-7881}:7881"
+      - "${BIND_HOST:-0.0.0.0}:${LIVEKIT_UDP_PORT_RANGE_START:-50000}-${LIVEKIT_UDP_PORT_RANGE_END:-60000}:${LIVEKIT_UDP_PORT_RANGE_START:-50000}-${LIVEKIT_UDP_PORT_RANGE_END:-60000}/udp"
+    environment:
+      - NODE_IP=${LIVEKIT_NODE_IP:-}
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - meet-network
+
+networks:
+  meet-network:
+    driver: bridge
