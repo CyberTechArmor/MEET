@@ -1422,10 +1422,30 @@ install_with_external_proxy() {
         read -p "Could not auto-detect. Enter host's public IPv4 (blank = STUN auto-detect): " public_ip
     fi
 
-    # Random LiveKit credentials — never ship devkey/secret to the internet.
-    local lk_key="meet_$(openssl rand -hex 6 2>/dev/null || head -c 12 /dev/urandom | xxd -p)"
-    local lk_secret
-    lk_secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
+    # LiveKit credentials. Single source of truth: the .env file.
+    # On rerun we REUSE existing keys instead of regenerating, otherwise
+    # meet-api and the livekit container drift apart and every /api/rooms
+    # call fails with "Unauthorized: invalid API key" (login still works
+    # because login never touches LiveKit, so the breakage is invisible
+    # until the admin panel opens). The same .env value is mirrored into
+    # LIVEKIT_KEYS so the livekit container loads the matching pair —
+    # don't split key generation across two files.
+    local lk_key=""
+    local lk_secret=""
+    if [ -f "$compose_dir/.env" ]; then
+        lk_key=$(grep -E '^LIVEKIT_API_KEY=' "$compose_dir/.env" 2>/dev/null \
+                 | tail -n1 | cut -d= -f2-)
+        lk_secret=$(grep -E '^LIVEKIT_API_SECRET=' "$compose_dir/.env" 2>/dev/null \
+                    | tail -n1 | cut -d= -f2-)
+    fi
+    local lk_keys_reused=0
+    if [ -n "$lk_key" ] && [ -n "$lk_secret" ]; then
+        lk_keys_reused=1
+        echo -e "${GREEN}✓${NC} Reusing existing LiveKit credentials from $compose_dir/.env"
+    else
+        lk_key="meet_$(openssl rand -hex 6 2>/dev/null || head -c 12 /dev/urandom | xxd -p)"
+        lk_secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
+    fi
 
     cat > "$compose_dir/.env" << ENV_FILE
 # MEET Configuration — External Reverse Proxy Mode
@@ -1444,10 +1464,19 @@ LIVEKIT_UDP_PORT_RANGE_START=50000
 LIVEKIT_UDP_PORT_RANGE_END=60000
 LIVEKIT_NODE_IP=$public_ip
 
+# LiveKit auth — DO NOT EDIT EITHER OF THESE WITHOUT UPDATING LIVEKIT_KEYS BELOW.
+# meet-api reads LIVEKIT_API_KEY/SECRET; livekit reads LIVEKIT_KEYS. The two
+# must agree. Re-running install.sh preserves these values.
 LIVEKIT_API_KEY=$lk_key
 LIVEKIT_API_SECRET=$lk_secret
+LIVEKIT_KEYS=$lk_key: $lk_secret
 ENV_FILE
     echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
+    if [ "$lk_keys_reused" = "1" ]; then
+        echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (reused — meet-api ↔ livekit pair preserved)${NC}"
+    else
+        echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (newly generated — installed in both meet-api and livekit)${NC}"
+    fi
 
     echo ""
     echo "Building and starting Docker containers..."

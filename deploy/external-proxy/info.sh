@@ -39,10 +39,25 @@ MEET_LIVEKIT_TCP_PORT=${MEET_LIVEKIT_TCP_PORT:-7881}
 LIVEKIT_UDP_PORT_RANGE_START=${LIVEKIT_UDP_PORT_RANGE_START:-50000}
 LIVEKIT_UDP_PORT_RANGE_END=${LIVEKIT_UDP_PORT_RANGE_END:-60000}
 
-# Pick the first global IPv4 — that's the bridge address the host proxy dials.
+# Pick the LXC's external IPv4 — the address the host reverse proxy actually
+# dials. Filter out Docker's per-network bridges (docker0, br-<hash>, veth*)
+# and CNI/libvirt/lxcbr scaffolding so we don't return e.g. 172.18.0.1, which
+# is only reachable from inside the LXC.
 bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
-            | awk '{print $4}' | cut -d/ -f1 | head -n1)
+            | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+            | cut -d/ -f1 | head -n1)
+# Fall back to the first global address if the filter eliminated everything
+# (e.g. the LXC's only nic is named br-something for some reason).
+if [ -z "$bridge_ip" ]; then
+    bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                | awk '{print $4}' | cut -d/ -f1 | head -n1)
+fi
 bridge_ip=${bridge_ip:-<bridge-ip>}
+
+# Compose project name = directory name (which is what compose v2 uses by
+# default when -p isn't passed). Used to spell out container names in the
+# diagnostics output.
+compose_project=$(basename "$(pwd)")
 
 # Layout inference: empty PUBLIC_API_URL/PUBLIC_LIVEKIT_URL → single-domain.
 if [ -z "$PUBLIC_API_URL" ] && [ -z "$PUBLIC_LIVEKIT_URL" ]; then
@@ -218,26 +233,107 @@ else
 fi
 echo
 
-echo "${BOLD}Prefix-strip rules${NC} (must match in your reverse proxy config):"
-echo "    /livekit/*  →  ${BOLD}STRIP${NC}     (Caddy ${YELLOW}handle_path${NC}, nginx ${YELLOW}rewrite${NC})"
-echo "    /api/*      →  ${BOLD}DO NOT STRIP${NC}  (Caddy ${YELLOW}handle${NC},      no rewrite)"
-echo "    /ws/*       →  ${BOLD}DO NOT STRIP${NC}  (Caddy ${YELLOW}handle${NC},      no rewrite)"
-echo "    /           →  catch-all → frontend"
+echo "${BOLD}Strip-prefix rule${NC}  ${DIM}(applies to single-domain only):${NC}"
+echo "    Only ${YELLOW}/livekit/*${NC} strips its prefix. ${YELLOW}/api/*${NC} and ${YELLOW}/ws/*${NC} ${BOLD}must NOT strip${NC} —"
+echo "    the upstreams expect to receive the path with the prefix intact."
+echo
+printf "    %-12s %-14s %s\n" "PATH"        "BEHAVIOUR"     "PROXY DIRECTIVE"
+printf "    %-12s ${BOLD}%-14s${NC} %s\n"   "/livekit/*" "STRIP"          "Caddy ${YELLOW}handle_path${NC} · nginx ${YELLOW}rewrite${NC}"
+printf "    %-12s ${BOLD}%-14s${NC} %s\n"   "/api/*"     "PRESERVE"       "Caddy ${YELLOW}handle${NC}      · no rewrite"
+printf "    %-12s ${BOLD}%-14s${NC} %s\n"   "/ws/*"      "PRESERVE"       "Caddy ${YELLOW}handle${NC}      · no rewrite"
+printf "    %-12s ${BOLD}%-14s${NC} %s\n"   "/"          "catch-all"      "→ frontend (port ${MEET_FRONTEND_PORT})"
+echo
+echo "    ${DIM}Failure modes if the rule is violated:${NC}"
+echo "    ${DIM}  • /api stripped     → 404 'Cannot POST /admin/login' from Express${NC}"
+echo "    ${DIM}  • /api unmatched    → 405 from frontend nginx (catch-all wins)${NC}"
+echo "    ${DIM}  • /livekit not WS   → 404 / immediate disconnect${NC}"
+echo
+
+# ─────────────────────── LiveKit auth probe ─────────────────────────────
+# Catches the OTHER silent breakage: meet-api and the livekit container
+# disagree on the API key/secret. Login still works (no LiveKit involved),
+# but every /api/rooms call returns "Unauthorized: invalid API key" and
+# the admin panel just shows "Disconnected". We invoke the SDK from inside
+# the meet-api container so we test the EXACT credentials it would use.
+echo "${BOLD}LiveKit auth probe${NC}  ${DIM}(meet-api → livekit RoomService.listRooms):${NC}"
+
+meet_api_id=$(docker compose ps -q meet-api 2>/dev/null || true)
+if [ -z "$meet_api_id" ]; then
+    printf "    ${YELLOW}!${NC} %s\n" "meet-api container is not running (try: docker compose up -d)"
+else
+    lk_probe=$(docker compose exec -T meet-api node -e "
+      try {
+        const { RoomServiceClient } = require('livekit-server-sdk');
+        const c = new RoomServiceClient(
+          process.env.LIVEKIT_URL,
+          process.env.LIVEKIT_API_KEY,
+          process.env.LIVEKIT_API_SECRET
+        );
+        c.listRooms()
+         .then(() => process.stdout.write('OK'))
+         .catch(e => process.stdout.write('ERR:' + (e && e.message ? e.message : String(e))));
+      } catch (e) {
+        process.stdout.write('ERR:' + (e && e.message ? e.message : String(e)));
+      }
+    " 2>&1 || echo "ERR:exec_failed")
+
+    api_key=$(docker compose exec -T meet-api sh -c 'printf "%s" "$LIVEKIT_API_KEY"' 2>/dev/null)
+    api_key_short="${api_key:0:14}…"
+
+    case "$lk_probe" in
+        OK*)
+            printf "    ${GREEN}✓${NC} %s\n" "auth OK — meet-api can list rooms with key ${BOLD}${api_key_short}${NC}"
+            ;;
+        *"invalid API key"*|*"Unauthorized"*"key"*)
+            printf "    ${RED}✗${NC} %s\n" "${BOLD}KEY MISMATCH${NC} — meet-api's key (${api_key_short}) is not configured in livekit"
+            printf "    ${DIM}%s${NC}\n" "Reinstall (./install.sh option 5) — it will reuse meet-api's key and install the matching pair in livekit."
+            ;;
+        *"signature is invalid"*|*"Unauthorized"*)
+            printf "    ${RED}✗${NC} %s\n" "${BOLD}SECRET MISMATCH${NC} — key ${api_key_short} is known to livekit but the secret differs"
+            printf "    ${DIM}%s${NC}\n" "Reinstall (./install.sh option 5) — it will rewrite LIVEKIT_KEYS to match meet-api's secret."
+            ;;
+        *"ECONNREFUSED"*|*"connection refused"*|*"ETIMEDOUT"*|*"timeout"*)
+            printf "    ${RED}✗${NC} %s\n" "livekit unreachable from meet-api — check that the livekit container is running on host networking"
+            ;;
+        *"Cannot find module"*"livekit-server-sdk"*)
+            printf "    ${YELLOW}!${NC} %s\n" "livekit-server-sdk not found in meet-api image — rebuild meet-api"
+            ;;
+        ERR:exec_failed)
+            printf "    ${YELLOW}!${NC} %s\n" "could not exec into meet-api (compose project mismatch?). Try: docker compose -p $compose_project ps"
+            ;;
+        ERR:*)
+            printf "    ${RED}✗${NC} %s\n" "${lk_probe#ERR:}"
+            ;;
+        *)
+            printf "    ${YELLOW}!${NC} %s\n" "unexpected output: $lk_probe"
+            ;;
+    esac
+fi
 echo
 
 # ───────────────────────────── pitfalls ─────────────────────────────────
 echo "${BOLD}Common pitfalls:${NC}"
-echo "    • Don't map any service to ${YELLOW}5355${NC}. That's mDNS/LLMNR on the LXC, not MEET."
+echo "    • ${YELLOW}5355${NC} (tcp + udp) is the LXC's mDNS/LLMNR responder — ${BOLD}not${NC} a MEET port."
+echo "      ProxyPilot/NPM auto-detect will surface it. Ignore it."
 echo "    • Don't map a non-WebSocket route to ${YELLOW}${MEET_LIVEKIT_WS_PORT}${NC} — it'll 404."
 echo "    • Don't reverse-proxy ${YELLOW}udp/${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END}${NC} or ${YELLOW}tcp/${MEET_LIVEKIT_TCP_PORT}${NC} through Caddy/nginx;"
 echo "      they're L4 forwards (host firewall or 'incus config device add … proxy …')."
-echo "    • Don't strip the ${YELLOW}/api${NC} or ${YELLOW}/ws${NC} prefix — only ${YELLOW}/livekit${NC} is stripped."
-echo "      If 'via proxy' returned 404 'Cannot POST /admin/login', that's this bug."
+echo "    • Don't edit ${YELLOW}LIVEKIT_API_KEY${NC} / ${YELLOW}LIVEKIT_API_SECRET${NC} / ${YELLOW}LIVEKIT_KEYS${NC} in .env"
+echo "      individually — they must agree. Re-run install.sh to regenerate consistently."
 echo "    • Three-domain layout requires the frontend to be ${BOLD}rebuilt${NC} with"
 echo "      ${YELLOW}PUBLIC_API_URL${NC} and ${YELLOW}PUBLIC_LIVEKIT_URL${NC} set, otherwise the SPA dials"
 echo "      relative '/api' on the frontend host and you get 405s like"
 echo "      ${DIM}POST https://${public_host}/api/admin/login → 405${NC}."
 echo "      Rebuild with: ${YELLOW}docker compose build meet-frontend && docker compose up -d${NC}"
+echo
+
+# ────────────────────────── compose handles ─────────────────────────────
+echo "${BOLD}Compose handles${NC}  ${DIM}(project name: ${compose_project}):${NC}"
+echo "    ${YELLOW}docker compose ps${NC}                              # from this directory"
+echo "    ${YELLOW}docker compose logs -f meet-api${NC}                # service-name form (always works)"
+echo "    ${YELLOW}docker compose exec meet-api sh${NC}"
+echo "    ${DIM}# If you're outside this directory, prepend  -p ${compose_project}${NC}"
+echo "    ${DIM}# Container names: ${compose_project}-<service>-1  (e.g. ${compose_project}-meet-api-1)${NC}"
 echo
 
 echo "${DIM}Walk-through:  docs/install/external-reverse-proxy.md${NC}"
