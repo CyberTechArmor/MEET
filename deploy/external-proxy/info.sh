@@ -405,6 +405,52 @@ else
 fi
 echo
 
+# ───────────────── WebRTC media reachability sanity ─────────────────────
+# "could not establish pc connection" is the LiveKit client telling you ICE
+# failed: signaling worked (room created in admin panel) but no peer
+# connection candidates could be reached. This is almost always one of:
+#   (a) LIVEKIT_NODE_IP isn't the address clients see (mismatch with NAT'd
+#       public IP, or it's the LXC's bridge IP and the WAN can't route to it)
+#   (b) host firewall is dropping udp/${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END} inbound
+#   (c) LXC isn't forwarding UDP to the container (no incus proxy device,
+#       bridge not WAN-routable)
+#   (d) cloud-provider security group is blocking UDP independently of the
+#       host firewall (very common — gets missed)
+echo "${BOLD}WebRTC media reachability${NC}  ${DIM}(why 'could not establish pc connection' happens):${NC}"
+
+printf "    %-32s ${CYAN}%s${NC}\n" "Advertised to clients:"  "${LIVEKIT_NODE_IP:-<auto via STUN>}"
+
+detected_pub=$(curl -4 -sS --max-time 3 https://ifconfig.me 2>/dev/null \
+               || curl -4 -sS --max-time 3 https://api.ipify.org 2>/dev/null \
+               || true)
+if [ -n "$detected_pub" ]; then
+    printf "    %-32s ${CYAN}%s${NC}\n" "Detected public IPv4:" "$detected_pub"
+    if [ -n "$LIVEKIT_NODE_IP" ] && [ "$LIVEKIT_NODE_IP" != "$detected_pub" ]; then
+        printf "    ${YELLOW}!${NC} mismatch — clients will dial ${BOLD}%s${NC}, but this host\n" "$LIVEKIT_NODE_IP"
+        printf "      appears as ${BOLD}%s${NC} from the internet. If you're behind NAT, NODE_IP\n" "$detected_pub"
+        printf "      should be your router's WAN IP — fix in .env then ${YELLOW}docker compose up -d livekit${NC}.\n"
+    elif [ -z "$LIVEKIT_NODE_IP" ]; then
+        printf "    ${YELLOW}!${NC} LIVEKIT_NODE_IP empty — relying on STUN auto-detect. Set it to ${BOLD}%s${NC}\n" "$detected_pub"
+        printf "      in .env to skip STUN ambiguity.\n"
+    else
+        printf "    ${GREEN}✓${NC} LIVEKIT_NODE_IP matches detected public IP\n"
+    fi
+fi
+echo
+echo "    ${DIM}From a machine OUTSIDE the LXC/host (a phone on cellular works):${NC}"
+printf "      ${YELLOW}nc -u -v -w 2 %s 50000${NC}\n" "${LIVEKIT_NODE_IP:-<host-public-ip>}"
+printf "      ${YELLOW}nc    -v -w 2 %s 7881${NC}    ${DIM}# TCP fallback${NC}\n" "${LIVEKIT_NODE_IP:-<host-public-ip>}"
+echo "    ${DIM}'No route to host' / 'Connection refused' = firewall (host or cloud SG) is blocking.${NC}"
+echo
+echo "    ${DIM}Checklist when signaling succeeds but the call sticks at 'Connecting…':${NC}"
+echo "    ${DIM}  • host firewall (ufw/firewalld/iptables) allows udp/${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END} + tcp/${MEET_LIVEKIT_TCP_PORT} inbound${NC}"
+echo "    ${DIM}  • cloud-provider security group / VPC firewall allows the same (often a separate layer)${NC}"
+echo "    ${DIM}  • LXC: bridge IP routable from WAN, OR an incus 'proxy' device forwards UDP to the LXC${NC}"
+echo "    ${DIM}  • LIVEKIT_NODE_IP equals the address browsers reach — not the LXC's internal IP${NC}"
+echo "    ${DIM}  • If clients are behind UDP-blocking networks (corporate / hotel wifi), they need TURN${NC}"
+echo "    ${DIM}    over tcp/443 — not bundled in this install path${NC}"
+echo
+
 # ───────────────────────────── pitfalls ─────────────────────────────────
 echo "${BOLD}Common pitfalls:${NC}"
 echo "    • ${YELLOW}5355${NC} (tcp + udp) is the LXC's mDNS/LLMNR responder — ${BOLD}not${NC} a MEET port."
