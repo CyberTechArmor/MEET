@@ -24,11 +24,12 @@ NPM) which all assume MEET owns the TLS edge — this one does not.
                 │  ┌────────────────────────────────────┐ │
                 │  │  LXC container (bridge IP 10.x.y.z)│ │
                 │  │                                    │ │
-                │  │  meet-frontend  :3000  (0.0.0.0)   │ │
-                │  │  meet-api       :8080  (0.0.0.0)   │ │
-                │  │  livekit signal :7880  (0.0.0.0)   │ │
-                │  │  livekit RTC TCP:7881  (0.0.0.0)   │ │
+                │  │  meet-frontend  :3000  (docker)    │ │
+                │  │  meet-api       :8080  (docker)    │ │
+                │  │  livekit        :7880  (host net)  │ │
+                │  │  livekit RTC TCP:7881  (host net)  │ │
                 │  │  livekit RTC UDP 50000-60000       │ │
+                │  │                        (host net)  │ │
                 │  └────────────────────────────────────┘ │
                 │                                         │
    browser ◄═══►│  UDP 50000-60000 (WebRTC media,         │
@@ -106,58 +107,86 @@ The reference snippets do this correctly. If you write your own proxy
 config, you must strip the prefix the same way — LiveKit itself does not
 read a configurable base path.
 
-## 4. Incus / LXC: exposing the WebRTC UDP range
+## 4. Why the LiveKit container uses host networking
+
+The `livekit` service in `deploy/external-proxy/docker-compose.yml` runs
+with `network_mode: host` and **no** `ports:` mapping. That's
+deliberate.
+
+Docker's port publishing spawns one `docker-proxy` userland process per
+published port and inserts a NAT rule for each. The WebRTC media range
+is 10,001 UDP ports. Inside an LXC that pegs CPU for minutes, can
+exhaust file descriptors, and frequently wedges `iptables-restore` —
+the symptom is `docker compose up` reporting "6/7" and never finishing
+the LiveKit container, or the container coming up but ICE failing
+because `docker-proxy` rewrote the UDP source ports. Host networking
+sidesteps both: LiveKit binds 7880, 7881, and 50000-60000 directly on
+the LXC's network namespace, and `meet-api` reaches it via
+`host.docker.internal` (mapped to `host-gateway` in the compose file).
+
+This means: do **not** also add an Incus `proxy` device that forwards
+the same ports into the container. The LXC's bridge IP already exposes
+them. You only need to make sure the host firewall lets traffic reach
+the bridge.
+
+## 5. Incus / LXC: exposing the WebRTC UDP range to the internet
 
 WebRTC media is UDP and the reverse proxy doesn't carry it. The UDP
-range must reach the LXC container directly. Add a `proxy` device on the
-container so the host forwards UDP to it (replace `meet` with your
+range must reach the LXC's bridge IP from the public internet. There
+are two common topologies:
+
+**A. Bridge IP routable from the host firewall (recommended).** Open
+`udp/50000-60000` and `tcp/7881` on the host firewall, pointed at the
+LXC's bridge IP. Nothing else to do — host networking on the livekit
+container has already bound those ports on that IP.
+
+**B. Bridge IP not directly routable.** Add an Incus `proxy` device on
+the LXC so the host forwards traffic into it (replace `meet` with your
 container name):
 
 ```bash
 incus config device add meet rtcudp proxy \
     listen=udp:0.0.0.0:50000-60000 \
-    connect=udp:127.0.0.1:50000-60000
+    connect=udp:<bridge-ip>:50000-60000
 
-# RTC TCP fallback (port 7881) — same idea over TCP.
 incus config device add meet rtctcp proxy \
     listen=tcp:0.0.0.0:7881 \
-    connect=tcp:127.0.0.1:7881
+    connect=tcp:<bridge-ip>:7881
 ```
 
-If the container's bridge is already routable from the host firewall
-(common with `bridge`-mode networking), you can skip the `proxy` device
-and just open the same UDP range on the host firewall — the bridge IP
-handles the rest.
+Use `<bridge-ip>` — not `127.0.0.1` — as the connect target. LiveKit is
+on the LXC's network namespace, not Docker's bridge loopback.
 
 Also set `LIVEKIT_NODE_IP` in `.env` to the **host's public IPv4**.
-Otherwise LiveKit advertises ICE candidates with the container's bridge
-IP and remote browsers will see signaling connect but no media flow.
+Otherwise LiveKit advertises ICE candidates with the LXC's bridge IP
+and remote browsers will see signaling connect but no media flow.
 
-## 5. Verifying each layer
+## 6. Verifying each layer
 
 ```bash
-# 5a. Inside the container — every externally-routed port on 0.0.0.0,
-#     none on 127.0.0.1.
-docker compose exec meet-api ss -tlnp || ss -tlnp
-# expected:  LISTEN  0.0.0.0:3000  0.0.0.0:8080  0.0.0.0:7880  0.0.0.0:7881
+# 6a. On the LXC — frontend + api published by docker, livekit on host net.
+ss -tlnp
+# expected: LISTEN 0.0.0.0:3000  0.0.0.0:8080  0.0.0.0:7880  0.0.0.0:7881
+ss -ulnp | grep -E ':5[0-9]{4}\b' | head
+# expected: rows in 50000-60000 (the count grows on demand as calls start)
 
-# 5b. From the host — health checks against the bridge.
+# 6b. From the host — health checks against the bridge.
 curl -fsS http://<bridge-ip>:3000/health     # frontend  -> "OK"
 curl -fsS http://<bridge-ip>:8080/health     # API       -> {"status":"ok",…}
 curl -fsS http://<bridge-ip>:7880/           # LiveKit   -> "OK"
 
-# 5c. Browser — public URL serves the frontend.
+# 6c. Browser — public URL serves the frontend.
 curl -fsSI https://meet.example.com/         # 200 from host TLS edge
 curl -fsS  https://meet.example.com/api/health
 
-# 5d. Two-participant call — open https://meet.example.com in two
+# 6d. Two-participant call — open https://meet.example.com in two
 #     browsers on different networks, create a room, join. You should
 #     see remote video. Confirm UDP is reaching the host:
 sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 # Expect packets in BOTH directions during a call.
 ```
 
-## 6. Known limitations
+## 7. Known limitations
 
 - **TURN-over-TCP/443 isn't included.** If a participant is behind a
   network that blocks UDP and 7881, they won't connect. Stand up a
@@ -173,7 +202,7 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
   Caddy advertises HTTP/3 on UDP/443, make sure that doesn't collide
   with the LiveKit UDP range.
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
@@ -184,11 +213,13 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 | Frontend loads, API calls return 404 | Wrong `PUBLIC_API_URL` for the chosen mode | Single-domain: leave `PUBLIC_API_URL` blank. Three-domain: set `PUBLIC_API_URL=https://api.meet.example.com`. Rebuild frontend after either change |
 | WebSocket to `/livekit` returns 404 | Proxy isn't stripping the `/livekit` prefix before forwarding to port 7880 | Use the reference Caddyfile / nginx config; if hand-rolled, ensure `handle_path /livekit/*` (Caddy) or `rewrite ^/livekit/(.*) /$1 break;` (nginx) |
 | WebSocket disconnects after ~60s | Default proxy read/write timeout | The reference configs set 24h; if you're customising, raise `proxy_read_timeout` / `transport http { read_timeout … }` on the LiveKit route |
-| Signaling connects, two participants see "connecting" but no video / audio | UDP not reaching the host, OR LiveKit advertising the wrong IP | (a) Open `udp/50000-60000` on the host firewall and add the Incus `proxy` device above. (b) Set `LIVEKIT_NODE_IP=<host-public-ipv4>` in `.env` and `docker compose up -d livekit`. Verify with `tcpdump -ni any 'udp portrange 50000-60000'` |
+| Signaling connects, two participants see "connecting" but no video / audio | UDP not reaching the LXC, OR LiveKit advertising the wrong IP | (a) Open `udp/50000-60000` on the host firewall pointed at the LXC's bridge IP (or add an Incus `proxy` device — see §5). (b) Set `LIVEKIT_NODE_IP=<host-public-ipv4>` in `.env` and `docker compose up -d livekit`. Verify with `tcpdump -ni any 'udp portrange 50000-60000'` |
+| `docker compose up -d` hangs at "6/7" or the livekit container never reports `running` | Old layout published 10k UDP ports through `docker-proxy`, which can take minutes or fail inside an LXC | Pull the latest `deploy/external-proxy/docker-compose.yml`. The livekit service now uses `network_mode: host` and publishes nothing through Docker. `docker compose down && docker compose up -d` |
+| `meet-api` logs `dial tcp: lookup livekit on …: no such host` | `LIVEKIT_URL` still points at the bridge service name from a previous install | Latest compose sets `LIVEKIT_URL=http://host.docker.internal:7880` and an `extra_hosts: host-gateway` mapping. Run `docker compose up -d --force-recreate meet-api` after pulling |
 | Avatar / large upload fails with 413 | Body limit on the proxy | Reference configs set 50 MiB. Raise `request_body { max_size … }` (Caddy) or `client_max_body_size` (nginx) if you need more |
 | Browser console: "blocked by CORS" | `CORS_ORIGIN` doesn't match `PUBLIC_BASE_URL` | They're wired together by default; if you've overridden one, override the other to match |
 
-## 8. Acceptance checklist
+## 9. Acceptance checklist
 
 - [ ] `ss -tlnp` inside the container shows every externally-routed
       port on `0.0.0.0`, none on `127.0.0.1`.
