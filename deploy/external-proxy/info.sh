@@ -291,15 +291,18 @@ fi
 # up in <500ms. With the default, curl just hangs until the upstream gives
 # up. We give it 4s and report.
 if [ -n "$PUBLIC_BASE_URL" ]; then
+    # Hit the actual LiveKit WS endpoint (/v1) rather than /. With single-domain
+    # the proxy strips /livekit and we end up at LiveKit's /v1 (the WS path);
+    # without /v1 we hit LiveKit's "/" which returns 200 OK and looks like a
+    # broken proxy when it isn't.
     case "$layout" in
-        single-domain) ws_url="${PUBLIC_BASE_URL%/}/livekit/" ;;
-        *)             ws_url="${PUBLIC_LIVEKIT_URL:-wss://livekit.$public_host}" ;;
+        single-domain) ws_url="${PUBLIC_BASE_URL%/}/livekit/v1" ;;
+        *)             ws_url="${PUBLIC_LIVEKIT_URL:-wss://livekit.$public_host}/v1" ;;
     esac
     # Force https scheme for curl (it speaks ws over http(s) natively when
     # the right Upgrade headers are sent).
     probe_url="${ws_url/wss:\/\//https://}"
     probe_url="${probe_url/ws:\/\//http://}"
-    probe_url="${probe_url%/}/"
 
     echo "${BOLD}LiveKit signaling probe${NC}  ${DIM}(WS upgrade to ${probe_url}):${NC}"
     # Generate a fake but valid Sec-WebSocket-Key
@@ -321,11 +324,22 @@ if [ -n "$PUBLIC_BASE_URL" ]; then
 
     case "$code" in
         101)
-            printf "    ${GREEN}✓${NC} WS upgrade returned 101 in ${elapsed}s — proxy is forwarding the handshake\n"
-            printf "    ${DIM}Note: this only proves the upgrade works. If calls still stick at 'Connecting…',${NC}\n"
-            printf "    ${DIM}the proxy is buffering post-handshake frames. Add to the /livekit/* route:${NC}\n"
-            printf "    ${DIM}  • Caddy: ${YELLOW}flush_interval -1${DIM} and ${YELLOW}read_timeout 24h${DIM} / ${YELLOW}write_timeout 24h${NC}\n"
-            printf "    ${DIM}  • nginx: ${YELLOW}proxy_buffering off${DIM}; ${YELLOW}proxy_read_timeout 24h${DIM}; ${YELLOW}proxy_send_timeout 24h${DIM};${NC}\n"
+            printf "    ${GREEN}✓${NC} WS upgrade returned 101 in ${elapsed}s — proxy forwarded the handshake\n"
+            printf "    ${DIM}Real LiveKit clients pass full WS framing; this only verifies the path.${NC}\n"
+            ;;
+        400|401|426)
+            # LiveKit reached us back with "this isn't a valid WS connection
+            # (missing token / wrong framing)" — that's good news: it means
+            # Caddy IS forwarding the upgrade and LiveKit IS receiving it.
+            printf "    ${GREEN}✓${NC} %s in ${elapsed}s — proxy forwarded to LiveKit; rejected our incomplete handshake (expected)\n" "$code"
+            ;;
+        200)
+            # We probably hit LiveKit's "/" by mistake (proxy stripped to "/"
+            # instead of "/v1"), or the proxy isn't passing Upgrade headers.
+            printf "    ${YELLOW}!${NC} 200 in ${elapsed}s — got a regular HTTP 200, not a WS upgrade.\n"
+            printf "    ${DIM}Caddy may have stripped the path to '/' (LiveKit's root returns 200 'OK')${NC}\n"
+            printf "    ${DIM}or isn't passing Upgrade/Connection headers. Real WS clients hitting${NC}\n"
+            printf "    ${DIM}/livekit/v1?access_token=… may still work; try a real call.${NC}\n"
             ;;
         404)
             printf "    ${RED}✗${NC} 404 — /livekit/* route missing or pointed at the wrong upstream\n"
@@ -450,6 +464,25 @@ echo "    ${DIM}  • LIVEKIT_NODE_IP equals the address browsers reach — not 
 echo "    ${DIM}  • If clients are behind UDP-blocking networks (corporate / hotel wifi), they need TURN${NC}"
 echo "    ${DIM}    over tcp/443 — not bundled in this install path${NC}"
 echo
+echo "    ${BOLD}Incus proxy devices${NC}  ${DIM}(run on the Incus host, replace <container> with your LXC name):${NC}"
+echo "    ${DIM}# Caddy / ProxyPilot only handle HTTP. UDP media + TCP fallback need these.${NC}"
+echo "      ${YELLOW}incus config device add <container> rtcudp proxy \\${NC}"
+echo "          ${YELLOW}listen=udp:0.0.0.0:${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END} \\${NC}"
+echo "          ${YELLOW}connect=udp:${bridge_ip}:${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END}${NC}"
+echo "      ${YELLOW}incus config device add <container> rtctcp proxy \\${NC}"
+echo "          ${YELLOW}listen=tcp:0.0.0.0:${MEET_LIVEKIT_TCP_PORT} \\${NC}"
+echo "          ${YELLOW}connect=tcp:${bridge_ip}:${MEET_LIVEKIT_TCP_PORT}${NC}"
+echo "    ${DIM}Skip these only if your LXC's bridge IP (${bridge_ip}) is directly WAN-routable.${NC}"
+echo
+if [ -n "${LIVEKIT_NODE_IP:-}" ] && [ -n "$detected_pub" ] && [ "$LIVEKIT_NODE_IP" = "$detected_pub" ]; then
+    echo "    ${BOLD}If you're testing from inside the same network as this host${NC}  ${DIM}(common):${NC}"
+    echo "    ${DIM}LiveKit advertises ${LIVEKIT_NODE_IP} (public IP) as the only candidate. Reaching it${NC}"
+    echo "    ${DIM}from a browser on the same LAN requires NAT hairpinning, which most consumer${NC}"
+    echo "    ${DIM}routers don't support. Quick proof — connect your laptop to a phone hotspot${NC}"
+    echo "    ${DIM}(cellular) and retry the call. If cellular works but home wifi doesn't, that's${NC}"
+    echo "    ${DIM}hairpinning, not a MEET bug.${NC}"
+    echo
+fi
 
 # ───────────────────────────── pitfalls ─────────────────────────────────
 echo "${BOLD}Common pitfalls:${NC}"
