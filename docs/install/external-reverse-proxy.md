@@ -78,6 +78,21 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+After the stack is up, run the info script for the port-to-service map,
+the routing the host reverse proxy needs (single-domain and
+three-domain), the firewall list, and a reachability check. Safe to
+re-run anytime:
+
+```bash
+bash info.sh
+```
+
+The same summary is also printed at the end of `install.sh`. Hostnames
+like ProxyPilot/NPM never see your `.env` and have no way to know which
+port belongs to which service — copy the upstreams from `info.sh` into
+the proxy manager rather than guessing from a "detected listeners"
+list (port 5355 is mDNS on the LXC, not LiveKit).
+
 Then point the host reverse proxy at the container. Drop one of the
 reference snippets in:
 
@@ -211,6 +226,8 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 | `npm ci` killed during build, exit 137 | LXC out of memory during the Vite/React build | Raise the LXC memory limit (`incus config set <container> limits.memory 2GiB`) or attach swap; rerun installer |
 | Proxy connects but page is blank | `PUBLIC_BASE_URL` empty or wrong scheme; CORS origin mismatch | Set `PUBLIC_BASE_URL=https://meet.example.com` in `.env`, rebuild frontend (`docker compose build meet-frontend && docker compose up -d`) |
 | Frontend loads, API calls return 404 | Wrong `PUBLIC_API_URL` for the chosen mode | Single-domain: leave `PUBLIC_API_URL` blank. Three-domain: set `PUBLIC_API_URL=https://api.meet.example.com`. Rebuild frontend after either change |
+| `POST https://<hostname>/api/<…> → 405 Method Not Allowed` | Single-domain in the reverse proxy is sending `/api/*` to the frontend (port 3000) instead of the API (port 8080). The frontend's nginx 405's POSTs to static paths | (a) Add a route on the same hostname that sends `/api/*` to `<bridge-ip>:8080` (and `/ws/*` for the admin WebSocket). If the proxy manager refuses to add a second rule for an existing hostname, your manager doesn't yet support multi-rule hosts — switch to three-domain mode. (b) Confirm with the reference Caddyfile / nginx config |
+| `livekit.<hostname>` connects but the WebSocket immediately closes, or returns 502 | Mapped to the wrong port. Easy mistake: ProxyPilot / NPM auto-detect lists every TCP listener inside the LXC, including `5355` (mDNS/LLMNR) which is **not** LiveKit | LiveKit signaling is `<bridge-ip>:7880`. Run `bash deploy/external-proxy/info.sh` for the full port map |
 | WebSocket to `/livekit` returns 404 | Proxy isn't stripping the `/livekit` prefix before forwarding to port 7880 | Use the reference Caddyfile / nginx config; if hand-rolled, ensure `handle_path /livekit/*` (Caddy) or `rewrite ^/livekit/(.*) /$1 break;` (nginx) |
 | WebSocket disconnects after ~60s | Default proxy read/write timeout | The reference configs set 24h; if you're customising, raise `proxy_read_timeout` / `transport http { read_timeout … }` on the LiveKit route |
 | Signaling connects, two participants see "connecting" but no video / audio | UDP not reaching the LXC, OR LiveKit advertising the wrong IP | (a) Open `udp/50000-60000` on the host firewall pointed at the LXC's bridge IP (or add an Incus `proxy` device — see §5). (b) Set `LIVEKIT_NODE_IP=<host-public-ipv4>` in `.env` and `docker compose up -d livekit`. Verify with `tcpdump -ni any 'udp portrange 50000-60000'` |
