@@ -153,12 +153,86 @@ check_tcp_listen "livekit TCP fb" "${MEET_LIVEKIT_TCP_PORT}"
 check_udp_range_listen "livekit RTC udp" "${LIVEKIT_UDP_PORT_RANGE_START}" "${LIVEKIT_UDP_PORT_RANGE_END}"
 echo
 
+# ───────────────────── /api/admin/login routing probe ───────────────────
+# Diagnoses the most common reverse-proxy bug: the manager generates a
+# prefix-stripping route for /api/* (correct only for /livekit/*), so the
+# API sees /admin/login instead of /api/admin/login and 404s.
+echo "${BOLD}/api routing probe${NC}  ${DIM}(POST /api/admin/login with empty body):${NC}"
+
+probe_login() {
+    local label=$1 url=$2
+    local body code
+    body=$(curl -sS -o /tmp/.meet-probe.$$ -w '%{http_code}' \
+                --max-time 6 \
+                -X POST -H 'content-type: application/json' -d '{}' \
+                "$url" 2>/dev/null || true)
+    code=${body:-000}
+    local payload
+    payload=$(head -c 200 /tmp/.meet-probe.$$ 2>/dev/null || true)
+    rm -f /tmp/.meet-probe.$$
+
+    case "$code" in
+        400)
+            if printf '%s' "$payload" | grep -qi 'username'; then
+                printf "    ${GREEN}✓${NC} %-30s %s — API reached, prefix preserved\n" "$label" "$code"
+            else
+                printf "    ${YELLOW}!${NC} %-30s %s — 400 but unexpected body: %s\n" "$label" "$code" "$payload"
+            fi
+            ;;
+        404)
+            if printf '%s' "$payload" | grep -q 'Cannot POST /admin/login'; then
+                printf "    ${RED}✗${NC} %-30s %s — proxy is ${BOLD}stripping /api${NC}; API got /admin/login\n" "$label" "$code"
+            else
+                printf "    ${RED}✗${NC} %-30s %s — %s\n" "$label" "$code" "$payload"
+            fi
+            ;;
+        405)
+            if printf '%s' "$payload" | grep -qi 'nginx'; then
+                printf "    ${RED}✗${NC} %-30s %s — request hit ${BOLD}frontend nginx${NC}; /api/* route missing or losing to catch-all\n" "$label" "$code"
+            else
+                printf "    ${RED}✗${NC} %-30s %s — %s\n" "$label" "$code" "$payload"
+            fi
+            ;;
+        502|503|504)
+            printf "    ${RED}✗${NC} %-30s %s — proxy can't reach upstream (check bridge IP / port)\n" "$label" "$code"
+            ;;
+        000)
+            printf "    ${RED}✗${NC} %-30s --- — unreachable\n" "$label"
+            ;;
+        *)
+            printf "    ${YELLOW}!${NC} %-30s %s — unexpected; first 200 bytes: %s\n" "$label" "$code" "$payload"
+            ;;
+    esac
+}
+
+probe_login "direct (bridge)" "http://${bridge_ip}:${MEET_API_PORT}/api/admin/login"
+if [ -n "$PUBLIC_BASE_URL" ]; then
+    if [ "$layout" = "single-domain" ]; then
+        probe_login "via proxy ($public_host)" "${PUBLIC_BASE_URL%/}/api/admin/login"
+    else
+        # Three-domain: API lives at api.<host>/admin/login, no /api prefix
+        probe_login "via proxy (${PUBLIC_API_URL:-api.$public_host})" "${PUBLIC_API_URL%/}/admin/login"
+    fi
+else
+    printf "    ${DIM}(skipping public-URL probe — PUBLIC_BASE_URL not set)${NC}\n"
+fi
+echo
+
+echo "${BOLD}Prefix-strip rules${NC} (must match in your reverse proxy config):"
+echo "    /livekit/*  →  ${BOLD}STRIP${NC}     (Caddy ${YELLOW}handle_path${NC}, nginx ${YELLOW}rewrite${NC})"
+echo "    /api/*      →  ${BOLD}DO NOT STRIP${NC}  (Caddy ${YELLOW}handle${NC},      no rewrite)"
+echo "    /ws/*       →  ${BOLD}DO NOT STRIP${NC}  (Caddy ${YELLOW}handle${NC},      no rewrite)"
+echo "    /           →  catch-all → frontend"
+echo
+
 # ───────────────────────────── pitfalls ─────────────────────────────────
 echo "${BOLD}Common pitfalls:${NC}"
 echo "    • Don't map any service to ${YELLOW}5355${NC}. That's mDNS/LLMNR on the LXC, not MEET."
 echo "    • Don't map a non-WebSocket route to ${YELLOW}${MEET_LIVEKIT_WS_PORT}${NC} — it'll 404."
 echo "    • Don't reverse-proxy ${YELLOW}udp/${LIVEKIT_UDP_PORT_RANGE_START}-${LIVEKIT_UDP_PORT_RANGE_END}${NC} or ${YELLOW}tcp/${MEET_LIVEKIT_TCP_PORT}${NC} through Caddy/nginx;"
 echo "      they're L4 forwards (host firewall or 'incus config device add … proxy …')."
+echo "    • Don't strip the ${YELLOW}/api${NC} or ${YELLOW}/ws${NC} prefix — only ${YELLOW}/livekit${NC} is stripped."
+echo "      If 'via proxy' returned 404 'Cannot POST /admin/login', that's this bug."
 echo "    • Three-domain layout requires the frontend to be ${BOLD}rebuilt${NC} with"
 echo "      ${YELLOW}PUBLIC_API_URL${NC} and ${YELLOW}PUBLIC_LIVEKIT_URL${NC} set, otherwise the SPA dials"
 echo "      relative '/api' on the frontend host and you get 405s like"
