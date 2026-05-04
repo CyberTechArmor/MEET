@@ -27,6 +27,20 @@ cd MEET
 ./install.sh
 ```
 
+### Updating an existing install
+
+```bash
+cd MEET
+./update.sh                    # auto-detects mode, pulls, rebuilds, restarts
+FORCE_REBUILD=1 ./update.sh    # force a clean rebuild (no layer cache)
+./update.sh --mode 5           # skip detection if you know the mode
+```
+
+`update.sh` does **not** regenerate secrets, certificates, or hostnames —
+your `.env`, Let's Encrypt certs, and LiveKit API keys are preserved.
+For the external-proxy / LXC mode, it also reconstructs `LIVEKIT_KEYS`
+in `.env` if a pre-fix install left it out.
+
 ### Requirements
 
 - Docker
