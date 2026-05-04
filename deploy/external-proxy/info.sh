@@ -249,6 +249,100 @@ echo "    ${DIM}  • /api unmatched    → 405 from frontend nginx (catch-all w
 echo "    ${DIM}  • /livekit not WS   → 404 / immediate disconnect${NC}"
 echo
 
+# ───────────────── iframe-embedding header probe ────────────────────────
+# Catches the case where the host reverse proxy injects
+# "X-Frame-Options: SAMEORIGIN" as a default security header — the
+# frontend's nginx and the API both already remove it, so any X-Frame-Options
+# in the response is the proxy's. With it set, MEET cannot be embedded in
+# any iframe (XRay desktop app, third-party portal, etc.) regardless of
+# what's in the admin panel's "iframe allowed domains".
+if [ -n "$PUBLIC_BASE_URL" ]; then
+    echo "${BOLD}Iframe-embedding probe${NC}  ${DIM}(GET ${PUBLIC_BASE_URL%/}/  HEAD-only):${NC}"
+    headers=$(curl -sS -I --max-time 5 "${PUBLIC_BASE_URL%/}/" 2>/dev/null || true)
+    xfo=$(printf '%s' "$headers" | awk 'tolower($1) == "x-frame-options:" { sub(/^[^:]*: */, ""); sub(/\r$/, ""); print; exit }')
+    csp=$(printf '%s' "$headers" | awk 'tolower($1) == "content-security-policy:" { sub(/^[^:]*: */, ""); sub(/\r$/, ""); print; exit }')
+
+    if [ -n "$xfo" ]; then
+        printf "    ${RED}✗${NC} X-Frame-Options: ${BOLD}%s${NC} — set by the proxy. Iframe embedding will be blocked.\n" "$xfo"
+        printf "    ${DIM}Fix in the proxy: add header directive ${YELLOW}-X-Frame-Options${DIM} for this site${NC}\n"
+        printf "    ${DIM}                   and set ${YELLOW}Content-Security-Policy: frame-ancestors *${DIM} (or specific origins).${NC}\n"
+    else
+        printf "    ${GREEN}✓${NC} no X-Frame-Options header\n"
+    fi
+
+    if printf '%s' "$csp" | grep -qi 'frame-ancestors'; then
+        printf "    ${GREEN}✓${NC} Content-Security-Policy frame-ancestors present\n"
+    else
+        printf "    ${YELLOW}!${NC} Content-Security-Policy frame-ancestors missing — embedding may be blocked by some browsers\n"
+    fi
+    echo
+fi
+
+# ───────────────── LiveKit signaling flush/timeout probe ────────────────
+# Catches the "WS upgrades to 101 but the call sticks at 'Connecting…'" bug:
+# Caddy's default reverse_proxy buffers writes until ~1s; LiveKit's first
+# signaling frame is tiny so it sits in the buffer forever. Reference
+# Caddyfile uses flush_interval -1 + 24h timeouts. ProxyPilot/NPM defaults
+# do neither.
+#
+# We can't speak the LiveKit binary protocol from shell, but we can do the
+# next-best thing: time how long curl takes to receive bytes after the
+# Upgrade handshake. With flush_interval -1, LiveKit's join-response shows
+# up in <500ms. With the default, curl just hangs until the upstream gives
+# up. We give it 4s and report.
+if [ -n "$PUBLIC_BASE_URL" ]; then
+    case "$layout" in
+        single-domain) ws_url="${PUBLIC_BASE_URL%/}/livekit/" ;;
+        *)             ws_url="${PUBLIC_LIVEKIT_URL:-wss://livekit.$public_host}" ;;
+    esac
+    # Force https scheme for curl (it speaks ws over http(s) natively when
+    # the right Upgrade headers are sent).
+    probe_url="${ws_url/wss:\/\//https://}"
+    probe_url="${probe_url/ws:\/\//http://}"
+    probe_url="${probe_url%/}/"
+
+    echo "${BOLD}LiveKit signaling probe${NC}  ${DIM}(WS upgrade to ${probe_url}):${NC}"
+    # Generate a fake but valid Sec-WebSocket-Key
+    ws_key=$(head -c 16 /dev/urandom 2>/dev/null | base64 2>/dev/null \
+             || printf '%s' "abcdefghijklmnop" | base64)
+
+    ws_out=$(curl -sS -i --http1.1 --max-time 4 \
+                  -H "Connection: Upgrade" \
+                  -H "Upgrade: websocket" \
+                  -H "Sec-WebSocket-Version: 13" \
+                  -H "Sec-WebSocket-Key: ${ws_key}" \
+                  -w '\n__TIME=%{time_total} __CODE=%{http_code}' \
+                  "$probe_url" 2>&1 || true)
+
+    code=$(printf '%s' "$ws_out" | sed -n 's/.*__CODE=\([0-9][0-9]*\).*/\1/p' | tail -n1)
+    elapsed=$(printf '%s' "$ws_out" | sed -n 's/.*__TIME=\([0-9.][0-9.]*\).*/\1/p' | tail -n1)
+    code=${code:-000}
+    elapsed=${elapsed:-0}
+
+    case "$code" in
+        101)
+            printf "    ${GREEN}✓${NC} WS upgrade returned 101 in ${elapsed}s — proxy is forwarding the handshake\n"
+            printf "    ${DIM}Note: this only proves the upgrade works. If calls still stick at 'Connecting…',${NC}\n"
+            printf "    ${DIM}the proxy is buffering post-handshake frames. Add to the /livekit/* route:${NC}\n"
+            printf "    ${DIM}  • Caddy: ${YELLOW}flush_interval -1${DIM} and ${YELLOW}read_timeout 24h${DIM} / ${YELLOW}write_timeout 24h${NC}\n"
+            printf "    ${DIM}  • nginx: ${YELLOW}proxy_buffering off${DIM}; ${YELLOW}proxy_read_timeout 24h${DIM}; ${YELLOW}proxy_send_timeout 24h${DIM};${NC}\n"
+            ;;
+        404)
+            printf "    ${RED}✗${NC} 404 — /livekit/* route missing or pointed at the wrong upstream\n"
+            ;;
+        502|503|504)
+            printf "    ${RED}✗${NC} %s — proxy can't reach the livekit upstream (port %s)\n" "$code" "$MEET_LIVEKIT_WS_PORT"
+            ;;
+        000)
+            printf "    ${RED}✗${NC} timed out / unreachable after ${elapsed}s\n"
+            ;;
+        *)
+            printf "    ${YELLOW}!${NC} unexpected status %s after ${elapsed}s\n" "$code"
+            ;;
+    esac
+    echo
+fi
+
 # ─────────────────────── LiveKit auth probe ─────────────────────────────
 # Catches the OTHER silent breakage: meet-api and the livekit container
 # disagree on the API key/secret. Login still works (no LiveKit involved),
@@ -320,6 +414,13 @@ echo "    • Don't reverse-proxy ${YELLOW}udp/${LIVEKIT_UDP_PORT_RANGE_START}-$
 echo "      they're L4 forwards (host firewall or 'incus config device add … proxy …')."
 echo "    • Don't edit ${YELLOW}LIVEKIT_API_KEY${NC} / ${YELLOW}LIVEKIT_API_SECRET${NC} / ${YELLOW}LIVEKIT_KEYS${NC} in .env"
 echo "      individually — they must agree. Re-run install.sh to regenerate consistently."
+echo "    • The proxy must NOT inject ${YELLOW}X-Frame-Options${NC}. The frontend and API both"
+echo "      already strip it. If the iframe probe shows it, your proxy is adding it as a"
+echo "      default header — remove it for this site (Caddy ${YELLOW}-X-Frame-Options${NC})."
+echo "    • The ${YELLOW}/livekit/*${NC} reverse-proxy block needs ${BOLD}flush_interval -1${NC} (Caddy) or"
+echo "      ${BOLD}proxy_buffering off${NC} (nginx) and ${BOLD}24h read/write timeouts${NC}. Without these,"
+echo "      the WS upgrades but signaling frames stick in the proxy's write buffer and"
+echo "      the call hangs at 'Connecting…'."
 echo "    • Three-domain layout requires the frontend to be ${BOLD}rebuilt${NC} with"
 echo "      ${YELLOW}PUBLIC_API_URL${NC} and ${YELLOW}PUBLIC_LIVEKIT_URL${NC} set, otherwise the SPA dials"
 echo "      relative '/api' on the frontend host and you get 405s like"
