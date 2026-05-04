@@ -46,6 +46,11 @@ services:
   # API — Express, /health and /api/* routes. CORS_ORIGIN is locked to the
   # public base URL so a misconfigured proxy fails loudly instead of silently
   # exposing the API to anyone.
+  #
+  # LIVEKIT_URL points at host.docker.internal because the livekit service
+  # runs with network_mode: host (see below) and isn't reachable on the
+  # bridge by service name. host-gateway resolves to the LXC's interface
+  # where livekit is actually listening.
   meet-api:
     build:
       context: ../../api
@@ -55,9 +60,11 @@ services:
     environment:
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
-      - LIVEKIT_URL=http://livekit:7880
+      - LIVEKIT_URL=http://host.docker.internal:${MEET_LIVEKIT_WS_PORT:-7880}
       - PORT=8080
       - CORS_ORIGIN=${PUBLIC_BASE_URL:-*}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - livekit
     restart: unless-stopped
@@ -69,29 +76,36 @@ services:
     networks:
       - meet-network
 
-  # LiveKit — WebRTC backend. Signaling on 7880 (proxied), TCP fallback on
-  # 7881 (direct), UDP media range (direct). The UDP range MUST match
-  # rtc.port_range_start / _end in livekit.yaml; if you change one, change
-  # all three.
+  # LiveKit — WebRTC backend. Runs with host networking so it owns the
+  # LXC's network namespace directly: signaling 7880, TCP fallback 7881,
+  # and the UDP media range all bind on the LXC's interfaces with zero
+  # Docker port publishing.
+  #
+  # Why host networking: docker-proxy publishes one userland process per
+  # port, and the UDP media range is 10,001 ports. Inside an LXC that
+  # routinely takes minutes, exhausts file descriptors, or wedges
+  # iptables-restore — the install would hang with "6/7 services up".
+  # docker-proxy also rewrites UDP source ports, which breaks ICE.
+  # network_mode: host fixes both.
+  #
+  # Ports/ranges are owned by livekit.yaml (rtc.tcp_port,
+  # rtc.port_range_start/_end). If you change them there, also update the
+  # MEET_LIVEKIT_*_PORT / LIVEKIT_UDP_PORT_RANGE_* variables in .env so
+  # the host firewall and reverse-proxy snippets still match.
   livekit:
     image: livekit/livekit-server:latest
     command: --config /etc/livekit.yaml
-    ports:
-      - "${BIND_HOST:-0.0.0.0}:${MEET_LIVEKIT_WS_PORT:-7880}:7880"
-      - "${BIND_HOST:-0.0.0.0}:${MEET_LIVEKIT_TCP_PORT:-7881}:7881"
-      - "${BIND_HOST:-0.0.0.0}:${LIVEKIT_UDP_PORT_RANGE_START:-50000}-${LIVEKIT_UDP_PORT_RANGE_END:-60000}:${LIVEKIT_UDP_PORT_RANGE_START:-50000}-${LIVEKIT_UDP_PORT_RANGE_END:-60000}/udp"
+    network_mode: host
     environment:
       - NODE_IP=${LIVEKIT_NODE_IP:-}
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:7880/ || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${MEET_LIVEKIT_WS_PORT:-7880}/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-    networks:
-      - meet-network
 
 networks:
   meet-network:
