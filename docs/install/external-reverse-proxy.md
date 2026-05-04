@@ -80,12 +80,28 @@ docker compose up -d --build
 
 After the stack is up, run the info script for the port-to-service map,
 the routing the host reverse proxy needs (single-domain and
-three-domain), the firewall list, and a reachability check. Safe to
+three-domain), the firewall list, a reachability check, and two
+diagnostic probes (HTTP `/api` strip-prefix and LiveKit auth). Safe to
 re-run anytime:
 
 ```bash
 bash info.sh
 ```
+
+When you need to look at running containers, work from this directory
+and use compose **service names** (`meet-api`, `meet-frontend`,
+`livekit`) — not raw container names:
+
+```bash
+docker compose ps
+docker compose logs -f meet-api
+docker compose exec meet-api sh
+```
+
+The compose project name defaults to the directory name
+(`external-proxy`), so generated container names look like
+`external-proxy-meet-api-1`. From outside this directory, prepend
+`-p external-proxy` to every compose command.
 
 The same summary is also printed at the end of `install.sh`. Hostnames
 like ProxyPilot/NPM never see your `.env` and have no way to know which
@@ -115,12 +131,17 @@ host proxy lives outside the container.
 | `.env`         | set `PUBLIC_BASE_URL` only         | set all three `PUBLIC_*_URL`     |
 | Proxy snippet  | `*-single-domain.*`                | `*-three-domain.*`               |
 
-Both LiveKit signaling and the API tolerate being mounted under a
-sub-path **only because the proxy strips the prefix before forwarding**
-(`handle_path /livekit/*` in Caddy, `rewrite ^/livekit/(.*)` in nginx).
-The reference snippets do this correctly. If you write your own proxy
-config, you must strip the prefix the same way — LiveKit itself does not
-read a configurable base path.
+**Strip-prefix rule** (single-domain only): `/livekit/*` is the **only**
+path that must have its prefix stripped before forwarding (LiveKit
+itself does not read a configurable base path). `/api/*` and `/ws/*`
+must arrive at the API **with** the prefix intact — Express routes are
+registered as `/api/...`. The reference Caddyfile uses `handle_path`
+for `/livekit/*` and plain `handle` for the others; the reference
+nginx config uses `rewrite ^/livekit/(.*) /$1 break;` only inside the
+`/livekit/` location. If you hand-roll the proxy or use a manager,
+match this pattern exactly. The "Login works but admin panel shows
+Disconnected" and "`Cannot POST /admin/login`" rows in §8 are both
+symptoms of getting this wrong.
 
 ## 4. Why the LiveKit container uses host networking
 
@@ -230,6 +251,7 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 | `livekit.<hostname>` connects but the WebSocket immediately closes, or returns 502 | Mapped to the wrong port. Easy mistake: ProxyPilot / NPM auto-detect lists every TCP listener inside the LXC, including `5355` (mDNS/LLMNR) which is **not** LiveKit | LiveKit signaling is `<bridge-ip>:7880`. Run `bash deploy/external-proxy/info.sh` for the full port map |
 | WebSocket to `/livekit` returns 404 | Proxy isn't stripping the `/livekit` prefix before forwarding to port 7880 | Use the reference Caddyfile / nginx config; if hand-rolled, ensure `handle_path /livekit/*` (Caddy) or `rewrite ^/livekit/(.*) /$1 break;` (nginx) |
 | `POST /api/admin/login` returns 404 with body `Cannot POST /admin/login` (Express) | Proxy is stripping the `/api` prefix the same way it strips `/livekit`. The API requires the full path `/api/admin/login` | Single-domain config: `/livekit/*` is the **only** prefix that should be stripped. `/api/*` and `/ws/*` must use Caddy `handle` (not `handle_path`) or, in nginx, no `rewrite`. If you're using a proxy manager (ProxyPilot/NPM), toggle off the "strip prefix" flag on the `/api/*` and `/ws/*` routes and verify with `bash deploy/external-proxy/info.sh` (the routing probe should report "API reached, prefix preserved") |
+| Login works, but the admin "Connection" panel shows **Disconnected** and `/api/rooms` calls fail with `Unauthorized: invalid API key` in the meet-api logs | `meet-api` and the `livekit` container disagree on the API key/secret. Login doesn't touch LiveKit so the breakage is invisible until the admin panel opens. Common causes: hand-edited `.env`, copying `.env` between hosts, or installing before the key fix in this repo (which never passed the generated key to the livekit container) | Re-run `./install.sh` and pick the External-proxy mode again. The installer reuses the existing key from `.env` and writes `LIVEKIT_KEYS` so both services load the same pair. Confirm with `bash deploy/external-proxy/info.sh` — the **LiveKit auth probe** should report ✓. Never edit `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, or `LIVEKIT_KEYS` individually — change all three together or rerun the installer |
 | WebSocket disconnects after ~60s | Default proxy read/write timeout | The reference configs set 24h; if you're customising, raise `proxy_read_timeout` / `transport http { read_timeout … }` on the LiveKit route |
 | Signaling connects, two participants see "connecting" but no video / audio | UDP not reaching the LXC, OR LiveKit advertising the wrong IP | (a) Open `udp/50000-60000` on the host firewall pointed at the LXC's bridge IP (or add an Incus `proxy` device — see §5). (b) Set `LIVEKIT_NODE_IP=<host-public-ipv4>` in `.env` and `docker compose up -d livekit`. Verify with `tcpdump -ni any 'udp portrange 50000-60000'` |
 | `docker compose up -d` hangs at "6/7" or the livekit container never reports `running` | Old layout published 10k UDP ports through `docker-proxy`, which can take minutes or fail inside an LXC | Pull the latest `deploy/external-proxy/docker-compose.yml`. The livekit service now uses `network_mode: host` and publishes nothing through Docker. `docker compose down && docker compose up -d` |

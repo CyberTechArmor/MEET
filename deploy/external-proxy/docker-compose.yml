@@ -98,6 +98,11 @@ services:
     network_mode: host
     environment:
       - NODE_IP=${LIVEKIT_NODE_IP:-}
+      # LIVEKIT_KEYS overrides the keys: block in livekit.yaml. install.sh
+      # writes "<key>: <secret>" here from the same source of truth that
+      # populates LIVEKIT_API_KEY / LIVEKIT_API_SECRET on meet-api, so the
+      # two services can never drift. Don't set this by hand.
+      - LIVEKIT_KEYS=${LIVEKIT_KEYS:-}
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     restart: unless-stopped

@@ -27,6 +27,11 @@ rtc:
     - stun.l.google.com:19302
     - stun1.l.google.com:19302
 
+# Fallback keys for direct `docker run` use only. The compose stack sets
+# LIVEKIT_KEYS in the environment, which OVERRIDES this block at runtime
+# (see deploy/external-proxy/docker-compose.yml). install.sh writes the
+# matching <key>: <secret> there from a single source of truth, so this
+# fallback shouldn't normally be reached.
 keys:
   devkey: secret
 
