@@ -56,7 +56,33 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setError,
   } = useAdminStore();
 
-  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  // Hash-persisted tab state — surviving page refresh.
+  // Hash format: #admin or #admin/<tab>. Anything else falls back to dashboard.
+  const parseTabFromHash = (): TabType => {
+    if (typeof window === 'undefined') return 'dashboard';
+    const m = window.location.hash.match(/^#admin\/([\w-]+)$/);
+    const valid: TabType[] = ['dashboard', 'settings', 'api-keys', 'webhooks', 'docs'];
+    if (m && (valid as string[]).includes(m[1])) return m[1] as TabType;
+    return 'dashboard';
+  };
+  const [activeTab, setActiveTab] = useState<TabType>(parseTabFromHash);
+
+  // Mirror activeTab into the hash when the admin panel is open.
+  useEffect(() => {
+    if (window.location.hash.startsWith('#admin')) {
+      const next = activeTab === 'dashboard' ? '#admin' : `#admin/${activeTab}`;
+      if (window.location.hash !== next) {
+        window.history.replaceState(null, '', next);
+      }
+    }
+  }, [activeTab]);
+
+  // React to back/forward / external hash changes.
+  useEffect(() => {
+    const onHashChange = () => setActiveTab(parseTabFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
