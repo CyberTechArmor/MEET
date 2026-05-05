@@ -63,8 +63,14 @@ services:
       - LIVEKIT_URL=http://host.docker.internal:${MEET_LIVEKIT_WS_PORT:-7880}
       - PORT=8080
       - CORS_ORIGIN=${PUBLIC_BASE_URL:-*}
+      - MEET_DATA_DIR=/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Persistent state for the API: SQLite at /data/meet.db. Survives
+    # `docker compose down && up`. Removed by `docker compose down -v` —
+    # warn operators before they run that.
+    volumes:
+      - meet-api-data:/data
     depends_on:
       - livekit
     restart: unless-stopped
@@ -115,3 +121,9 @@ services:
 networks:
   meet-network:
     driver: bridge
+
+volumes:
+  # SQLite + WAL files for meet-api. API keys, webhooks, server settings,
+  # and admin credentials all live here. `docker compose down` keeps it;
+  # `docker compose down -v` wipes it.
+  meet-api-data:

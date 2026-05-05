@@ -317,6 +317,25 @@ The cleanup script removes:
 2. On macOS, grant screen recording permission in System Preferences
 3. Try selecting a specific window instead of entire screen
 
+### Operator state persistence (external-proxy mode)
+
+API keys, webhooks, server settings, and the admin username/password are
+persisted in SQLite at `/data/meet.db` inside the `meet-api` container.
+The compose stack mounts the named volume `meet-api-data` there, so all
+of those survive `docker compose down && up`. `docker compose down -v`
+wipes the volume — use it only when you intend a full reset.
+
+To back up or inspect the file from the host:
+
+```bash
+docker compose cp meet-api:/data/meet.db ./meet-backup.db
+```
+
+Note: this is the first MEET version with persistent state. Prior to it,
+admin keys/webhooks/settings were lost on every container recreate.
+Running `update.sh` from a previous install creates an empty database on
+first start; any keys configured before will need to be re-created.
+
 ### External-proxy / LXC mode
 
 Run `bash deploy/external-proxy/info.sh` first — it surfaces most of these

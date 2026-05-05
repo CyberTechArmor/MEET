@@ -32,49 +32,55 @@ const SERVER_START_TIME = Date.now();
 const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
 
 // ============================================================================
-// IN-MEMORY STORAGE (Use database in production)
+// PERSISTENT STORAGE
 // ============================================================================
+//
+// API keys, webhooks, server settings, and admin credentials live in SQLite
+// at ${MEET_DATA_DIR:-/data}/meet.db so they survive
+// `docker compose down && up`. CRUD goes through ./store; this file keeps
+// hot caches only for the per-request settings reads.
+//
+// Admin sessions stay in memory: they're TTL-bound (24h) and re-issued on
+// login, so losing them on restart is acceptable. Room metadata is also
+// transient (display names while a room exists).
 
-interface ApiKey {
-  id: string;
-  name: string;
-  key: string;
-  keyHash: string;
-  permissions: string[];
-  createdAt: Date;
-  lastUsedAt: Date | null;
-}
+import type { ApiKey, Webhook, AdminSession, PersistedSettings } from './types.js';
+import * as store from './store.js';
+import { getDb } from './db.js';
 
-interface Webhook {
-  id: string;
-  name: string;
-  url: string;
-  events: string[];
-  enabled: boolean;
-  secret: string;
-  createdAt: Date;
-  lastTriggeredAt: Date | null;
-  failureCount: number;
-}
+// Open the database before anything else can touch it.
+getDb();
 
-interface AdminSession {
-  token: string;
-  createdAt: Date;
-  expiresAt: Date;
-}
-
-// Room metadata for display names
+// Room metadata for display names — transient.
 interface RoomMetadata {
   displayName: string;
   createdAt: Date;
 }
 
-// Storage
-let adminUsername: string = ADMIN_USERNAME;
-let adminPassword: string = ADMIN_PASSWORD;
-let isFirstLogin = !ADMIN_USERNAME || !ADMIN_PASSWORD;
-const apiKeys: Map<string, ApiKey> = new Map();
-const webhooks: Map<string, Webhook> = new Map();
+// Admin credentials. Resolved with this priority:
+//   env vars (if both set)  >  values previously stored in db  >  empty
+// "First login" mode is on whenever neither the env nor the db gives us
+// a complete pair.
+let adminUsername: string;
+let adminPassword: string;
+let isFirstLogin: boolean;
+{
+  const stored = store.loadAdminCredentials();
+  if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+    adminUsername = ADMIN_USERNAME;
+    adminPassword = ADMIN_PASSWORD;
+    isFirstLogin = false;
+  } else if (stored.username && stored.password) {
+    adminUsername = stored.username;
+    adminPassword = stored.password;
+    isFirstLogin = false;
+  } else {
+    adminUsername = '';
+    adminPassword = '';
+    isFirstLogin = true;
+  }
+}
+
 const adminSessions: Map<string, AdminSession> = new Map();
 const roomMetadata: Map<string, RoomMetadata> = new Map();
 
@@ -112,14 +118,35 @@ function getRecommendedLimits(): { participants: number; meetings: number } {
 
 const recommendedLimits = getRecommendedLimits();
 
-const serverSettings: ServerSettings = {
+// Load persisted settings or fall back to defaults; either way save back so
+// subsequent reads bypass the defaults.
+const SETTINGS_DEFAULTS: PersistedSettings = {
   publicAccessEnabled: true,
   maxParticipantsPerMeeting: 0, // 0 = unlimited
   maxConcurrentMeetings: 0, // 0 = unlimited
-  recommendedMaxParticipants: recommendedLimits.participants,
-  recommendedMaxMeetings: recommendedLimits.meetings,
   iframeAllowedDomains: [], // Empty = allow all domains (*)
 };
+const persistedSettings: PersistedSettings = store.loadSettings() ?? SETTINGS_DEFAULTS;
+if (!store.loadSettings()) store.saveSettings(persistedSettings);
+
+// In-memory hot copy. The middleware at line ~245 reads serverSettings on
+// every request, so a per-request SQLite read would matter; we keep this
+// object as the source of truth at runtime and persist on every mutation.
+// recommendedMax* are derived at startup and are not persisted.
+const serverSettings: ServerSettings = {
+  ...persistedSettings,
+  recommendedMaxParticipants: recommendedLimits.participants,
+  recommendedMaxMeetings: recommendedLimits.meetings,
+};
+
+function persistServerSettings(): void {
+  store.saveSettings({
+    publicAccessEnabled: serverSettings.publicAccessEnabled,
+    maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
+    maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+    iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+  });
+}
 
 // Webhook event types
 const WEBHOOK_EVENTS = [
@@ -184,7 +211,7 @@ async function triggerWebhooks(eventType: WebhookEventType, data: Record<string,
     data,
   };
 
-  for (const webhook of webhooks.values()) {
+  for (const webhook of store.listWebhooks()) {
     if (!webhook.enabled || !webhook.events.includes(eventType)) {
       continue;
     }
@@ -219,6 +246,7 @@ async function triggerWebhooks(eventType: WebhookEventType, data: Record<string,
       webhook.failureCount++;
       console.error(`Webhook ${webhook.id} error:`, error);
     }
+    store.saveWebhook(webhook);
   }
 }
 
@@ -273,14 +301,14 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
   // Check API key first
   if (apiKeyHeader) {
     const keyHash = hashString(apiKeyHeader);
-    for (const apiKey of apiKeys.values()) {
-      if (apiKey.keyHash === keyHash) {
-        apiKey.lastUsedAt = new Date();
-        req.apiKey = apiKey;
-        req.isAdmin = apiKey.permissions.includes('admin');
-        next();
-        return;
-      }
+    const apiKey = store.findApiKeyByHash(keyHash);
+    if (apiKey) {
+      apiKey.lastUsedAt = new Date();
+      store.saveApiKey(apiKey);
+      req.apiKey = apiKey;
+      req.isAdmin = apiKey.permissions.includes('admin');
+      next();
+      return;
     }
     res.status(401).json({ error: 'Invalid API key' });
     return;
@@ -316,13 +344,13 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
   // Check API key
   if (apiKeyHeader) {
     const keyHash = hashString(apiKeyHeader);
-    for (const apiKey of apiKeys.values()) {
-      if (apiKey.keyHash === keyHash) {
-        apiKey.lastUsedAt = new Date();
-        req.apiKey = apiKey;
-        next();
-        return;
-      }
+    const apiKey = store.findApiKeyByHash(keyHash);
+    if (apiKey) {
+      apiKey.lastUsedAt = new Date();
+      store.saveApiKey(apiKey);
+      req.apiKey = apiKey;
+      next();
+      return;
     }
     res.status(401).json({ error: 'Invalid API key' });
     return;
@@ -1292,11 +1320,12 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
     return;
   }
 
-  // If no admin credentials are set, first login sets them
+  // If no admin credentials are set, first login sets them and persists.
   if (isFirstLogin) {
     adminUsername = username;
     adminPassword = password;
     isFirstLogin = false;
+    store.saveAdminCredentials({ username, password, firstLoginDone: true });
     console.log(`Admin credentials set by first login: ${username}`);
   }
 
@@ -1350,8 +1379,8 @@ app.get('/api/admin/stats', authenticateApiKeyOrAdmin, async (_req: AuthRequest,
     res.json({
       activeRooms: rooms.length,
       totalParticipants,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     });
@@ -1360,8 +1389,8 @@ app.get('/api/admin/stats', authenticateApiKeyOrAdmin, async (_req: AuthRequest,
     res.json({
       activeRooms: 0,
       totalParticipants: 0,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     });
@@ -1424,6 +1453,8 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
     });
     serverSettings.iframeAllowedDomains = validDomains;
   }
+
+  persistServerSettings();
 
   res.json({
     success: true,
@@ -1574,7 +1605,7 @@ app.put('/api/rooms/:roomName', authenticateApiKeyOrAdmin, async (req: Request<{
 
 // List API keys
 app.get('/api/admin/api-keys', authenticateAdmin, (_req: AuthRequest, res: Response) => {
-  const keys = Array.from(apiKeys.values()).map(key => ({
+  const keys = store.listApiKeys().map(key => ({
     id: key.id,
     name: key.name,
     keyPrefix: maskApiKey(key.key),
@@ -1616,7 +1647,7 @@ app.post('/api/admin/api-keys', authenticateAdmin, (req: Request<object, object,
     lastUsedAt: null,
   };
 
-  apiKeys.set(id, apiKey);
+  store.saveApiKey(apiKey);
 
   res.status(201).json({
     id,
@@ -1631,12 +1662,10 @@ app.post('/api/admin/api-keys', authenticateAdmin, (req: Request<object, object,
 app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyId: string }>, res: Response) => {
   const { keyId } = req.params;
 
-  if (!apiKeys.has(keyId)) {
+  if (!store.deleteApiKey(keyId)) {
     res.status(404).json({ error: 'API key not found' });
     return;
   }
-
-  apiKeys.delete(keyId);
   res.json({ success: true, message: 'API key revoked' });
 });
 
@@ -1646,7 +1675,7 @@ app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyI
 
 // List webhooks
 app.get('/api/admin/webhooks', authenticateAdmin, (_req: AuthRequest, res: Response) => {
-  const hooks = Array.from(webhooks.values()).map(webhook => ({
+  const hooks = store.listWebhooks().map(webhook => ({
     id: webhook.id,
     name: webhook.name,
     url: webhook.url,
@@ -1715,7 +1744,7 @@ app.post('/api/admin/webhooks', authenticateAdmin, (req: Request<object, object,
     failureCount: 0,
   };
 
-  webhooks.set(id, webhook);
+  store.saveWebhook(webhook);
 
   res.status(201).json({
     id,
@@ -1733,7 +1762,7 @@ app.post('/api/admin/webhooks', authenticateAdmin, (req: Request<object, object,
 // Get webhook
 app.get('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1763,7 +1792,7 @@ interface UpdateWebhookRequest {
 
 app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }, object, UpdateWebhookRequest>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1799,6 +1828,8 @@ app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ web
     webhook.enabled = enabled;
   }
 
+  store.saveWebhook(webhook);
+
   res.json({
     id: webhook.id,
     name: webhook.name,
@@ -1816,19 +1847,18 @@ app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ web
 app.delete('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
 
-  if (!webhooks.has(webhookId)) {
+  if (!store.deleteWebhook(webhookId)) {
     res.status(404).json({ error: 'Webhook not found' });
     return;
   }
 
-  webhooks.delete(webhookId);
   res.json({ success: true, message: 'Webhook deleted' });
 });
 
 // Test webhook
 app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1975,13 +2005,13 @@ async function getAdminData(): Promise<{
     stats: {
       activeRooms: rooms.length,
       totalParticipants,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     },
     rooms,
-    apiKeys: Array.from(apiKeys.values()).map((key) => ({
+    apiKeys: store.listApiKeys().map((key) => ({
       id: key.id,
       name: key.name,
       keyPrefix: maskApiKey(key.key),
@@ -1989,7 +2019,7 @@ async function getAdminData(): Promise<{
       createdAt: key.createdAt.toISOString(),
       lastUsedAt: key.lastUsedAt?.toISOString() || null,
     })),
-    webhooks: Array.from(webhooks.values()).map((webhook) => ({
+    webhooks: store.listWebhooks().map((webhook) => ({
       id: webhook.id,
       name: webhook.name,
       url: webhook.url,

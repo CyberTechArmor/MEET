@@ -9,12 +9,14 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "livekit-server-sdk": "^2.15.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^20.19.37",
