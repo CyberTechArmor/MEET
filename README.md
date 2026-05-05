@@ -317,6 +317,43 @@ The cleanup script removes:
 2. On macOS, grant screen recording permission in System Preferences
 3. Try selecting a specific window instead of entire screen
 
+### External-proxy / LXC mode
+
+Run `bash deploy/external-proxy/info.sh` first — it surfaces most of these
+automatically. Top failure modes, in the order they tend to bite:
+
+1. **LiveKit logs `could not validate external IP … context canceled` and
+   the stack works anyway.** Normal when `LIVEKIT_NODE_IP` is set in
+   `deploy/external-proxy/.env` (which `install.sh` does by default). LiveKit
+   tries STUN, can't NAT-loopback the host's own public IP, then falls
+   back to `NODE_IP`. The warning is only a problem if `LIVEKIT_NODE_IP`
+   is **empty** — then LiveKit fails to start and you'll see `/livekit`
+   502s and `/api/rooms` 500s. Set it and `docker compose up -d livekit`.
+2. **Login works, admin panel shows Disconnected, `/api/rooms` returns
+   `Unauthorized: invalid API key`.** `meet-api` and the `livekit`
+   container disagree on the LiveKit auth pair. Re-run `./install.sh`
+   option 5 (idempotent — preserves the existing key but rewrites
+   `LIVEKIT_KEYS` so both services match), then `info.sh` should show
+   the LiveKit auth probe ✓.
+3. **Rooms get created in the admin panel, but joining hangs at
+   "Connecting…" and the browser logs `could not establish pc connection`.**
+   ICE didn't pair because UDP isn't reaching the LXC. ProxyPilot/Caddy
+   can't proxy UDP — you need Incus proxy devices for `udp/50000-60000`
+   and `tcp/7881`. `info.sh` prints the exact commands with your bridge
+   IP filled in. If those are in place and only same-LAN testing fails,
+   it's NAT hairpinning (test from cellular to confirm).
+4. **`POST /api/admin/login` returns 404 `Cannot POST /admin/login`.**
+   Reverse proxy is stripping the `/api` prefix. Only `/livekit/*` should
+   strip; `/api/*` and `/ws/*` must preserve. ProxyPilot has a per-route
+   strip toggle.
+5. **Iframe embedding rejected with `X-Frame-Options: SAMEORIGIN`.** The
+   reverse proxy is injecting it. The MEET frontend and API both already
+   strip it; if you see it, your proxy is adding it as a default header.
+   Remove it for this site (Caddy `-X-Frame-Options`) and set
+   `Content-Security-Policy: frame-ancestors *`.
+
+Full walk-through: [`docs/install/external-reverse-proxy.md`](docs/install/external-reverse-proxy.md).
+
 ## License
 
 MIT
