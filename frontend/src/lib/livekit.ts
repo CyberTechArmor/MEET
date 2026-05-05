@@ -290,6 +290,7 @@ export async function getToken(roomName: string, participantName: string): Promi
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get token' }));
     throw new Error(error.error || 'Failed to get token');
@@ -304,6 +305,7 @@ export async function getToken(roomName: string, participantName: string): Promi
 export async function generateRoomCode(): Promise<string> {
   const response = await fetch(`${API_URL}/api/room-code`);
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Fallback to client-side generation
     const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -653,6 +655,7 @@ export interface PublicStatusResponse {
 export async function getPublicStatus(): Promise<PublicStatusResponse> {
   const response = await fetch(`${API_URL}/api/status`);
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Default to enabled if we can't reach the status endpoint
     return { publicAccessEnabled: true, version: '1.0.0' };
@@ -676,6 +679,7 @@ export async function endMeetingForAll(roomName: string, participantIdentity: st
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to end meeting' }));
     throw new Error(error.error || 'Failed to end meeting');
@@ -729,6 +733,19 @@ export interface AdminLoginResponse {
 }
 
 /**
+ * Treat 401 responses on any admin endpoint as "your session is gone";
+ * fire a window event so AdminPanel.tsx can clear local auth and bounce
+ * the user back to the login form. Without this, a server restart that
+ * dropped sessions left the SPA showing the admin shell with every
+ * sub-request 401-ing in the network tab.
+ */
+function notifyUnauthorizedIfNeeded(response: Response): void {
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('admin:unauthorized'));
+  }
+}
+
+/**
  * Admin login
  */
 export async function adminLogin(username: string, password: string): Promise<AdminLoginResponse> {
@@ -740,6 +757,7 @@ export async function adminLogin(username: string, password: string): Promise<Ad
     body: JSON.stringify({ username, password }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Login failed' }));
     throw new Error(error.error || 'Login failed');
@@ -779,6 +797,7 @@ export async function getServerStats(token: string): Promise<ServerStats> {
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get stats' }));
     throw new Error(error.error || 'Failed to get stats');
@@ -805,6 +824,7 @@ export async function listRooms(token: string): Promise<{ rooms: RoomInfo[]; tot
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list rooms' }));
     throw new Error(error.error || 'Failed to list rooms');
@@ -830,6 +850,7 @@ export async function updateRoomDisplayName(
     body: JSON.stringify({ displayName }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update room' }));
     throw new Error(error.error || 'Failed to update room');
@@ -866,6 +887,7 @@ export async function listApiKeys(token: string): Promise<{ apiKeys: ApiKeyInfo[
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list API keys' }));
     throw new Error(error.error || 'Failed to list API keys');
@@ -891,6 +913,7 @@ export async function createApiKey(
     body: JSON.stringify({ name, permissions }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create API key' }));
     throw new Error(error.error || 'Failed to create API key');
@@ -910,6 +933,7 @@ export async function revokeApiKey(token: string, keyId: string): Promise<void> 
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to revoke API key' }));
     throw new Error(error.error || 'Failed to revoke API key');
@@ -954,6 +978,7 @@ export async function listWebhooks(token: string): Promise<{ webhooks: WebhookIn
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list webhooks' }));
     throw new Error(error.error || 'Failed to list webhooks');
@@ -981,6 +1006,7 @@ export async function createWebhook(
     body: JSON.stringify({ name, url, events, enabled }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create webhook' }));
     throw new Error(error.error || 'Failed to create webhook');
@@ -1006,6 +1032,7 @@ export async function updateWebhook(
     body: JSON.stringify(updates),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update webhook' }));
     throw new Error(error.error || 'Failed to update webhook');
@@ -1025,6 +1052,7 @@ export async function deleteWebhook(token: string, webhookId: string): Promise<v
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to delete webhook' }));
     throw new Error(error.error || 'Failed to delete webhook');
@@ -1049,6 +1077,7 @@ export async function testWebhook(token: string, webhookId: string): Promise<Web
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to test webhook' }));
     throw new Error(error.error || 'Failed to test webhook');
@@ -1083,6 +1112,7 @@ export async function getServerSettings(token: string): Promise<ServerSettingsRe
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get settings' }));
     throw new Error(error.error || 'Failed to get settings');
@@ -1107,6 +1137,7 @@ export async function updateServerSettings(
     body: JSON.stringify(settings),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
     throw new Error(error.error || 'Failed to update settings');

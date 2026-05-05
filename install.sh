@@ -1526,9 +1526,20 @@ ENV_FILE
     echo -e "${GREEN}✓${NC} All containers running"
 
     # Detect the bridge IP — the address the host reverse proxy must dial.
+    # Filter out Docker's per-network bridges (docker0, br-<hash>, veth*) and
+    # CNI/libvirt/lxcbr scaffolding so we don't return e.g. 172.17.0.1, which
+    # is only reachable from inside the LXC. The Incus host can route to the
+    # LXC's external interface (eth0 → e.g. 10.185.17.131); it cannot route
+    # to docker0 inside the LXC. Same filter as info.sh.
     local bridge_ip
     bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
-                | awk '{print $4}' | cut -d/ -f1 | head -n1)
+                | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                | cut -d/ -f1 | head -n1)
+    if [ -z "$bridge_ip" ]; then
+        # Fallback if the filter eliminated everything.
+        bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                    | awk '{print $4}' | cut -d/ -f1 | head -n1)
+    fi
     bridge_ip=${bridge_ip:-<bridge-ip>}
 
     echo ""
