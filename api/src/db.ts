@@ -82,6 +82,31 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
       INSERT INTO admin_credentials (id) VALUES (1);
     `);
   },
+
+  // v2 — durable admin sessions + scrypt-hashed admin password.
+  //
+  // Persisting sessions means a meet-api recreate (`docker compose up -d` or
+  // a host reboot) doesn't kick the admin out and leave the SPA stuck on
+  // 401s. Sessions still expire on the 24h TTL set at issue.
+  //
+  // password_hash replaces the plaintext password column. The legacy
+  // password column stays so v1 deployments don't break the migration; the
+  // index.ts startup hook lazy-hashes any plaintext into password_hash and
+  // clears password on the first run after upgrading.
+  (db) => {
+    db.exec(`
+      CREATE TABLE admin_sessions (
+        token       TEXT PRIMARY KEY,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+      );
+      CREATE INDEX idx_admin_sessions_expires_at
+        ON admin_sessions(expires_at);
+
+      ALTER TABLE admin_credentials
+        ADD COLUMN password_hash TEXT NOT NULL DEFAULT '';
+    `);
+  },
 ];
 
 function currentSchemaVersion(db: Database.Database): number {

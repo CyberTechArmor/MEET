@@ -7,6 +7,7 @@ import { getDb } from './db.js';
 import type {
   ApiKey,
   Webhook,
+  AdminSession,
   PersistedSettings,
   AdminCredentials,
 } from './types.js';
@@ -197,31 +198,97 @@ export function saveSettings(s: PersistedSettings): void {
 
 // ────────────────────────── admin credentials ──────────────────────────
 
-export function loadAdminCredentials(): AdminCredentials {
+interface AdminCredentialsRow {
+  username: string;
+  password: string;       // legacy plaintext column (cleared on lazy migration)
+  password_hash: string;  // scrypt hash (added in v2 migration)
+  first_login_done: number;
+}
+
+// Internal: returns the raw row including the legacy plaintext column so
+// the startup hook in index.ts can lazy-migrate v1 plaintext to scrypt.
+export function loadAdminCredentialsRaw(): {
+  username: string;
+  password: string;
+  passwordHash: string;
+  firstLoginDone: boolean;
+} {
   const row = getDb()
     .prepare(
-      'SELECT username, password, first_login_done FROM admin_credentials WHERE id = 1',
+      'SELECT username, password, password_hash, first_login_done FROM admin_credentials WHERE id = 1',
     )
-    .get() as
-    | { username: string; password: string; first_login_done: number }
-    | undefined;
+    .get() as AdminCredentialsRow | undefined;
   if (!row) {
-    // Should never happen — db.ts inserts a sentinel row in migration v1.
-    return { username: '', password: '', firstLoginDone: false };
+    return { username: '', password: '', passwordHash: '', firstLoginDone: false };
   }
   return {
     username: row.username,
     password: row.password,
+    passwordHash: row.password_hash,
     firstLoginDone: row.first_login_done === 1,
   };
 }
 
+export function loadAdminCredentials(): AdminCredentials {
+  const r = loadAdminCredentialsRaw();
+  return { username: r.username, passwordHash: r.passwordHash, firstLoginDone: r.firstLoginDone };
+}
+
 export function saveAdminCredentials(c: AdminCredentials): void {
+  // Always clear the legacy plaintext column on save — the lazy-migration
+  // hook should already have done it, but this is the belt-and-braces.
   getDb()
     .prepare(
       `UPDATE admin_credentials
-         SET username = ?, password = ?, first_login_done = ?
+         SET username = ?, password_hash = ?, first_login_done = ?, password = ''
          WHERE id = 1`,
     )
-    .run(c.username, c.password, c.firstLoginDone ? 1 : 0);
+    .run(c.username, c.passwordHash, c.firstLoginDone ? 1 : 0);
+}
+
+// ──────────────────────────── admin sessions ───────────────────────────
+
+interface AdminSessionRow {
+  token: string;
+  created_at: string;
+  expires_at: string;
+}
+
+function rowToSession(r: AdminSessionRow): AdminSession {
+  return {
+    token: r.token,
+    createdAt: new Date(r.created_at),
+    expiresAt: new Date(r.expires_at),
+  };
+}
+
+export function getAdminSession(token: string): AdminSession | undefined {
+  const row = getDb()
+    .prepare('SELECT * FROM admin_sessions WHERE token = ?')
+    .get(token) as AdminSessionRow | undefined;
+  return row ? rowToSession(row) : undefined;
+}
+
+export function saveAdminSession(s: AdminSession): void {
+  getDb()
+    .prepare(
+      `INSERT INTO admin_sessions (token, created_at, expires_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(token) DO UPDATE SET expires_at = excluded.expires_at`,
+    )
+    .run(s.token, s.createdAt.toISOString(), s.expiresAt.toISOString());
+}
+
+export function deleteAdminSession(token: string): boolean {
+  const r = getDb().prepare('DELETE FROM admin_sessions WHERE token = ?').run(token);
+  return r.changes > 0;
+}
+
+// Reap expired sessions. Cheap (indexed on expires_at); call from the
+// login handler after issuing a new session.
+export function purgeExpiredAdminSessions(): number {
+  const r = getDb()
+    .prepare('DELETE FROM admin_sessions WHERE expires_at < ?')
+    .run(new Date().toISOString());
+  return r.changes;
 }

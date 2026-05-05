@@ -83,6 +83,19 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  // The api-side dispatches `admin:unauthorized` whenever any admin endpoint
+  // returns 401 — typically after meet-api was recreated and our session
+  // token is no longer recognised. Clear local auth and bounce back to the
+  // login form instead of leaving the panel showing 401s on every request.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      logout();
+      setLoginError('Your session expired or the server restarted. Please sign in again.');
+    };
+    window.addEventListener('admin:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('admin:unauthorized', onUnauthorized);
+  }, [logout]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');

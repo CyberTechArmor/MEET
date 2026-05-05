@@ -44,12 +44,28 @@ const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_
 // login, so losing them on restart is acceptable. Room metadata is also
 // transient (display names while a room exists).
 
-import type { ApiKey, Webhook, AdminSession, PersistedSettings } from './types.js';
+import type { ApiKey, Webhook, PersistedSettings } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
+import { hashPassword, verifyPassword } from './auth.js';
 
 // Open the database before anything else can touch it.
 getDb();
+
+// Lazy-migrate any v1 plaintext admin password into the v2 password_hash
+// column. Runs once per process; subsequent reads see only the hash.
+{
+  const raw = store.loadAdminCredentialsRaw();
+  if (raw.password && !raw.passwordHash) {
+    const hash = hashPassword(raw.password);
+    store.saveAdminCredentials({
+      username: raw.username,
+      passwordHash: hash,
+      firstLoginDone: raw.firstLoginDone,
+    });
+    console.log('[migration] hashed legacy plaintext admin password (scrypt)');
+  }
+}
 
 // Room metadata for display names — transient.
 interface RoomMetadata {
@@ -60,28 +76,31 @@ interface RoomMetadata {
 // Admin credentials. Resolved with this priority:
 //   env vars (if both set)  >  values previously stored in db  >  empty
 // "First login" mode is on whenever neither the env nor the db gives us
-// a complete pair.
+// a complete pair. Passwords (whether from env or db) are kept as scrypt
+// hashes in adminPasswordHash; verifyPassword() compares with timing-safe
+// equality.
 let adminUsername: string;
-let adminPassword: string;
+let adminPasswordHash: string;
 let isFirstLogin: boolean;
 {
   const stored = store.loadAdminCredentials();
   if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+    // Hash env-supplied password fresh on every boot. We never persist this
+    // hash to the db — env is source of truth when set.
     adminUsername = ADMIN_USERNAME;
-    adminPassword = ADMIN_PASSWORD;
+    adminPasswordHash = hashPassword(ADMIN_PASSWORD);
     isFirstLogin = false;
-  } else if (stored.username && stored.password) {
+  } else if (stored.username && stored.passwordHash) {
     adminUsername = stored.username;
-    adminPassword = stored.password;
+    adminPasswordHash = stored.passwordHash;
     isFirstLogin = false;
   } else {
     adminUsername = '';
-    adminPassword = '';
+    adminPasswordHash = '';
     isFirstLogin = true;
   }
 }
 
-const adminSessions: Map<string, AdminSession> = new Map();
 const roomMetadata: Map<string, RoomMetadata> = new Map();
 
 // Server settings
@@ -319,15 +338,16 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
     const token = authHeader.substring(7);
 
     // Check if it's a session token
-    const session = adminSessions.get(token);
+    const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
       next();
       return;
     }
 
-    // Check if it's the admin password
-    if (adminPassword && token === adminPassword) {
+    // Check if it's the admin password (sent as plaintext Bearer; verified
+    // against the scrypt hash with timing-safe equality).
+    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -359,13 +379,13 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
   // Check Bearer token
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const session = adminSessions.get(token);
+    const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
       next();
       return;
     }
-    if (adminPassword && token === adminPassword) {
+    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -1321,41 +1341,37 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
   }
 
   // If no admin credentials are set, first login sets them and persists.
+  // The provided password is hashed with scrypt before storage; we never
+  // persist plaintext.
+  const wasFirstLogin = isFirstLogin;
   if (isFirstLogin) {
     adminUsername = username;
-    adminPassword = password;
+    adminPasswordHash = hashPassword(password);
     isFirstLogin = false;
-    store.saveAdminCredentials({ username, password, firstLoginDone: true });
+    store.saveAdminCredentials({
+      username,
+      passwordHash: adminPasswordHash,
+      firstLoginDone: true,
+    });
     console.log(`Admin credentials set by first login: ${username}`);
   }
 
-  if (username !== adminUsername || password !== adminPassword) {
+  if (username !== adminUsername || !verifyPassword(password, adminPasswordHash)) {
     res.status(401).json({ error: 'Invalid username or password' });
     return;
   }
 
-  // Create session token
+  // Create session token (persisted across restarts in admin_sessions).
   const token = generateSessionToken();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-  adminSessions.set(token, {
-    token,
-    createdAt: new Date(),
-    expiresAt,
-  });
-
-  // Clean up expired sessions
-  for (const [key, session] of adminSessions.entries()) {
-    if (session.expiresAt < new Date()) {
-      adminSessions.delete(key);
-    }
-  }
+  store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+  store.purgeExpiredAdminSessions();
 
   res.json({
     success: true,
     token,
     expiresAt: expiresAt.toISOString(),
-    isFirstLogin: !ADMIN_USERNAME && adminSessions.size === 1,
+    isFirstLogin: wasFirstLogin,
     username: adminUsername,
   });
 });
@@ -1365,7 +1381,7 @@ app.post('/api/admin/logout', authenticateAdmin, (req: AuthRequest, res: Respons
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    adminSessions.delete(token);
+    store.deleteAdminSession(token);
   }
   res.json({ success: true });
 });
@@ -1667,6 +1683,36 @@ app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyI
     return;
   }
   res.json({ success: true, message: 'API key revoked' });
+});
+
+// Rotate API key — replace the secret while keeping the id, name, and
+// permissions. The previous secret stops working immediately. Useful when
+// a key may have leaked but the consumer can be reconfigured without
+// recreating the integration.
+app.post('/api/admin/api-keys/:keyId/rotate', authenticateAdmin, (req: Request<{ keyId: string }>, res: Response) => {
+  const { keyId } = req.params;
+  const existing = store.getApiKey(keyId);
+  if (!existing) {
+    res.status(404).json({ error: 'API key not found' });
+    return;
+  }
+
+  const newKey = generateApiKey();
+  const rotated: ApiKey = {
+    ...existing,
+    key: newKey,
+    keyHash: hashString(newKey),
+    lastUsedAt: null, // reset; the new key has never been used
+  };
+  store.saveApiKey(rotated);
+
+  res.json({
+    id: rotated.id,
+    name: rotated.name,
+    key: newKey, // Only returned on rotation; cannot be recovered later.
+    permissions: rotated.permissions,
+    createdAt: rotated.createdAt.toISOString(),
+  });
 });
 
 // ============================================================================
@@ -2051,7 +2097,7 @@ wss.on('connection', (ws: WebSocket) => {
         const token = message.token;
 
         // Check if it's a valid session token
-        const session = adminSessions.get(token);
+        const session = store.getAdminSession(token);
         if (session && session.expiresAt > new Date()) {
           client.isAuthenticated = true;
           client.token = token;
@@ -2060,7 +2106,7 @@ wss.on('connection', (ws: WebSocket) => {
           // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-        } else if (adminPassword && token === adminPassword) {
+        } else if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
           client.isAuthenticated = true;
           client.token = token;
           authenticatedClients.add(client);

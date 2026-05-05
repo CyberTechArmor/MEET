@@ -42,6 +42,8 @@ export interface PersistedSettings {
 
 export interface AdminCredentials {
   username: string;
-  password: string;
+  // scrypt-hashed password in "<saltHex>$<hashHex>" form (see auth.ts).
+  // Empty string means no password configured yet (first-login mode).
+  passwordHash: string;
   firstLoginDone: boolean;
 }
