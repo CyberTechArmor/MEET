@@ -63,6 +63,15 @@ services:
       - LIVEKIT_URL=http://host.docker.internal:${MEET_LIVEKIT_WS_PORT:-7880}
       - PORT=8080
       - CORS_ORIGIN=${PUBLIC_BASE_URL:-*}
+      # Surface the public URLs to meet-api as well — WebAuthn (passkeys)
+      # uses PUBLIC_BASE_URL to derive its rpID + allowed origins; without
+      # these the admin Settings tab reports "Disabled — PUBLIC_BASE_URL
+      # not configured" even when the .env has the values. CORS_ORIGIN
+      # already had this var but only as part of its own value, not as a
+      # standalone env var.
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-}
+      - PUBLIC_LIVEKIT_URL=${PUBLIC_LIVEKIT_URL:-}
       - MEET_DATA_DIR=/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
