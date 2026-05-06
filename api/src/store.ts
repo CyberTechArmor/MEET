@@ -4,12 +4,14 @@
 // ISO strings, matching the shapes index.ts already operates on.
 
 import { getDb } from './db.js';
+import * as crypto from 'crypto';
 import type {
   ApiKey,
   Webhook,
   AdminSession,
   PersistedSettings,
   AdminCredentials,
+  Passkey,
 } from './types.js';
 
 // ─────────────────────────────── api_keys ──────────────────────────────
@@ -203,40 +205,69 @@ interface AdminCredentialsRow {
   password: string;       // legacy plaintext column (cleared on lazy migration)
   password_hash: string;  // scrypt hash (added in v2 migration)
   first_login_done: number;
+  user_handle: Buffer | null;  // stable 16 bytes for WebAuthn (v3 migration)
 }
 
 // Internal: returns the raw row including the legacy plaintext column so
-// the startup hook in index.ts can lazy-migrate v1 plaintext to scrypt.
+// the startup hook in index.ts can lazy-migrate v1 plaintext to scrypt
+// AND ensure the v3 user_handle is populated. Buffer columns come back
+// as Node Buffer instances from better-sqlite3 — we mint a fresh 16-byte
+// handle here on first read if it's still NULL.
 export function loadAdminCredentialsRaw(): {
   username: string;
   password: string;
   passwordHash: string;
   firstLoginDone: boolean;
+  userHandle: Buffer;
 } {
   const row = getDb()
     .prepare(
-      'SELECT username, password, password_hash, first_login_done FROM admin_credentials WHERE id = 1',
+      'SELECT username, password, password_hash, first_login_done, user_handle FROM admin_credentials WHERE id = 1',
     )
     .get() as AdminCredentialsRow | undefined;
   if (!row) {
-    return { username: '', password: '', passwordHash: '', firstLoginDone: false };
+    return {
+      username: '', password: '', passwordHash: '',
+      firstLoginDone: false, userHandle: ensureUserHandle(null),
+    };
   }
   return {
     username: row.username,
     password: row.password,
     passwordHash: row.password_hash,
     firstLoginDone: row.first_login_done === 1,
+    userHandle: ensureUserHandle(row.user_handle),
   };
+}
+
+// First read after the v3 migration: user_handle is NULL. Mint a stable
+// random 16-byte identifier and persist it. After this, subsequent reads
+// return the same value forever (changing it would invalidate every
+// registered passkey).
+function ensureUserHandle(existing: Buffer | null): Buffer {
+  if (existing && existing.length > 0) return existing;
+  const handle = crypto.randomBytes(16);
+  getDb()
+    .prepare('UPDATE admin_credentials SET user_handle = ? WHERE id = 1')
+    .run(handle);
+  return handle;
 }
 
 export function loadAdminCredentials(): AdminCredentials {
   const r = loadAdminCredentialsRaw();
-  return { username: r.username, passwordHash: r.passwordHash, firstLoginDone: r.firstLoginDone };
+  return {
+    username: r.username,
+    passwordHash: r.passwordHash,
+    firstLoginDone: r.firstLoginDone,
+    userHandle: r.userHandle,
+  };
 }
 
 export function saveAdminCredentials(c: AdminCredentials): void {
   // Always clear the legacy plaintext column on save — the lazy-migration
   // hook should already have done it, but this is the belt-and-braces.
+  // user_handle is preserved (it's set by ensureUserHandle and never
+  // overwritten here).
   getDb()
     .prepare(
       `UPDATE admin_credentials
@@ -244,6 +275,75 @@ export function saveAdminCredentials(c: AdminCredentials): void {
          WHERE id = 1`,
     )
     .run(c.username, c.passwordHash, c.firstLoginDone ? 1 : 0);
+}
+
+// ──────────────────────── webauthn credentials ─────────────────────────
+
+interface PasskeyRow {
+  id: string;
+  credential_id: Buffer;
+  public_key: Buffer;
+  counter: number;
+  transports: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+function rowToPasskey(r: PasskeyRow): Passkey {
+  return {
+    id: r.id,
+    credentialId: r.credential_id,
+    publicKey: r.public_key,
+    counter: r.counter,
+    transports: JSON.parse(r.transports) as string[],
+    label: r.label,
+    createdAt: new Date(r.created_at),
+    lastUsedAt: r.last_used_at ? new Date(r.last_used_at) : null,
+  };
+}
+
+export function listPasskeys(): Passkey[] {
+  const rows = getDb()
+    .prepare('SELECT * FROM webauthn_credentials ORDER BY created_at ASC')
+    .all() as PasskeyRow[];
+  return rows.map(rowToPasskey);
+}
+
+export function findPasskeyByCredentialId(credentialId: Buffer): Passkey | undefined {
+  const row = getDb()
+    .prepare('SELECT * FROM webauthn_credentials WHERE credential_id = ?')
+    .get(credentialId) as PasskeyRow | undefined;
+  return row ? rowToPasskey(row) : undefined;
+}
+
+export function savePasskey(p: Passkey): void {
+  getDb()
+    .prepare(
+      `INSERT INTO webauthn_credentials
+         (id, credential_id, public_key, counter, transports, label, created_at, last_used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         counter = excluded.counter,
+         label = excluded.label,
+         last_used_at = excluded.last_used_at`,
+    )
+    .run(
+      p.id, p.credentialId, p.publicKey, p.counter,
+      JSON.stringify(p.transports), p.label,
+      p.createdAt.toISOString(),
+      p.lastUsedAt ? p.lastUsedAt.toISOString() : null,
+    );
+}
+
+export function deletePasskey(id: string): boolean {
+  const r = getDb().prepare('DELETE FROM webauthn_credentials WHERE id = ?').run(id);
+  return r.changes > 0;
+}
+
+export function deleteAllPasskeys(): number {
+  const r = getDb().prepare('DELETE FROM webauthn_credentials').run();
+  return r.changes;
 }
 
 // ──────────────────────────── admin sessions ───────────────────────────

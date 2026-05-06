@@ -745,6 +745,124 @@ function notifyUnauthorizedIfNeeded(response: Response): void {
   }
 }
 
+// ─────────────────────────────── passkey ──────────────────────────────
+
+export interface PasskeyStatus {
+  configured: boolean;
+  registeredCount: number;
+}
+
+export interface PasskeyCredentialInfo {
+  id: string;
+  label: string;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function getPasskeyStatus(): Promise<PasskeyStatus> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/status`);
+  if (!response.ok) return { configured: false, registeredCount: 0 };
+  return response.json();
+}
+
+/**
+ * Register a passkey. Caller must already be authenticated (we use the
+ * existing session token). Throws on failure with a human-readable message.
+ */
+export async function registerPasskey(token: string, label: string): Promise<{ id: string; label: string }> {
+  // Lazy-import the browser SDK so it isn't pulled into the main bundle
+  // for non-admin users.
+  const { startRegistration } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/register/options`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(optsRes);
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'Failed to start passkey registration' }));
+    throw new Error(err.error || 'Failed to start passkey registration');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  // Browser prompts the user; throws if they cancel or no authenticator.
+  const attestation = await startRegistration({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/register/verify`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ticket, label, response: attestation }),
+  });
+  notifyUnauthorizedIfNeeded(verifyRes);
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey registration failed' }));
+    throw new Error(err.error || 'Passkey registration failed');
+  }
+  return verifyRes.json();
+}
+
+/**
+ * Sign in with a passkey. Returns the same shape as adminLogin so callers
+ * can drop the result into adminStore.setAuth().
+ */
+export async function signInWithPasskey(): Promise<AdminLoginResponse> {
+  const { startAuthentication } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/auth/options`, { method: 'POST' });
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'No passkeys registered' }));
+    throw new Error(err.error || 'No passkeys registered');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  const assertion = await startAuthentication({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/auth/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, response: assertion }),
+  });
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey sign-in failed' }));
+    throw new Error(err.error || 'Passkey sign-in failed');
+  }
+  return verifyRes.json();
+}
+
+export async function listRegisteredPasskeys(token: string): Promise<PasskeyCredentialInfo[]> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error('Failed to list passkeys');
+  const body = await response.json();
+  return body.credentials;
+}
+
+export async function deleteRegisteredPasskey(token: string, id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials/${id}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Failed to delete passkey' }));
+    throw new Error(err.error || 'Failed to delete passkey');
+  }
+}
+
+/**
+ * Whether the current browser supports WebAuthn at all. Use this to hide
+ * passkey UI on platforms that can't deliver it.
+ */
+export function browserSupportsPasskeys(): boolean {
+  return typeof window !== 'undefined' && !!window.PublicKeyCredential;
+}
+
 /**
  * Admin login
  */

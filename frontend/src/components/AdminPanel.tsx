@@ -18,6 +18,13 @@ import {
   getJoinLink,
   formatRoomCode,
   updateRoomDisplayName,
+  getPasskeyStatus,
+  registerPasskey,
+  signInWithPasskey,
+  listRegisteredPasskeys,
+  deleteRegisteredPasskey,
+  browserSupportsPasskeys,
+  type PasskeyCredentialInfo,
   getServerSettings,
   updateServerSettings,
   WEBHOOK_EVENTS,
@@ -99,6 +106,38 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+
+  // Passkey availability — inferred from /api/admin/webauthn/status. We
+  // hide the "Sign in with passkey" button when no passkeys are registered
+  // OR the browser doesn't support WebAuthn.
+  const [passkeyStatus, setPasskeyStatus] = useState<{ configured: boolean; registeredCount: number }>({
+    configured: false,
+    registeredCount: 0,
+  });
+  const [isPasskeyAuthing, setIsPasskeyAuthing] = useState(false);
+
+  // Passkey management (Settings tab).
+  const [passkeyList, setPasskeyList] = useState<PasskeyCredentialInfo[]>([]);
+  const [isRegisteringPasskey, setIsRegisteringPasskey] = useState(false);
+  const [newPasskeyLabel, setNewPasskeyLabel] = useState('');
+  const [passkeyError, setPasskeyError] = useState<string>('');
+
+  useEffect(() => {
+    getPasskeyStatus().then(setPasskeyStatus).catch(() => {});
+  }, []);
+
+  const handlePasskeyLogin = useCallback(async () => {
+    setLoginError('');
+    setIsPasskeyAuthing(true);
+    try {
+      const response = await signInWithPasskey();
+      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Passkey sign-in failed');
+    } finally {
+      setIsPasskeyAuthing(false);
+    }
+  }, [setAuth]);
   const wsRef = useRef<WebSocket | null>(null);
   const [wsState, setWsState] = useState<WsConnectionState>('disconnected');
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -517,6 +556,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     if (activeTab === 'settings' && !settings && !settingsLoading) {
       loadSettings();
     }
+    if (activeTab === 'settings' && token) {
+      listRegisteredPasskeys(token).then(setPasskeyList).catch(() => {});
+    }
   }, [activeTab, settings, settingsLoading, loadSettings]);
 
   // Handle settings update
@@ -590,6 +632,27 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             >
               Login
             </button>
+
+            {passkeyStatus.configured && passkeyStatus.registeredCount > 0 && browserSupportsPasskeys() && (
+              <>
+                <div className="flex items-center gap-3 text-meet-text-tertiary text-xs">
+                  <div className="flex-1 h-px bg-meet-border" />
+                  <span>or</span>
+                  <div className="flex-1 h-px bg-meet-border" />
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePasskeyLogin}
+                  disabled={isPasskeyAuthing}
+                  className="w-full bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary font-medium py-3 px-6 rounded-xl border border-meet-border transition-smooth flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                  </svg>
+                  {isPasskeyAuthing ? 'Authenticating…' : 'Sign in with passkey'}
+                </button>
+              </>
+            )}
           </form>
         </div>
       </div>
@@ -1064,6 +1127,94 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                           • <code className="text-meet-accent">https://*.neoncore.io</code> - All HTTPS subdomains
                         </p>
                       </div>
+                    </div>
+
+                    {/* Passkeys */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary mb-2">Passkeys</h3>
+                      <p className="text-sm text-meet-text-secondary mb-4">
+                        Sign in without a password using your device's biometrics or security key.
+                        {!passkeyStatus.configured && ' Disabled — PUBLIC_BASE_URL not configured.'}
+                        {passkeyStatus.configured && !browserSupportsPasskeys() && ' This browser does not support WebAuthn.'}
+                      </p>
+
+                      {passkeyError && (
+                        <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm mb-3">
+                          {passkeyError}
+                        </div>
+                      )}
+
+                      {passkeyList.length === 0 ? (
+                        <p className="text-sm text-meet-text-tertiary mb-4">No passkeys registered yet.</p>
+                      ) : (
+                        <ul className="space-y-2 mb-4">
+                          {passkeyList.map((pk) => (
+                            <li key={pk.id} className="flex items-center justify-between bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2">
+                              <div className="min-w-0">
+                                <div className="text-sm text-meet-text-primary truncate">{pk.label}</div>
+                                <div className="text-xs text-meet-text-tertiary">
+                                  added {new Date(pk.createdAt).toLocaleDateString()}
+                                  {pk.lastUsedAt ? ` · last used ${new Date(pk.lastUsedAt).toLocaleDateString()}` : ' · never used'}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (!token) return;
+                                  setPasskeyError('');
+                                  try {
+                                    await deleteRegisteredPasskey(token, pk.id);
+                                    setPasskeyList((list) => list.filter((p) => p.id !== pk.id));
+                                    const status = await getPasskeyStatus();
+                                    setPasskeyStatus(status);
+                                  } catch (e) {
+                                    setPasskeyError(e instanceof Error ? e.message : 'Failed to delete passkey');
+                                  }
+                                }}
+                                className="text-meet-error hover:underline text-sm"
+                              >
+                                Remove
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+
+                      {passkeyStatus.configured && browserSupportsPasskeys() && (
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={newPasskeyLabel}
+                            onChange={(e) => setNewPasskeyLabel(e.target.value)}
+                            placeholder="Label (e.g. 'Work laptop')"
+                            className="flex-1 bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-2 text-sm text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                          />
+                          <button
+                            type="button"
+                            disabled={isRegisteringPasskey}
+                            onClick={async () => {
+                              if (!token) return;
+                              setPasskeyError('');
+                              setIsRegisteringPasskey(true);
+                              try {
+                                await registerPasskey(token, newPasskeyLabel || 'Passkey');
+                                setNewPasskeyLabel('');
+                                const list = await listRegisteredPasskeys(token);
+                                setPasskeyList(list);
+                                const status = await getPasskeyStatus();
+                                setPasskeyStatus(status);
+                              } catch (e) {
+                                setPasskeyError(e instanceof Error ? e.message : 'Failed to register passkey');
+                              } finally {
+                                setIsRegisteringPasskey(false);
+                              }
+                            }}
+                            className="bg-meet-accent hover:bg-meet-accent-dark disabled:opacity-50 text-meet-bg font-medium px-4 py-2 rounded-xl transition-smooth text-sm whitespace-nowrap"
+                          >
+                            {isRegisteringPasskey ? 'Registering…' : 'Register passkey'}
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     {/* Settings Info */}

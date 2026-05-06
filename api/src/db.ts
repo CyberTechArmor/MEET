@@ -107,6 +107,37 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
         ADD COLUMN password_hash TEXT NOT NULL DEFAULT '';
     `);
   },
+
+  // v3 — WebAuthn / passkey support.
+  //
+  // user_handle is a stable 16-byte identifier the WebAuthn protocol uses
+  // to refer to the admin account. It MUST NOT change after a passkey is
+  // registered, otherwise existing passkeys become unusable. We create it
+  // lazily in index.ts on first read; the column is nullable here so the
+  // migration can add it without picking a value.
+  //
+  // webauthn_credentials stores everything we need to verify an assertion
+  // (credential id, COSE public key, counter, transports). Multiple
+  // passkeys per admin are allowed.
+  (db) => {
+    db.exec(`
+      ALTER TABLE admin_credentials
+        ADD COLUMN user_handle BLOB;
+
+      CREATE TABLE webauthn_credentials (
+        id              TEXT PRIMARY KEY,
+        credential_id   BLOB NOT NULL UNIQUE,
+        public_key      BLOB NOT NULL,
+        counter         INTEGER NOT NULL DEFAULT 0,
+        transports      TEXT NOT NULL DEFAULT '[]',  -- JSON array
+        label           TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        last_used_at    TEXT
+      );
+      CREATE INDEX idx_webauthn_credentials_credential_id
+        ON webauthn_credentials(credential_id);
+    `);
+  },
 ];
 
 function currentSchemaVersion(db: Database.Database): number {

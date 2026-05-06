@@ -48,9 +48,18 @@ import type { ApiKey, Webhook, PersistedSettings } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword } from './auth.js';
+import * as webauthn from './webauthn.js';
 
 // Open the database before anything else can touch it.
 getDb();
+
+// Configure WebAuthn from the public-facing URL. Three-domain mode passes
+// the API URL as an extra origin so a passkey registered against
+// meet.<host> can also be used when the SPA is served by api.<host>.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || '';
+const PUBLIC_LIVEKIT_URL = process.env.PUBLIC_LIVEKIT_URL || '';
+webauthn.configureWebAuthn(PUBLIC_BASE_URL, [PUBLIC_API_URL, PUBLIC_LIVEKIT_URL]);
 
 // Lazy-migrate any v1 plaintext admin password into the v2 password_hash
 // column. Runs once per process; subsequent reads see only the hash.
@@ -62,6 +71,7 @@ getDb();
       username: raw.username,
       passwordHash: hash,
       firstLoginDone: raw.firstLoginDone,
+      userHandle: raw.userHandle,
     });
     console.log('[migration] hashed legacy plaintext admin password (scrypt)');
   }
@@ -1352,6 +1362,7 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
       username,
       passwordHash: adminPasswordHash,
       firstLoginDone: true,
+      userHandle: store.loadAdminCredentialsRaw().userHandle,
     });
     console.log(`Admin credentials set by first login: ${username}`);
   }
@@ -1382,6 +1393,119 @@ app.post('/api/admin/logout', authenticateAdmin, (req: AuthRequest, res: Respons
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
     store.deleteAdminSession(token);
+  }
+  res.json({ success: true });
+});
+
+// ─────────────────────── WebAuthn / passkey ────────────────────────────
+//
+// Tells the SPA whether passkeys are usable on this deployment.
+// Public so the login form can show or hide the "Sign in with passkey"
+// button without requiring auth itself.
+app.get('/api/admin/webauthn/status', (_req: Request, res: Response) => {
+  res.json({
+    configured: webauthn.isWebAuthnConfigured(),
+    registeredCount: store.listPasskeys().length,
+  });
+});
+
+// Step 1 of registering a new passkey. Requires existing authentication
+// (password or session) so a randomly visiting attacker can't claim a
+// passkey on top of an admin account.
+app.post('/api/admin/webauthn/register/options', authenticateAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const cred = store.loadAdminCredentials();
+    const result = await webauthn.buildRegistrationOptions(cred.username || 'admin', cred.userHandle);
+    res.json(result);
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+interface PasskeyRegisterVerifyBody {
+  ticket: string;
+  label: string;
+  response: webauthn.RegistrationVerifyInput['response'];
+}
+
+app.post('/api/admin/webauthn/register/verify', authenticateAdmin, async (req: Request<object, object, PasskeyRegisterVerifyBody>, res: Response) => {
+  try {
+    const { ticket, label, response } = req.body;
+    if (!ticket || !response) {
+      res.status(400).json({ error: 'ticket and response are required' });
+      return;
+    }
+    const result = await webauthn.verifyRegistration({ ticket, label, response });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+// Step 1 of signing in with a passkey. NOT authenticated — this IS the
+// auth.
+app.post('/api/admin/webauthn/auth/options', async (_req: Request, res: Response) => {
+  try {
+    const result = await webauthn.buildAuthOptions();
+    res.json(result);
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+interface PasskeyAuthVerifyBody {
+  ticket: string;
+  response: webauthn.AuthVerifyInput['response'];
+}
+
+app.post('/api/admin/webauthn/auth/verify', async (req: Request<object, object, PasskeyAuthVerifyBody>, res: Response) => {
+  try {
+    const { ticket, response } = req.body;
+    if (!ticket || !response) {
+      res.status(400).json({ error: 'ticket and response are required' });
+      return;
+    }
+    await webauthn.verifyAuth({ ticket, response });
+
+    // Issue a session token (same shape as password login).
+    const token = generateSessionToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+    store.purgeExpiredAdminSessions();
+
+    res.json({
+      success: true,
+      token,
+      expiresAt: expiresAt.toISOString(),
+      isFirstLogin: false,
+      username: adminUsername,
+    });
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 401;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+// List + delete registered passkeys.
+app.get('/api/admin/webauthn/credentials', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json({
+    credentials: store.listPasskeys().map((p) => ({
+      id: p.id,
+      label: p.label,
+      transports: p.transports,
+      createdAt: p.createdAt.toISOString(),
+      lastUsedAt: p.lastUsedAt ? p.lastUsedAt.toISOString() : null,
+    })),
+  });
+});
+
+app.delete('/api/admin/webauthn/credentials/:id', authenticateAdmin, (req: Request<{ id: string }>, res: Response) => {
+  if (!store.deletePasskey(req.params.id)) {
+    res.status(404).json({ error: 'Passkey not found' });
+    return;
   }
   res.json({ success: true });
 });
