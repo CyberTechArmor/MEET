@@ -331,6 +331,20 @@ To back up or inspect the file from the host:
 docker compose cp meet-api:/data/meet.db ./meet-backup.db
 ```
 
+### Lost admin password or passkey
+
+Run from the external-proxy directory on the host:
+
+```bash
+bash deploy/external-proxy/reset-admin.sh --help
+bash deploy/external-proxy/reset-admin.sh --set-password 'newpass'
+bash deploy/external-proxy/reset-admin.sh --clear-passkeys
+bash deploy/external-proxy/reset-admin.sh                # default: full reset (interactive password)
+```
+
+The script execs into the running `meet-api` container and edits the
+SQLite database directly — no API restart required.
+
 Note: this is the first MEET version with persistent state. Prior to it,
 admin keys/webhooks/settings were lost on every container recreate.
 Running `update.sh` from a previous install creates an empty database on
