@@ -522,6 +522,11 @@ Configure webhooks to receive real-time notifications for events like:
                   type: 'object',
                   properties: {
                     publicAccessEnabled: { type: 'boolean', description: 'Whether public (non-API) access is allowed' },
+                    defaultVideoQuality: {
+                      type: 'string',
+                      enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                      description: 'Platform-wide default video quality preset.',
+                    },
                     version: { type: 'string', example: '1.0.0' },
                   },
                 },
@@ -565,6 +570,11 @@ Configure webhooks to receive real-time notifications for events like:
                     participantName: { type: 'string' },
                     participantIdentity: { type: 'string' },
                     isHost: { type: 'boolean' },
+                    quality: {
+                      type: 'string',
+                      enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                      description: 'Video quality preset chosen for this participant. Per-room override (set when the room was created) wins over the platform default. The frontend should call setVideoQualityPreset(quality) before connecting.',
+                    },
                   },
                 },
               },
@@ -721,6 +731,11 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited' },
                         maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited' },
                         iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty = allow all (*)' },
+                        defaultVideoQuality: {
+                          type: 'string',
+                          enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                          description: 'Platform-wide default video quality preset.',
+                        },
                       },
                     },
                     recommendations: {
@@ -729,6 +744,11 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer', description: 'Recommended based on server resources' },
                         maxConcurrentMeetings: { type: 'integer', description: 'Recommended based on server resources' },
                       },
+                    },
+                    videoQualityOptions: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['auto', 'high', 'max', 'balanced', 'low'] },
+                      description: 'Valid values for defaultVideoQuality.',
                     },
                   },
                 },
@@ -752,6 +772,11 @@ Configure webhooks to receive real-time notifications for events like:
                   maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
                   maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
                   iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty array = allow all (*)' },
+                  defaultVideoQuality: {
+                    type: 'string',
+                    enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                    description: 'Platform-wide default video quality preset for new tokens.',
+                  },
                 },
               },
             },
@@ -773,6 +798,7 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer' },
                         maxConcurrentMeetings: { type: 'integer' },
                         iframeAllowedDomains: { type: 'array', items: { type: 'string' } },
+                        defaultVideoQuality: { type: 'string', enum: ['auto', 'high', 'max', 'balanced', 'low'] },
                       },
                     },
                   },
@@ -834,6 +860,11 @@ Configure webhooks to receive real-time notifications for events like:
                   displayName: { type: 'string', description: 'Friendly display name for the room', example: 'Team Standup' },
                   maxParticipants: { type: 'integer', description: 'Maximum number of participants', default: 100 },
                   emptyTimeout: { type: 'integer', description: 'Seconds before empty room is deleted', default: 300 },
+                  quality: {
+                    type: 'string',
+                    enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                    description: 'Per-room video quality override. When set, every token minted for this room returns this preset instead of the platform default. Lost on API restart (transient room metadata).',
+                  },
                 },
               },
             },
@@ -983,6 +1014,201 @@ Configure webhooks to receive real-time notifications for events like:
         responses: {
           '200': { description: 'API key revoked' },
           '404': { description: 'API key not found' },
+        },
+      },
+    },
+    '/api/admin/api-keys/{keyId}/rotate': {
+      post: {
+        tags: ['API Keys'],
+        summary: 'Rotate API key secret',
+        description: 'Generate a new secret for the given API key, preserving id/name/permissions. The previous secret stops working immediately. The new secret is returned exactly once.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'keyId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': {
+            description: 'API key rotated; new secret in `key`.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    key: { type: 'string', description: 'New secret. Only returned by this endpoint; cannot be recovered later.' },
+                    permissions: { type: 'array', items: { type: 'string' } },
+                    createdAt: { type: 'string', format: 'date-time', description: 'Original creation timestamp; not changed by rotation.' },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'API key not found' },
+        },
+      },
+    },
+    '/api/admin/webauthn/status': {
+      get: {
+        tags: ['Passkeys'],
+        summary: 'Passkey availability',
+        description: 'Check whether passkeys are configured (PUBLIC_BASE_URL is set) and how many are registered. No authentication required so the login form can show or hide the "Sign in with passkey" button.',
+        responses: {
+          '200': {
+            description: 'Passkey status',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    configured: { type: 'boolean', description: 'False if PUBLIC_BASE_URL is empty.' },
+                    registeredCount: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/webauthn/register/options': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Begin passkey registration',
+        description: 'Returns a WebAuthn registration challenge for the calling admin. The browser passes this to navigator.credentials.create(); send the result to /register/verify.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Challenge generated',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ticket: { type: 'string', description: 'Opaque server-side challenge id; pass back to /register/verify.' },
+                    options: { type: 'object', description: 'PublicKeyCredentialCreationOptionsJSON.' },
+                  },
+                },
+              },
+            },
+          },
+          '503': { description: 'Passkeys not configured (PUBLIC_BASE_URL empty)' },
+        },
+      },
+    },
+    '/api/admin/webauthn/register/verify': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Complete passkey registration',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'response'],
+                properties: {
+                  ticket: { type: 'string' },
+                  label: { type: 'string', description: "Human-readable name for the passkey, e.g. 'Work laptop'." },
+                  response: { type: 'object', description: 'Authenticator attestation (RegistrationResponseJSON).' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Passkey registered',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              success: { type: 'boolean' }, id: { type: 'string' }, label: { type: 'string' },
+            } } } },
+          },
+          '400': { description: 'Challenge expired or attestation failed verification' },
+        },
+      },
+    },
+    '/api/admin/webauthn/auth/options': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Begin passkey sign-in',
+        description: 'Public endpoint — this is the auth itself. Returns a WebAuthn authentication challenge. The browser passes it to navigator.credentials.get(); send the result to /auth/verify.',
+        responses: {
+          '200': {
+            description: 'Challenge generated',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              ticket: { type: 'string' },
+              options: { type: 'object', description: 'PublicKeyCredentialRequestOptionsJSON.' },
+            } } } },
+          },
+          '404': { description: 'No passkeys registered yet' },
+          '503': { description: 'Passkeys not configured (PUBLIC_BASE_URL empty)' },
+        },
+      },
+    },
+    '/api/admin/webauthn/auth/verify': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Complete passkey sign-in',
+        description: 'Public endpoint. Verifies the assertion and issues an admin session token (same shape as /api/admin/login).',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['ticket', 'response'], properties: {
+            ticket: { type: 'string' },
+            response: { type: 'object', description: 'Authenticator assertion (AuthenticationResponseJSON).' },
+          } } } },
+        },
+        responses: {
+          '200': {
+            description: 'Session token issued',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              success: { type: 'boolean' },
+              token: { type: 'string' },
+              expiresAt: { type: 'string', format: 'date-time' },
+              isFirstLogin: { type: 'boolean' },
+              username: { type: 'string' },
+            } } } },
+          },
+          '400': { description: 'Invalid request (missing ticket or response)' },
+          '401': { description: 'Assertion failed verification or unknown passkey' },
+        },
+      },
+    },
+    '/api/admin/webauthn/credentials': {
+      get: {
+        tags: ['Passkeys'],
+        summary: 'List registered passkeys',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'List of registered passkeys',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              credentials: { type: 'array', items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  label: { type: 'string' },
+                  transports: { type: 'array', items: { type: 'string' } },
+                  createdAt: { type: 'string', format: 'date-time' },
+                  lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+                },
+              } },
+            } } } },
+          },
+        },
+      },
+    },
+    '/api/admin/webauthn/credentials/{id}': {
+      delete: {
+        tags: ['Passkeys'],
+        summary: 'Delete a registered passkey',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'Passkey deleted' },
+          '404': { description: 'Passkey not found' },
         },
       },
     },
