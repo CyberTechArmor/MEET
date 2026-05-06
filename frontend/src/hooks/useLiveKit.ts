@@ -12,7 +12,7 @@ import {
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll, setVideoQualityPreset } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
@@ -208,7 +208,15 @@ export function useLiveKit() {
       setConnectionState(ConnectionState.Connecting);
 
       // Get token from API
-      const { token, isHost: hostStatus } = await getToken(roomCode, displayName);
+      const tokenResponse = await getToken(roomCode, displayName);
+      const { token, isHost: hostStatus, quality } = tokenResponse;
+
+      // Server picked a quality preset for this room (per-room override or
+      // platform default). Apply it before we build the room options below
+      // so the room picks up the right simulcast layers / codec / etc.
+      if (quality) {
+        setVideoQualityPreset(quality);
+      }
 
       // Set host status and room code
       setIsHost(hostStatus);

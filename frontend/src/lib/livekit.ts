@@ -71,16 +71,20 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
     audioRed: true,
   },
   /**
-   * Adaptive quality (recommended)
-   * Best for: Most use cases, automatically adapts to network conditions
-   * Resolution: 1080p capture with dynamic adjustment
-   * Bitrate: Adaptive based on network
+   * Adaptive quality (default).
+   *
+   * Captures at 1080p and ships three simulcast layers including 1080p,
+   * so LiveKit's selective forwarding can hand each receiver the highest
+   * resolution their downlink + decoder can handle. Combined with
+   * adaptiveStream on the receiver, this is "push the highest possible
+   * while in a call" — clients on a flaky connection downgrade
+   * automatically without blocking everyone else.
    */
   auto: {
     captureResolution: VideoPresets.h1080,
-    simulcastLayers: [VideoPresets.h180, VideoPresets.h360, VideoPresets.h720],
+    simulcastLayers: [VideoPresets.h180, VideoPresets.h540, VideoPresets.h1080],
     videoCodec: 'vp9',
-    screenSharePreset: ScreenSharePresets.h1080fps15,
+    screenSharePreset: ScreenSharePresets.h1080fps30,
     audioDtx: true,
     audioRed: true,
   },
@@ -114,8 +118,13 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
   },
 };
 
-/** Current video quality preset (can be changed at runtime) */
-let currentQualityPreset: VideoQualityPreset = 'high';
+/** Current video quality preset (can be changed at runtime).
+ *
+ * Default is 'auto' — adaptive simulcast pushing the highest layer the
+ * network sustains. The /api/token response can override this per-room
+ * via its `quality` field; useLiveKit applies it before connect().
+ */
+let currentQualityPreset: VideoQualityPreset = 'auto';
 
 /**
  * Set the video quality preset
@@ -265,6 +274,12 @@ export interface TokenResponse {
   participantName: string;
   participantIdentity: string;
   isHost: boolean;
+  /**
+   * Video quality preset chosen by the server for this participant.
+   * Per-room metadata wins over the platform default. Apply with
+   * setVideoQualityPreset() before connecting.
+   */
+  quality?: VideoQualityPreset;
 }
 
 export interface RoomCodeResponse {
@@ -1210,6 +1225,7 @@ export interface ServerSettings {
   maxParticipantsPerMeeting: number;
   maxConcurrentMeetings: number;
   iframeAllowedDomains: string[];
+  defaultVideoQuality: VideoQualityPreset;
 }
 
 export interface ServerSettingsResponse {
@@ -1218,6 +1234,7 @@ export interface ServerSettingsResponse {
     maxParticipantsPerMeeting: number;
     maxConcurrentMeetings: number;
   };
+  videoQualityOptions: VideoQualityPreset[];
 }
 
 /**

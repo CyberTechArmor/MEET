@@ -30,6 +30,19 @@ export interface AdminSession {
   expiresAt: Date;
 }
 
+// Mirrors the frontend VideoQualityPreset union. The backend doesn't
+// translate these into LiveKit codec / resolution parameters — that's the
+// frontend's job — it only passes the chosen preset back to the client
+// via /api/token, with per-room metadata taking precedence over the
+// platform default.
+export type VideoQualityPreset = 'auto' | 'high' | 'max' | 'balanced' | 'low';
+export const VIDEO_QUALITY_PRESET_VALUES: readonly VideoQualityPreset[] = [
+  'auto', 'high', 'max', 'balanced', 'low',
+];
+export function isValidVideoQuality(s: string): s is VideoQualityPreset {
+  return (VIDEO_QUALITY_PRESET_VALUES as readonly string[]).includes(s);
+}
+
 // Persisted, operator-editable subset of server settings.
 // recommendedMax* are derived at startup from host resources and are
 // never persisted.
@@ -38,6 +51,7 @@ export interface PersistedSettings {
   maxParticipantsPerMeeting: number;
   maxConcurrentMeetings: number;
   iframeAllowedDomains: string[];
+  defaultVideoQuality: VideoQualityPreset;
 }
 
 export interface AdminCredentials {

@@ -1037,6 +1037,30 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                       </div>
                     </div>
 
+                    {/* Default video quality */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary">Default video quality</h3>
+                      <p className="text-sm text-meet-text-tertiary mt-1 mb-4">
+                        Applied to every meeting unless the room was created with a per-room override.
+                        <br />
+                        <span className="text-meet-text-secondary">
+                          <strong>auto</strong>: dynamic — adaptive simulcast pushing the highest layer the network sustains (recommended).
+                        </span>
+                      </p>
+                      <select
+                        value={settings.defaultVideoQuality}
+                        onChange={(e) => handleUpdateSettings({ defaultVideoQuality: e.target.value as ServerSettings['defaultVideoQuality'] })}
+                        disabled={settingsSaving}
+                        className="bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      >
+                        <option value="auto">auto — dynamic (recommended)</option>
+                        <option value="max">max — 4K capture, highest possible</option>
+                        <option value="high">high — 1080p</option>
+                        <option value="balanced">balanced — 720p</option>
+                        <option value="low">low — 360p, lowest bandwidth</option>
+                      </select>
+                    </div>
+
                     {/* Iframe Embedding Domains */}
                     <div className="glass rounded-xl p-6">
                       <h3 className="text-lg font-semibold text-meet-text-primary">Iframe Embedding Domains</h3>

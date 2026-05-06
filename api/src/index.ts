@@ -44,7 +44,8 @@ const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_
 // login, so losing them on restart is acceptable. Room metadata is also
 // transient (display names while a room exists).
 
-import type { ApiKey, Webhook, PersistedSettings } from './types.js';
+import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset } from './types.js';
+import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword } from './auth.js';
@@ -78,9 +79,13 @@ webauthn.configureWebAuthn(PUBLIC_BASE_URL, [PUBLIC_API_URL, PUBLIC_LIVEKIT_URL]
 }
 
 // Room metadata for display names — transient.
+// videoQuality, when set, overrides the platform default for any token
+// minted against this room. Lost across restarts; re-set per room via the
+// admin API or implicitly when a room is created with `quality`.
 interface RoomMetadata {
   displayName: string;
   createdAt: Date;
+  videoQuality?: VideoQualityPreset;
 }
 
 // Admin credentials. Resolved with this priority:
@@ -121,6 +126,7 @@ interface ServerSettings {
   recommendedMaxParticipants: number;
   recommendedMaxMeetings: number;
   iframeAllowedDomains: string[]; // Empty array = allow all (*)
+  defaultVideoQuality: VideoQualityPreset; // platform-wide default
 }
 
 // Calculate recommended limits based on available resources
@@ -154,9 +160,16 @@ const SETTINGS_DEFAULTS: PersistedSettings = {
   maxParticipantsPerMeeting: 0, // 0 = unlimited
   maxConcurrentMeetings: 0, // 0 = unlimited
   iframeAllowedDomains: [], // Empty = allow all domains (*)
+  defaultVideoQuality: 'auto', // dynamic — pushes the highest layer the network sustains
 };
-const persistedSettings: PersistedSettings = store.loadSettings() ?? SETTINGS_DEFAULTS;
-if (!store.loadSettings()) store.saveSettings(persistedSettings);
+// Old persisted blobs predate defaultVideoQuality; merge with defaults so
+// fields added by a later schema version pick up sensible values without
+// requiring a forced settings save.
+const persistedRaw = store.loadSettings();
+const persistedSettings: PersistedSettings = persistedRaw
+  ? { ...SETTINGS_DEFAULTS, ...persistedRaw }
+  : SETTINGS_DEFAULTS;
+if (!persistedRaw) store.saveSettings(persistedSettings);
 
 // In-memory hot copy. The middleware at line ~245 reads serverSettings on
 // every request, so a per-request SQLite read would matter; we keep this
@@ -174,6 +187,7 @@ function persistServerSettings(): void {
     maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
     maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
     iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+    defaultVideoQuality: serverSettings.defaultVideoQuality,
   });
 }
 
@@ -422,6 +436,7 @@ app.get('/health', (_req: Request, res: Response) => {
 app.get('/api/status', (_req: Request, res: Response) => {
   res.json({
     publicAccessEnabled: serverSettings.publicAccessEnabled,
+    defaultVideoQuality: serverSettings.defaultVideoQuality,
     version: API_VERSION,
   });
 });
@@ -1267,12 +1282,20 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       isHost,
     });
 
+    // Quality preset to apply for this participant: per-room override
+    // takes precedence over the platform default. The frontend reads
+    // this and calls setVideoQualityPreset() before joining.
+    const roomMeta = roomMetadata.get(sanitizedRoomName);
+    const quality: VideoQualityPreset =
+      roomMeta?.videoQuality ?? serverSettings.defaultVideoQuality;
+
     res.json({
       token: jwt,
       roomName: sanitizedRoomName,
       participantName: sanitizedParticipantName,
       participantIdentity,
       isHost,
+      quality,
     });
   } catch (error) {
     console.error('Token generation error:', error);
@@ -1545,11 +1568,13 @@ app.get('/api/admin/settings', authenticateAdmin, (_req: AuthRequest, res: Respo
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
       iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+      defaultVideoQuality: serverSettings.defaultVideoQuality,
     },
     recommendations: {
       maxParticipantsPerMeeting: serverSettings.recommendedMaxParticipants,
       maxConcurrentMeetings: serverSettings.recommendedMaxMeetings,
     },
+    videoQualityOptions: VIDEO_QUALITY_PRESET_VALUES,
   });
 });
 
@@ -1559,10 +1584,11 @@ interface UpdateSettingsRequest {
   maxParticipantsPerMeeting?: number;
   maxConcurrentMeetings?: number;
   iframeAllowedDomains?: string[];
+  defaultVideoQuality?: string;
 }
 
 app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, UpdateSettingsRequest>, res: Response) => {
-  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings, iframeAllowedDomains } = req.body;
+  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings, iframeAllowedDomains, defaultVideoQuality } = req.body;
 
   if (publicAccessEnabled !== undefined) {
     serverSettings.publicAccessEnabled = publicAccessEnabled;
@@ -1594,6 +1620,16 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
     serverSettings.iframeAllowedDomains = validDomains;
   }
 
+  if (defaultVideoQuality !== undefined) {
+    if (!isValidVideoQuality(defaultVideoQuality)) {
+      res.status(400).json({
+        error: `defaultVideoQuality must be one of: ${VIDEO_QUALITY_PRESET_VALUES.join(', ')}`,
+      });
+      return;
+    }
+    serverSettings.defaultVideoQuality = defaultVideoQuality;
+  }
+
   persistServerSettings();
 
   res.json({
@@ -1603,6 +1639,7 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
       iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+      defaultVideoQuality: serverSettings.defaultVideoQuality,
     },
   });
 });
@@ -1636,10 +1673,21 @@ interface CreateRoomRequest {
   displayName?: string;
   maxParticipants?: number;
   emptyTimeout?: number; // seconds before empty room is deleted
+  // Optional video quality override for this room. When set, every token
+  // minted for this room returns this preset instead of the platform
+  // default. Useful for stamping low-bandwidth meetings (`'low'`) or
+  // quality-critical recordings (`'max'`).
+  quality?: string;
 }
 
 app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, object, CreateRoomRequest>, res: Response) => {
-  const { roomName, displayName, maxParticipants, emptyTimeout } = req.body;
+  const { roomName, displayName, maxParticipants, emptyTimeout, quality } = req.body;
+  if (quality !== undefined && !isValidVideoQuality(quality)) {
+    res.status(400).json({
+      error: `quality must be one of: ${VIDEO_QUALITY_PRESET_VALUES.join(', ')}`,
+    });
+    return;
+  }
 
   if (!roomName || typeof roomName !== 'string') {
     res.status(400).json({ error: 'roomName is required' });
@@ -1668,11 +1716,13 @@ app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, ob
       emptyTimeout: emptyTimeout || 300, // 5 minutes default
     });
 
-    // Store metadata if display name provided
-    if (displayName) {
+    // Store metadata if display name OR quality override provided.
+    if (displayName || quality) {
+      const existing = roomMetadata.get(sanitizedRoomName);
       roomMetadata.set(sanitizedRoomName, {
-        displayName,
-        createdAt: new Date(),
+        displayName: displayName ?? existing?.displayName ?? sanitizedRoomName,
+        createdAt: existing?.createdAt ?? new Date(),
+        videoQuality: (quality as VideoQualityPreset | undefined) ?? existing?.videoQuality,
       });
     }
 
