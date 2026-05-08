@@ -446,13 +446,13 @@ setup_repository() {
     # Check if we're already in the MEET directory with required files
     if [ -f "docker-compose.yml" ] && [ -f "docker-compose.proxy.yml" ] && [ -f "Caddyfile" ]; then
         echo -e "${GREEN}✓${NC} Already in MEET directory"
-        # Pull latest changes if it's a git repo
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
+        # NOTE: we used to remove .env at the repo root here. The
+        # external-proxy mode (option 5) keeps its .env at
+        # deploy/external-proxy/.env which we leave alone — install.sh
+        # is idempotent for it. Removing the root .env stays for the
+        # demo / Caddy / nginx / proxypilot modes whose state is at
+        # the root.
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -461,13 +461,7 @@ setup_repository() {
     if [ -d "$MEET_DIR" ] && [ -f "$MEET_DIR/docker-compose.yml" ]; then
         echo -e "${DIM}Found existing MEET directory, switching to it...${NC}"
         cd "$MEET_DIR"
-        # Pull latest changes
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -485,6 +479,52 @@ setup_repository() {
         echo "  Please check your internet connection and try again."
         echo "  Or manually clone: git clone $MEET_REPO"
         exit 1
+    fi
+}
+
+# Pull latest with visibility into branch, before/after hash, and
+# behind/ahead. Doesn't fail the install on git errors (the user might
+# have intentionally pinned a branch) — but never silently swallows
+# them either.
+pull_latest_or_warn() {
+    [ -d ".git" ] || return 0
+    local branch before_hash
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+    before_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+    if [ -z "$branch" ]; then
+        echo -e "  ${YELLOW}!${NC} HEAD is detached at ${before_hash} — skipping pull."
+        echo -e "  ${DIM}You'll deploy whatever's at this commit. Run 'git checkout <branch>' first if that's not what you want.${NC}"
+        return 0
+    fi
+
+    echo -e "  ${DIM}branch:  ${branch}${NC}"
+    echo -e "  ${DIM}commit:  ${before_hash}${NC}"
+
+    if ! git fetch origin "$branch" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} git fetch failed (network?) — continuing with local copy."
+        return 0
+    fi
+
+    local behind ahead
+    behind=$(git rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)
+    ahead=$(git rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+        echo -e "  ${YELLOW}!${NC} Local branch has diverged from origin/$branch ($ahead local, $behind remote)."
+        echo -e "  ${DIM}Skipping pull. Resolve manually if you want the remote commits.${NC}"
+        return 0
+    fi
+    if [ "$behind" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} already up to date"
+        return 0
+    fi
+
+    if git pull --ff-only origin "$branch" >/dev/null 2>&1; then
+        local after_hash
+        after_hash=$(git rev-parse --short HEAD)
+        echo -e "  ${GREEN}✓${NC} pulled $behind commit(s); now at $after_hash"
+    else
+        echo -e "  ${YELLOW}!${NC} pull failed (likely uncommitted changes) — continuing with local copy."
     fi
 }
 
@@ -1475,25 +1515,45 @@ install_with_external_proxy() {
         echo "    Cellular carriers use symmetric NAT — WebRTC's STUN-based hole punching"
         echo "    can't get through. Without TURN, phone-on-cellular calls fail even when"
         echo "    wifi works. Deploys a dedicated coturn container alongside livekit."
+        echo "    Single-domain (reuse the cert your reverse proxy already serves)"
+        echo "    is the default; runs unattended unless you explicitly opt out."
         echo ""
-        read -p "  Enable coturn? [Y/n]: " enable_turn
+
+        # Default ON. The opt-out exists for the rare operator who really
+        # doesn't want a TURN relay (testing, intranet-only, etc.). For
+        # everyone else, this is the path that makes cellular work.
+        # Non-interactive runs (no TTY) just take the default.
+        local enable_turn="Y"
+        if [ -t 0 ] && [ -t 1 ]; then
+            read -p "  Enable coturn? [Y/n]: " enable_turn
+        else
+            echo "  ${DIM}(non-interactive run — enabling by default)${NC}"
+        fi
         if [[ ! "$enable_turn" =~ ^[Nn]$ ]]; then
             turn_enabled="true"
 
+            # Cert mode: single-domain is the default and the single-press
+            # path. Operators who want the dedicated subdomain say so by
+            # answering "2"; everything else takes the default.
             echo ""
             echo "  Cert reuse:"
             echo "    [1] Single-domain — reuse the cert your reverse proxy already serves"
-            echo "        for $public_host. No new DNS record. (recommended)"
+            echo "        for $public_host. No new DNS record. (recommended, default)"
             echo "    [2] Dedicated turn.$public_host — separate cert, separate DNS record."
             echo ""
-            read -p "  Cert mode [1]: " cert_mode
-            cert_mode=${cert_mode:-1}
+            local cert_mode="1"
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  Cert mode [1]: " cert_mode
+                cert_mode=${cert_mode:-1}
+            fi
             case "$cert_mode" in
                 2)  turn_domain="turn.$public_host" ;;
                 *)  turn_domain="$public_host" ;;
             esac
-            read -p "  TURN hostname [$turn_domain]: " turn_domain_in
-            turn_domain="${turn_domain_in:-$turn_domain}"
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+                turn_domain="${turn_domain_in:-$turn_domain}"
+            fi
         else
             turn_enabled="false"
         fi
@@ -1761,6 +1821,24 @@ ENV_FILE
     echo -e "    ${YELLOW}    listen=udp:0.0.0.0:50000-60000 connect=udp:$bridge_ip:50000-60000${NC}"
     echo -e "  (note: connect=$bridge_ip, not 127.0.0.1 — livekit isn't on Docker's loopback)"
     echo ""
+
+    # If TURN was enabled, the cert mount is the one remaining manual
+    # step (we run inside the LXC; mount-cert.sh runs on the Incus host).
+    # Flag it loudly with the exact one-liner so it isn't missed.
+    if [ "$turn_enabled" = "true" ] && [ ! -d "$turn_cert_mount" ]; then
+        echo -e "  ${BOLD}${YELLOW}━━━ Final step (run on the Incus host, NOT this LXC) ━━━${NC}"
+        echo ""
+        echo "  TURN's TLS cert needs to be bind-mounted from the host. One command,"
+        echo "  idempotent, auto-discovers ProxyPilot's Caddy / host certbot / host"
+        echo "  Caddy. After it runs, coturn will start automatically."
+        echo ""
+        echo -e "    ${YELLOW}sudo bash <path-to-MEET-on-host>/deploy/external-proxy/mount-cert.sh${NC}"
+        echo ""
+        echo -e "  ${DIM}Or copy the mount-cert.sh out of the LXC if you don't have the repo on the host:${NC}"
+        echo -e "  ${DIM}    incus file pull <container>/root/MEET/deploy/external-proxy/mount-cert.sh /tmp/mount-cert.sh${NC}"
+        echo -e "  ${DIM}    sudo bash /tmp/mount-cert.sh${NC}"
+        echo ""
+    fi
     if [ "$layout" != "1" ]; then
         echo -e "  ${YELLOW}!${NC} ${BOLD}Three-domain mode:${NC} the frontend was built with"
         echo -e "    ${CYAN}PUBLIC_API_URL=$public_api_url${NC}"
