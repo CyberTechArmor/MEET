@@ -1515,25 +1515,45 @@ install_with_external_proxy() {
         echo "    Cellular carriers use symmetric NAT — WebRTC's STUN-based hole punching"
         echo "    can't get through. Without TURN, phone-on-cellular calls fail even when"
         echo "    wifi works. Deploys a dedicated coturn container alongside livekit."
+        echo "    Single-domain (reuse the cert your reverse proxy already serves)"
+        echo "    is the default; runs unattended unless you explicitly opt out."
         echo ""
-        read -p "  Enable coturn? [Y/n]: " enable_turn
+
+        # Default ON. The opt-out exists for the rare operator who really
+        # doesn't want a TURN relay (testing, intranet-only, etc.). For
+        # everyone else, this is the path that makes cellular work.
+        # Non-interactive runs (no TTY) just take the default.
+        local enable_turn="Y"
+        if [ -t 0 ] && [ -t 1 ]; then
+            read -p "  Enable coturn? [Y/n]: " enable_turn
+        else
+            echo "  ${DIM}(non-interactive run — enabling by default)${NC}"
+        fi
         if [[ ! "$enable_turn" =~ ^[Nn]$ ]]; then
             turn_enabled="true"
 
+            # Cert mode: single-domain is the default and the single-press
+            # path. Operators who want the dedicated subdomain say so by
+            # answering "2"; everything else takes the default.
             echo ""
             echo "  Cert reuse:"
             echo "    [1] Single-domain — reuse the cert your reverse proxy already serves"
-            echo "        for $public_host. No new DNS record. (recommended)"
+            echo "        for $public_host. No new DNS record. (recommended, default)"
             echo "    [2] Dedicated turn.$public_host — separate cert, separate DNS record."
             echo ""
-            read -p "  Cert mode [1]: " cert_mode
-            cert_mode=${cert_mode:-1}
+            local cert_mode="1"
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  Cert mode [1]: " cert_mode
+                cert_mode=${cert_mode:-1}
+            fi
             case "$cert_mode" in
                 2)  turn_domain="turn.$public_host" ;;
                 *)  turn_domain="$public_host" ;;
             esac
-            read -p "  TURN hostname [$turn_domain]: " turn_domain_in
-            turn_domain="${turn_domain_in:-$turn_domain}"
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+                turn_domain="${turn_domain_in:-$turn_domain}"
+            fi
         else
             turn_enabled="false"
         fi
@@ -1801,6 +1821,24 @@ ENV_FILE
     echo -e "    ${YELLOW}    listen=udp:0.0.0.0:50000-60000 connect=udp:$bridge_ip:50000-60000${NC}"
     echo -e "  (note: connect=$bridge_ip, not 127.0.0.1 — livekit isn't on Docker's loopback)"
     echo ""
+
+    # If TURN was enabled, the cert mount is the one remaining manual
+    # step (we run inside the LXC; mount-cert.sh runs on the Incus host).
+    # Flag it loudly with the exact one-liner so it isn't missed.
+    if [ "$turn_enabled" = "true" ] && [ ! -d "$turn_cert_mount" ]; then
+        echo -e "  ${BOLD}${YELLOW}━━━ Final step (run on the Incus host, NOT this LXC) ━━━${NC}"
+        echo ""
+        echo "  TURN's TLS cert needs to be bind-mounted from the host. One command,"
+        echo "  idempotent, auto-discovers ProxyPilot's Caddy / host certbot / host"
+        echo "  Caddy. After it runs, coturn will start automatically."
+        echo ""
+        echo -e "    ${YELLOW}sudo bash <path-to-MEET-on-host>/deploy/external-proxy/mount-cert.sh${NC}"
+        echo ""
+        echo -e "  ${DIM}Or copy the mount-cert.sh out of the LXC if you don't have the repo on the host:${NC}"
+        echo -e "  ${DIM}    incus file pull <container>/root/MEET/deploy/external-proxy/mount-cert.sh /tmp/mount-cert.sh${NC}"
+        echo -e "  ${DIM}    sudo bash /tmp/mount-cert.sh${NC}"
+        echo ""
+    fi
     if [ "$layout" != "1" ]; then
         echo -e "  ${YELLOW}!${NC} ${BOLD}Three-domain mode:${NC} the frontend was built with"
         echo -e "    ${CYAN}PUBLIC_API_URL=$public_api_url${NC}"

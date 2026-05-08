@@ -107,6 +107,30 @@ incus config device add "$CONTAINER" "$DEVICE_NAME" disk \
 
 echo "✓ Mounted $src_dir → $CONTAINER:$LXC_MOUNT_PATH (readonly)"
 echo "  Cert rotations propagate live; no cron required."
-echo ""
-echo "  Next, in the LXC:"
-echo "    cd /root/MEET && ./update.sh"
+echo
+
+# Trigger update.sh inside the LXC so coturn comes up automatically.
+# Skipping requires explicit SKIP_UPDATE=1 — without it, the operator
+# would run mount-cert.sh, see "✓ Mounted", and then have to remember
+# to also run update.sh in the LXC. That's the manual step we're
+# trying to remove.
+if [ "${SKIP_UPDATE:-0}" = "1" ]; then
+    echo "  SKIP_UPDATE=1 set — not invoking update.sh in the LXC."
+    echo "  Run it yourself: incus exec $CONTAINER -- bash -c 'cd /root/MEET && ./update.sh'"
+    exit 0
+fi
+
+LXC_REPO_DIR="$(dirname "$(dirname "$LXC_DEPLOY_DIR")")"
+echo "  Triggering update.sh inside $CONTAINER…"
+echo
+
+if incus exec "$CONTAINER" -- bash -c "[ -f $LXC_REPO_DIR/update.sh ]" 2>/dev/null; then
+    incus exec "$CONTAINER" --env TERM=xterm-256color -- bash -c "cd $LXC_REPO_DIR && ./update.sh --mode 5"
+    echo
+    echo "✓ Done. coturn should be running. Verify inside the LXC:"
+    echo "    incus exec $CONTAINER -- bash -c 'cd $LXC_DEPLOY_DIR && bash info.sh'"
+else
+    echo "  update.sh not found at $LXC_REPO_DIR/update.sh inside $CONTAINER."
+    echo "  Run it manually:"
+    echo "    incus exec $CONTAINER -- bash -c 'cd /path/to/MEET && ./update.sh'"
+fi

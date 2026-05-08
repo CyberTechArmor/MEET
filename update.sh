@@ -267,6 +267,104 @@ update_with_proxypilot() {
     echo -e "${DIM}with single/three-domain probes for ProxyPilot.${NC}"
 }
 
+# Walk an interactive operator through enabling TURN: ask for the
+# domain, generate creds, fill in cert filenames, write everything to
+# .env. Mirrors install.sh's TURN block so re-running install vs.
+# answering Y here lands the same .env state.
+#
+# $1 = compose dir (deploy/external-proxy)
+configure_turn_in_env() {
+    local dir="$1"
+    local env_file="$dir/.env"
+
+    # Read what we already have (in case some keys are present)
+    local turn_domain turn_username turn_password turn_cert_mount
+    turn_domain=$(grep -E '^TURN_DOMAIN='     "$env_file" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_username=$(grep -E '^TURN_USERNAME=' "$env_file" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_password=$(grep -E '^TURN_PASSWORD=' "$env_file" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_cert_mount=$(grep -E '^TURN_CERT_MOUNT=' "$env_file" 2>/dev/null | tail -n1 | cut -d= -f2-)
+
+    # Default TURN_DOMAIN to the configured PUBLIC_BASE_URL hostname
+    # (single-domain mode reuses the existing reverse-proxy cert).
+    if [ -z "$turn_domain" ]; then
+        local public_base_url public_host
+        public_base_url=$(grep -E '^PUBLIC_BASE_URL=' "$env_file" | tail -n1 | cut -d= -f2-)
+        public_host="${public_base_url#https://}"
+        public_host="${public_host#http://}"
+        public_host="${public_host%%/*}"
+        turn_domain="$public_host"
+    fi
+    echo
+    echo "  Cert reuse:"
+    echo "    [1] Single-domain — reuse the cert your reverse proxy already serves"
+    echo "        for $turn_domain. (recommended)"
+    echo "    [2] Dedicated turn.<host> — separate cert + DNS record."
+    echo
+    read -p "  Cert mode [1]: " cert_mode
+    cert_mode=${cert_mode:-1}
+    case "$cert_mode" in
+        2)  turn_domain="turn.$turn_domain" ;;
+        *)  ;;
+    esac
+    read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+    turn_domain="${turn_domain_in:-$turn_domain}"
+
+    # Generate creds if missing (idempotent on re-run).
+    [ -z "$turn_username" ] && turn_username="meet"
+    [ -z "$turn_password" ] && turn_password=$(openssl rand -hex 24 2>/dev/null \
+                                               || head -c 24 /dev/urandom | xxd -p)
+
+    # Cert mount default: prefer /var/meet-tls (host bind-mount target)
+    # if it exists; otherwise fall back to ./tls.
+    if [ -z "$turn_cert_mount" ]; then
+        if [ -d "/var/meet-tls" ]; then
+            turn_cert_mount="/var/meet-tls"
+        else
+            turn_cert_mount="./tls"
+            mkdir -p "$dir/tls"
+        fi
+    fi
+    local turn_cert_file="$turn_domain.crt"
+    local turn_key_file="$turn_domain.key"
+
+    # Write to .env. Replace existing keys, append missing ones. We avoid
+    # rewriting the whole file so the operator's other manual edits to
+    # .env (if any) survive.
+    write_env_kv() {
+        local key="$1" val="$2" file="$3"
+        if grep -qE "^${key}=" "$file"; then
+            # macOS sed and GNU sed differ on -i; use a temp file.
+            sed "s|^${key}=.*|${key}=${val}|" "$file" > "$file.tmp" \
+                && mv "$file.tmp" "$file"
+        else
+            printf '%s=%s\n' "$key" "$val" >> "$file"
+        fi
+    }
+    write_env_kv TURN_ENABLED       "true"             "$env_file"
+    write_env_kv TURN_DOMAIN        "$turn_domain"     "$env_file"
+    write_env_kv TURN_USERNAME      "$turn_username"   "$env_file"
+    write_env_kv TURN_PASSWORD      "$turn_password"   "$env_file"
+    write_env_kv TURN_TLS_PORT      "5349"             "$env_file"
+    write_env_kv TURN_UDP_PORT      "3478"             "$env_file"
+    write_env_kv TURN_RELAY_RANGE_START "30000"        "$env_file"
+    write_env_kv TURN_RELAY_RANGE_END   "32000"        "$env_file"
+    write_env_kv TURN_CERT_MOUNT    "$turn_cert_mount" "$env_file"
+    write_env_kv TURN_CERT_FILE     "$turn_cert_file"  "$env_file"
+    write_env_kv TURN_KEY_FILE      "$turn_key_file"   "$env_file"
+
+    echo -e "  ${GREEN}✓${NC} Wrote TURN config to $env_file"
+    echo -e "    ${DIM}TURN_DOMAIN=$turn_domain${NC}"
+    echo -e "    ${DIM}TURN_CERT_MOUNT=$turn_cert_mount  (file: $turn_cert_file)${NC}"
+
+    # Cert mount status. If missing, instruct the operator clearly.
+    if [ ! -d "$turn_cert_mount" ]; then
+        echo -e "  ${YELLOW}!${NC} Cert mount is not in place yet."
+        echo -e "  ${BOLD}Run on the Incus host (NOT inside this LXC):${NC}"
+        echo -e "    ${YELLOW}sudo bash $(pwd)/$dir/mount-cert.sh${NC}"
+        echo "  After that, this update will continue and coturn will start."
+    fi
+}
+
 update_with_external_proxy() {
     local dir="deploy/external-proxy"
     [ -f "$dir/docker-compose.yml" ] || { echo -e "${RED}✗ $dir/docker-compose.yml not found.${NC}"; exit 1; }
@@ -298,10 +396,26 @@ update_with_external_proxy() {
         fi
     else
         echo -e "  TURN:           ${YELLOW}disabled${NC}  ${DIM}(coturn will NOT be deployed)${NC}"
-        echo -e "  ${DIM}Cellular users will see 'Connecting…' even when wifi works. To enable:${NC}"
-        echo -e "  ${DIM}  • re-run install.sh option 5 and answer Y, OR${NC}"
-        echo -e "  ${DIM}  • edit $dir/.env: set TURN_ENABLED=true and TURN_DOMAIN=<your-host>,${NC}"
-        echo -e "  ${DIM}    then run mount-cert.sh on the Incus host, then re-run update.sh.${NC}"
+        echo -e "  ${DIM}Cellular users will see 'Connecting…' even when wifi works.${NC}"
+        echo
+
+        # Offer to enable it right now. Default Y because no operator who
+        # cares enough to be running update.sh wants cellular to fail.
+        # Skip the prompt entirely on non-TTY runs (cron, CI) — those
+        # operators set TURN_ENABLED=true in .env explicitly.
+        if [ -t 0 ] && [ -t 1 ]; then
+            local enable_turn_now
+            read -p "  Enable TURN now? [Y/n]: " enable_turn_now
+            if [[ ! "$enable_turn_now" =~ ^[Nn]$ ]]; then
+                configure_turn_in_env "$dir"
+                # Re-read so the rest of update_with_external_proxy sees
+                # the freshly-written values.
+                turn_enabled_now="true"
+            fi
+        else
+            echo -e "  ${DIM}Non-interactive run; skipping prompt. Set TURN_ENABLED=true in${NC}"
+            echo -e "  ${DIM}.env or re-run from a terminal to enable.${NC}"
+        fi
     fi
     echo
 
