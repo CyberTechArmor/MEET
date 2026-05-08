@@ -27,6 +27,13 @@ rtc:
     - stun.l.google.com:19302
     - stun1.l.google.com:19302
 
+# TURN config is driven entirely by env vars from .env (see compose file).
+# Cellular carriers use symmetric NAT, which breaks WebRTC's STUN-based
+# hole punching; clients on a phone hotspot only connect when LiveKit's
+# embedded TURN is reachable on TURN_TLS_PORT (default 5349). Leaving
+# this block out keeps the env defaults authoritative; LiveKit reads
+# LIVEKIT_TURN_* without anything declared here.
+
 # Fallback keys for direct `docker run` use only. The compose stack sets
 # LIVEKIT_KEYS in the environment, which OVERRIDES this block at runtime
 # (see deploy/external-proxy/docker-compose.yml). install.sh writes the

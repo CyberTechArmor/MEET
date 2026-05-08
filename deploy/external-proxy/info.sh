@@ -38,6 +38,14 @@ MEET_LIVEKIT_WS_PORT=${MEET_LIVEKIT_WS_PORT:-7880}
 MEET_LIVEKIT_TCP_PORT=${MEET_LIVEKIT_TCP_PORT:-7881}
 LIVEKIT_UDP_PORT_RANGE_START=${LIVEKIT_UDP_PORT_RANGE_START:-50000}
 LIVEKIT_UDP_PORT_RANGE_END=${LIVEKIT_UDP_PORT_RANGE_END:-60000}
+TURN_ENABLED=${TURN_ENABLED:-false}
+TURN_DOMAIN=${TURN_DOMAIN:-}
+TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
+TURN_UDP_PORT=${TURN_UDP_PORT:-3478}
+TURN_RELAY_RANGE_START=${TURN_RELAY_RANGE_START:-30000}
+TURN_RELAY_RANGE_END=${TURN_RELAY_RANGE_END:-32000}
+TURN_TLS_DIR=${TURN_TLS_DIR:-./tls}
+LIVEKIT_NODE_IP=${LIVEKIT_NODE_IP:-}
 
 # Pick the LXC's external IPv4 — the address the host reverse proxy actually
 # dials. Filter out Docker's per-network bridges (docker0, br-<hash>, veth*)
@@ -505,6 +513,94 @@ echo "      ${YELLOW}PUBLIC_API_URL${NC} and ${YELLOW}PUBLIC_LIVEKIT_URL${NC} se
 echo "      relative '/api' on the frontend host and you get 405s like"
 echo "      ${DIM}POST https://${public_host}/api/admin/login → 405${NC}."
 echo "      Rebuild with: ${YELLOW}docker compose build meet-frontend && docker compose up -d${NC}"
+echo
+
+# ──────────────────────── TURN (cellular fallback) ─────────────────────
+# Without TURN, calls fail on cellular networks (carrier-grade symmetric
+# NAT defeats hole punching). Report TURN's status, the cert files, and
+# whether the TLS port is reachable from this host.
+echo "${BOLD}TURN status${NC}  ${DIM}(cellular / symmetric-NAT fallback):${NC}"
+
+if [ "$TURN_ENABLED" != "true" ]; then
+    printf "    ${YELLOW}!${NC} disabled  ${DIM}(TURN_ENABLED=%s in .env)${NC}\n" "$TURN_ENABLED"
+    printf "    ${DIM}Cellular users will see 'Connecting…' even when wifi works.${NC}\n"
+    printf "    ${DIM}Re-run install.sh and answer Y to enable.${NC}\n"
+else
+    printf "    %-22s ${CYAN}%s${NC}\n" "Domain:"      "${TURN_DOMAIN:-<unset>}"
+    printf "    %-22s ${CYAN}%s${NC}\n" "TLS port:"    "${TURN_TLS_PORT}"
+    printf "    %-22s ${CYAN}%s${NC}\n" "UDP port:"    "${TURN_UDP_PORT}"
+    printf "    %-22s ${CYAN}%s${NC}\n" "Relay range:" "udp/${TURN_RELAY_RANGE_START}-${TURN_RELAY_RANGE_END}"
+
+    # Cert files present?
+    if [ -f "$TURN_TLS_DIR/turn.crt" ] && [ -f "$TURN_TLS_DIR/turn.key" ]; then
+        printf "    ${GREEN}✓${NC} cert files present  ${DIM}($TURN_TLS_DIR/turn.{crt,key})${NC}\n"
+        # If openssl is available, check the cert covers TURN_DOMAIN.
+        if command -v openssl >/dev/null 2>&1 && [ -n "$TURN_DOMAIN" ]; then
+            cert_subject=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -subject 2>/dev/null || true)
+            cert_sans=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -text 2>/dev/null \
+                        | awk '/X509v3 Subject Alternative Name/{getline; print}' || true)
+            if printf '%s' "$cert_subject $cert_sans" | grep -qiE "(CN ?= ?$TURN_DOMAIN|DNS:$TURN_DOMAIN|DNS:\*\.[^,]+)" ; then
+                printf "    ${GREEN}✓${NC} cert appears valid for ${BOLD}%s${NC}\n" "$TURN_DOMAIN"
+            else
+                printf "    ${YELLOW}!${NC} cert may NOT cover ${BOLD}%s${NC} — browsers will reject TURN/TLS\n" "$TURN_DOMAIN"
+                printf "    ${DIM}    Subject: %s${NC}\n" "$cert_subject"
+                if [ -n "$cert_sans" ]; then printf "    ${DIM}    SAN:     %s${NC}\n" "$cert_sans"; fi
+            fi
+            # Expiry check
+            if openssl x509 -in "$TURN_TLS_DIR/turn.crt" -checkend 86400 -noout >/dev/null 2>&1; then
+                cert_end=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -enddate 2>/dev/null | cut -d= -f2)
+                printf "    ${GREEN}✓${NC} cert expires ${DIM}%s${NC}\n" "$cert_end"
+            else
+                printf "    ${RED}✗${NC} cert has expired or expires within 24h — renew before clients fail\n"
+            fi
+        fi
+    else
+        printf "    ${RED}✗${NC} cert files MISSING  ${DIM}($TURN_TLS_DIR/turn.crt and turn.key required)${NC}\n"
+        printf "    ${DIM}LiveKit will fail to start. See $TURN_TLS_DIR/README.md for cert provisioning options.${NC}\n"
+    fi
+
+    # TLS port listening on the bridge?
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tlnH "sport = :$TURN_TLS_PORT" 2>/dev/null | grep -q LISTEN; then
+            printf "    ${GREEN}✓${NC} tcp/%s listening on the LXC\n" "$TURN_TLS_PORT"
+        else
+            printf "    ${RED}✗${NC} tcp/%s NOT listening — livekit may not be started or TURN failed to bind\n" "$TURN_TLS_PORT"
+        fi
+    fi
+
+    echo
+    echo "    ${BOLD}Verify from a phone on cellular${NC} ${DIM}(the only test that matters):${NC}"
+    echo "    1. Open MEET on the phone with cellular only — wifi off."
+    echo "    2. If the call connects, TURN is working."
+    echo "    3. If it still hangs, the carrier may be blocking tcp/${TURN_TLS_PORT}."
+    echo "       Check chrome://webrtc-internals → ICE candidates → look for"
+    echo "       ${YELLOW}relay${NC} candidates (TURN-issued) succeeding."
+    echo
+    echo "    ${BOLD}DNS + firewall${NC}  ${DIM}(host-side, internet-facing):${NC}"
+    echo "    ${YELLOW}dig +short ${TURN_DOMAIN:-turn.<your-host>}${NC}     # must return your host's public IP"
+    echo "    Open these on the host firewall AND the cloud-provider security group:"
+    echo "      tcp/${TURN_TLS_PORT}            (TURN-TLS)"
+    echo "      udp/${TURN_UDP_PORT}            (TURN-UDP)"
+    echo "      udp/${TURN_RELAY_RANGE_START}-${TURN_RELAY_RANGE_END}  (TURN relay range)"
+
+    # Incus proxy device hint, only if the bridge IP is private (not the LXC's
+    # WAN address). We can't tell for sure, but flag it.
+    case "${bridge_ip%%.*}" in
+        10|172|192)
+            echo
+            echo "    ${BOLD}Incus proxy devices${NC} ${DIM}(if the LXC bridge IP isn't WAN-routable):${NC}"
+            echo "      ${YELLOW}incus config device add <container> turntls proxy \\${NC}"
+            echo "          ${YELLOW}listen=tcp:0.0.0.0:${TURN_TLS_PORT} \\${NC}"
+            echo "          ${YELLOW}connect=tcp:${bridge_ip}:${TURN_TLS_PORT}${NC}"
+            echo "      ${YELLOW}incus config device add <container> turnudp proxy \\${NC}"
+            echo "          ${YELLOW}listen=udp:0.0.0.0:${TURN_UDP_PORT} \\${NC}"
+            echo "          ${YELLOW}connect=udp:${bridge_ip}:${TURN_UDP_PORT}${NC}"
+            echo "      ${YELLOW}incus config device add <container> turnrelay proxy \\${NC}"
+            echo "          ${YELLOW}listen=udp:0.0.0.0:${TURN_RELAY_RANGE_START}-${TURN_RELAY_RANGE_END} \\${NC}"
+            echo "          ${YELLOW}connect=udp:${bridge_ip}:${TURN_RELAY_RANGE_START}-${TURN_RELAY_RANGE_END}${NC}"
+            ;;
+    esac
+fi
 echo
 
 # ────────────────────────── compose handles ─────────────────────────────

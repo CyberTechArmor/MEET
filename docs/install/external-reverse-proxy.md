@@ -222,7 +222,116 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 # Expect packets in BOTH directions during a call.
 ```
 
-## 7. Known limitations
+## 7. TURN — cellular and restrictive-network fallback
+
+Cellular carriers run **symmetric (Carrier-Grade) NAT**. Wifi routers
+typically don't. The difference matters because WebRTC depends on
+STUN-based hole punching, which works through cone NAT but breaks
+through symmetric NAT — clients see signaling succeed and the call
+hangs at "Connecting…" forever, the same symptom as a missing Incus
+proxy device, but only on cellular. Without a TURN relay, users on
+phones won't connect.
+
+LiveKit has TURN built in. Enabling it doesn't add a container — it
+just opens additional ports on the existing `livekit` service.
+
+### 7a. Turn it on
+
+`install.sh` option 5 prompts whether to enable TURN; answering yes
+sets `TURN_ENABLED=true` in `deploy/external-proxy/.env`, prompts for
+a hostname (default `turn.<your-public-host>`), and creates an empty
+`deploy/external-proxy/tls/` directory.
+
+To enable manually on an existing install:
+
+```bash
+cd deploy/external-proxy
+sed -i 's/^TURN_ENABLED=.*/TURN_ENABLED=true/' .env
+sed -i 's/^TURN_DOMAIN=.*/TURN_DOMAIN=turn.example.com/' .env
+mkdir -p tls
+# Provision the cert (next subsection), then:
+docker compose up -d --force-recreate livekit
+```
+
+### 7b. Provision the TLS cert
+
+Browsers refuse self-signed certs on TURN over TLS. The cert at
+`deploy/external-proxy/tls/turn.crt` (with key at `turn.key`) must be
+issued by a real CA and valid for `TURN_DOMAIN`. Three common ways:
+
+**A. Wildcard cert you already own.** If you have a wildcard for
+`*.example.com`, set `TURN_DOMAIN=turn.example.com` and copy
+`fullchain.pem` to `tls/turn.crt`, `privkey.pem` to `tls/turn.key`.
+Easiest if you're already running an internal CA or a wildcard via
+DNS-01.
+
+**B. Dedicated certbot HTTP-01 challenge.** Run on the host that
+holds the public IP for `turn.<host>`, briefly free up port 80:
+
+```bash
+certbot certonly --standalone -d turn.example.com --http-01-port 80
+cp /etc/letsencrypt/live/turn.example.com/fullchain.pem deploy/external-proxy/tls/turn.crt
+cp /etc/letsencrypt/live/turn.example.com/privkey.pem   deploy/external-proxy/tls/turn.key
+```
+
+Add a renewal hook so the LXC picks up rotations:
+
+```bash
+# /etc/letsencrypt/renewal-hooks/deploy/meet-turn.sh
+cp /etc/letsencrypt/live/turn.example.com/fullchain.pem /path/to/MEET/deploy/external-proxy/tls/turn.crt
+cp /etc/letsencrypt/live/turn.example.com/privkey.pem   /path/to/MEET/deploy/external-proxy/tls/turn.key
+docker compose -f /path/to/MEET/deploy/external-proxy/docker-compose.yml up -d --force-recreate livekit
+```
+
+**C. Reuse the cert your reverse proxy already serves.** Set
+`TURN_DOMAIN` to the **same** hostname your reverse proxy serves
+(e.g. `meet.example.com`) and copy that cert into `tls/`. No new DNS
+record needed. The TURN URL ends up as `turns:meet.example.com:5349`,
+which is unusual but valid.
+
+### 7c. Open the firewall
+
+Three things must be reachable from the internet, in addition to the
+existing tcp/443 + tcp/7881 + udp/50000-60000:
+
+| Protocol/port | Purpose |
+|---|---|
+| `tcp/5349` | TURN over TLS — the cellular-survivable port |
+| `udp/3478` | TURN/UDP and STUN bind |
+| `udp/30000-32000` | TURN relay range (configurable via `TURN_RELAY_RANGE_*`) |
+
+Open these on **both** the host firewall (`ufw`/`firewalld`) and the
+cloud-provider security group / VPC firewall — they're independent
+layers and missing either kills the relay.
+
+If the LXC's bridge isn't directly WAN-routable, add Incus proxy
+devices for each (run on the Incus host, with the actual bridge IP):
+
+```bash
+incus config device add <container> turntls proxy \
+    listen=tcp:0.0.0.0:5349 connect=tcp:<bridge-ip>:5349
+incus config device add <container> turnudp proxy \
+    listen=udp:0.0.0.0:3478 connect=udp:<bridge-ip>:3478
+incus config device add <container> turnrelay proxy \
+    listen=udp:0.0.0.0:30000-32000 connect=udp:<bridge-ip>:30000-32000
+```
+
+`bash deploy/external-proxy/info.sh` prints these with your real
+bridge IP filled in.
+
+### 7d. Verify on a real cellular phone
+
+The only test that matters is end-to-end. Open MEET on a phone with
+**wifi off, cellular only**. The call should connect within a couple
+of seconds — same as on wifi. If it still hangs, open
+`chrome://webrtc-internals` (Android Chrome) and look at the ICE
+candidate pairs for the failing connection. With TURN working, you'll
+see at least one pair where one side is type `relay` (the candidate
+LiveKit minted via TURN) and the pair reaches `state: succeeded`. If
+no `relay` candidates appear, the carrier is blocking `tcp/5349` and
+`udp/3478` — uncommon but known to happen on a few APNs.
+
+## 8. Known limitations
 
 - **TURN-over-TCP/443 isn't included.** If a participant is behind a
   network that blocks UDP and 7881, they won't connect. Stand up a
@@ -238,7 +347,7 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
   Caddy advertises HTTP/3 on UDP/443, make sure that doesn't collide
   with the LiveKit UDP range.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
@@ -264,7 +373,7 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 | Avatar / large upload fails with 413 | Body limit on the proxy | Reference configs set 50 MiB. Raise `request_body { max_size … }` (Caddy) or `client_max_body_size` (nginx) if you need more |
 | Browser console: "blocked by CORS" | `CORS_ORIGIN` doesn't match `PUBLIC_BASE_URL` | They're wired together by default; if you've overridden one, override the other to match |
 
-## 9. Acceptance checklist
+## 10. Acceptance checklist
 
 - [ ] `ss -tlnp` inside the container shows every externally-routed
       port on `0.0.0.0`, none on `127.0.0.1`.
