@@ -374,6 +374,49 @@ if [ -n "$PUBLIC_BASE_URL" ]; then
     echo
 fi
 
+# ───────────────────── /api/token iceServers probe ──────────────────────
+# Cellular-call failures often look identical at every other layer:
+# coturn up, certs valid, ports open, LiveKit auth fine — and the call
+# still hangs. The frequent missing piece is that meet-api isn't telling
+# the browser about the TURN server in /api/token's iceServers field, so
+# the browser never tries the relay path even though it's reachable.
+# This probe asks /api/token for a throwaway-room token and inspects
+# the response.
+if [ -n "$PUBLIC_BASE_URL" ]; then
+    echo "${BOLD}/api/token iceServers probe${NC}  ${DIM}(does meet-api advertise TURN to browsers?):${NC}"
+    body=$(curl -sS --max-time 5 \
+                -X POST -H 'Content-Type: application/json' \
+                -d '{"roomName":"_meet_info_probe_","participantName":"info-probe"}' \
+                "${PUBLIC_BASE_URL%/}/api/token" 2>/dev/null || true)
+
+    if [ -z "$body" ]; then
+        printf "    ${RED}✗${NC} %s\n" "no response from /api/token"
+    elif printf '%s' "$body" | grep -q '"iceServers"'; then
+        # Try to confirm at least one TURN URL is present. We don't have
+        # jq guaranteed; substring-match is sufficient given the URL
+        # shape we mint in api/src/index.ts:buildIceServers().
+        if printf '%s' "$body" | grep -qiE 'turns?:[^"]*'; then
+            if [ -n "$TURN_DOMAIN" ] && printf '%s' "$body" | grep -qF "$TURN_DOMAIN"; then
+                printf "    ${GREEN}✓${NC} %s\n" "iceServers includes TURN URL(s) for $TURN_DOMAIN"
+            else
+                printf "    ${YELLOW}!${NC} %s\n" "iceServers present, but doesn't reference TURN_DOMAIN ($TURN_DOMAIN)"
+            fi
+        else
+            printf "    ${YELLOW}!${NC} %s\n" "iceServers present but contains no turn:/turns: URLs"
+        fi
+    else
+        printf "    ${RED}✗${NC} %s\n" "/api/token returned NO iceServers field"
+        if [ "$TURN_ENABLED" = "true" ]; then
+            printf "    ${DIM}TURN_ENABLED=true in .env, but meet-api isn't seeing it. Most common:${NC}\n"
+            printf "    ${DIM}  • meet-api container started before .env was written; recreate:${NC}\n"
+            printf "    ${DIM}    ${YELLOW}docker compose up -d --force-recreate meet-api${NC}\n"
+            printf "    ${DIM}  • TURN_USERNAME/TURN_PASSWORD missing in .env (buildIceServers${NC}\n"
+            printf "    ${DIM}    returns undefined when ANY of the four TURN env vars is empty)${NC}\n"
+        fi
+    fi
+    echo
+fi
+
 # ─────────────────────── LiveKit auth probe ─────────────────────────────
 # Catches the OTHER silent breakage: meet-api and the livekit container
 # disagree on the API key/secret. Login still works (no LiveKit involved),
@@ -608,7 +651,11 @@ else
 
     # TLS port listening on the bridge?
     if command -v ss >/dev/null 2>&1; then
-        local tls_listening=0 udp_listening=0
+        # Top-level script context — `local` is invalid here. Plain
+        # variable assignment works the same for our purposes; nothing
+        # else in info.sh re-uses these names.
+        tls_listening=0
+        udp_listening=0
         if ss -tlnH "sport = :$TURN_TLS_PORT" 2>/dev/null | grep -q LISTEN; then
             printf "    ${GREEN}✓${NC} tcp/%s listening on the LXC\n" "$TURN_TLS_PORT"
             tls_listening=1

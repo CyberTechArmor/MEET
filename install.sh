@@ -1717,6 +1717,33 @@ ENV_FILE
         echo -e "${GREEN}✓${NC} Rendered $compose_dir/turnserver.conf for TURN_DOMAIN=$turn_domain"
     fi
 
+    # Render livekit.yaml from livekit.yaml.template. When TURN is enabled,
+    # populate rtc.turn_servers so LiveKit advertises coturn to clients
+    # via the participant join response — a redundant path alongside
+    # meet-api's /api/token iceServers, so cellular still works if either
+    # path fails for any reason.
+    if [ -f "$compose_dir/livekit.yaml.template" ]; then
+        local turn_servers_block=""
+        if [ "$turn_enabled" = "true" ]; then
+            turn_servers_block=$(cat <<TURN_BLOCK
+
+  turn_servers:
+    - host: $turn_domain
+      port: 5349
+      protocol: tls
+      username: $turn_username
+      credential: $turn_password
+TURN_BLOCK
+)
+        fi
+        # Use awk to do the substitution because the block has newlines
+        # and special chars that would confuse sed.
+        awk -v block="$turn_servers_block" '
+            { gsub(/@TURN_SERVERS_BLOCK@/, block); print }
+        ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers block)}"
+    fi
+
     echo ""
     echo "Building and starting Docker containers..."
     echo "(Using cached layers — set FORCE_REBUILD=1 to rebuild from scratch.)"
