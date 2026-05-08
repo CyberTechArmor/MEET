@@ -596,6 +596,35 @@ update_with_external_proxy() {
         fi
     fi
 
+    # Re-render livekit.yaml from its template every run. When TURN is
+    # enabled, populate rtc.turn_servers; when not, omit. This ensures
+    # operators upgrading from earlier versions (which committed a static
+    # livekit.yaml) automatically pick up the turn_servers config without
+    # editing the file by hand.
+    if [ -f "$dir/livekit.yaml.template" ]; then
+        local turn_servers_block=""
+        if [ "$turn_enabled" = "true" ]; then
+            local turn_domain_lk turn_username_lk turn_password_lk
+            turn_domain_lk=$(grep -E '^TURN_DOMAIN='   "$dir/.env" | tail -n1 | cut -d= -f2-)
+            turn_username_lk=$(grep -E '^TURN_USERNAME=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+            turn_password_lk=$(grep -E '^TURN_PASSWORD=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+            turn_servers_block=$(cat <<TURN_BLOCK
+
+  turn_servers:
+    - host: $turn_domain_lk
+      port: 5349
+      protocol: tls
+      username: $turn_username_lk
+      credential: $turn_password_lk
+TURN_BLOCK
+)
+        fi
+        awk -v block="$turn_servers_block" '
+            { gsub(/@TURN_SERVERS_BLOCK@/, block); print }
+        ' "$dir/livekit.yaml.template" > "$dir/livekit.yaml"
+        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml${turn_servers_block:+ (with turn_servers block)}"
+    fi
+
     (
         cd "$dir"
         # rebuild_and_up does docker compose build + up + healthcheck

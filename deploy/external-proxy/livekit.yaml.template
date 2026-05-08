@@ -1,0 +1,47 @@
+# LiveKit config TEMPLATE for the "external reverse proxy" install
+# option. Rendered to livekit.yaml by install.sh / update.sh from .env.
+# Don't edit this template to adjust your install — edit .env and re-run
+# update.sh; edits here only take effect on a fresh install.
+#
+# This file is bind-mounted read-only into the livekit container. WebRTC
+# UDP media bypasses the reverse proxy and reaches LiveKit directly on
+# the host UDP range below.
+#
+# Auto-rendered fields (substituted from .env at install/update time):
+#   - rtc.turn_servers — populated only when TURN_ENABLED=true. Tells
+#                        LiveKit's signaling server to advertise coturn
+#                        to clients via the participant join response's
+#                        iceServers. Belt-and-suspenders against the
+#                        meet-api /api/token iceServers path failing
+#                        for any reason.
+
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+
+  # Auto-detect the public IP via STUN. Overridden by node_ip below when
+  # LIVEKIT_NODE_IP is set in the environment, which is read by the LiveKit
+  # entrypoint and exported as NODE_IP.
+  use_external_ip: true
+
+  # Don't advertise loopback ICE candidates — clients can't reach them.
+  enable_loopback_candidate: false
+
+  stun_servers:
+    - stun.l.google.com:19302
+    - stun1.l.google.com:19302
+@TURN_SERVERS_BLOCK@
+
+# Fallback keys for direct `docker run` use only. The compose stack sets
+# LIVEKIT_KEYS in the environment, which OVERRIDES this block at runtime
+# (see deploy/external-proxy/docker-compose.yml). install.sh writes the
+# matching <key>: <secret> there from a single source of truth, so this
+# fallback shouldn't normally be reached.
+keys:
+  devkey: secret
+
+logging:
+  level: info
