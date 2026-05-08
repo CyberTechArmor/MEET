@@ -1655,7 +1655,7 @@ LIVEKIT_NODE_IP=$public_ip
 # must agree. Re-running install.sh preserves these values.
 LIVEKIT_API_KEY=$lk_key
 LIVEKIT_API_SECRET=$lk_secret
-LIVEKIT_KEYS=$lk_key: $lk_secret
+LIVEKIT_KEYS="$lk_key: $lk_secret"
 
 # TURN — cellular / symmetric-NAT fallback. Deployed via the coturn
 # service (profile-gated). The turnserver.conf is rendered from
@@ -1691,17 +1691,21 @@ ENV_FILE
         echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (newly generated — installed in both meet-api and livekit)${NC}"
     fi
 
+    # Detect the LXC bridge IP — used by both turnserver.conf (relay-ip)
+    # and livekit.yaml (nat_1_to_1_ips). Same filter as info.sh: skip
+    # docker bridges and similar internal interfaces.
+    local detected_bridge_ip
+    detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                         | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                         | cut -d/ -f1 | head -n1)
+    detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+
     # Render turnserver.conf from the template if TURN is enabled. The
     # bridge IP gets baked in here so coturn knows which interface to
     # relay traffic on; if the bridge IP changes, re-run install.sh
     # (or update.sh, which calls render_turnserver_conf via the same
     # logic). The rendered file is gitignored.
     if [ "$turn_enabled" = "true" ]; then
-        local detected_bridge_ip
-        detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
-                             | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
-                             | cut -d/ -f1 | head -n1)
-        detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
         sed -e "s|@TURN_UDP_PORT@|3478|g" \
             -e "s|@TURN_TLS_PORT@|5349|g" \
             -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
@@ -1717,12 +1721,31 @@ ENV_FILE
         echo -e "${GREEN}✓${NC} Rendered $compose_dir/turnserver.conf for TURN_DOMAIN=$turn_domain"
     fi
 
-    # Render livekit.yaml from livekit.yaml.template. When TURN is enabled,
-    # populate rtc.turn_servers so LiveKit advertises coturn to clients
-    # via the participant join response — a redundant path alongside
-    # meet-api's /api/token iceServers, so cellular still works if either
-    # path fails for any reason.
+    # Render livekit.yaml from livekit.yaml.template. Substitute two
+    # placeholders:
+    #
+    # @NAT_1_TO_1_IPS@ — LiveKit's nat_1_to_1_ips config. When the LXC
+    #   bridge IP differs from the public IP (the typical NAT'd-LXC
+    #   case), advertise BOTH so coturn (which is on the bridge) can
+    #   relay to LiveKit's bridge candidate directly without a host
+    #   NAT-loopback. Symptom of needing this: cellular calls connect
+    #   slowly (10s+) or unreliably.
+    #
+    # @TURN_SERVERS_BLOCK@ — LiveKit's rtc.turn_servers list. When TURN
+    #   is enabled, populate so LiveKit advertises coturn to clients via
+    #   the participant join response — a redundant path alongside
+    #   meet-api's /api/token iceServers.
     if [ -f "$compose_dir/livekit.yaml.template" ]; then
+        local nat_1_to_1_block=""
+        if [ -n "$public_ip" ] && [ -n "$detected_bridge_ip" ] && [ "$public_ip" != "$detected_bridge_ip" ]; then
+            nat_1_to_1_block=$(cat <<NAT_BLOCK
+  nat_1_to_1_ips:
+    - $public_ip
+    - $detected_bridge_ip
+NAT_BLOCK
+)
+        fi
+
         local turn_servers_block=""
         if [ "$turn_enabled" = "true" ]; then
             turn_servers_block=$(cat <<TURN_BLOCK
@@ -1736,12 +1759,17 @@ ENV_FILE
 TURN_BLOCK
 )
         fi
-        # Use awk to do the substitution because the block has newlines
+        # Use awk to do the substitution because the blocks have newlines
         # and special chars that would confuse sed.
-        awk -v block="$turn_servers_block" '
-            { gsub(/@TURN_SERVERS_BLOCK@/, block); print }
+        awk -v nat_block="$nat_1_to_1_block" \
+            -v turn_block="$turn_servers_block" '
+            {
+                gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                print
+            }
         ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
-        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers block)}"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
     fi
 
     echo ""

@@ -14,6 +14,18 @@
 #                        iceServers. Belt-and-suspenders against the
 #                        meet-api /api/token iceServers path failing
 #                        for any reason.
+#   - rtc.nat_1_to_1_ips — when LIVEKIT_NODE_IP differs from BRIDGE_IP
+#                        (the typical LXC-behind-NAT case), tells
+#                        LiveKit to advertise BOTH addresses as ICE
+#                        candidates. Without this, coturn would have to
+#                        relay browser → public-IP-of-host → host-NAT-
+#                        hairpin → bridge → LiveKit, which fails when
+#                        the host doesn't support NAT loopback. With
+#                        it, browsers (via TURN) can reach LiveKit's
+#                        bridge IP directly through coturn (which is
+#                        also on the bridge), no hairpin needed.
+#                        Symptom of missing this: cellular calls
+#                        connect slowly (10s+) or unreliably.
 
 port: 7880
 
@@ -26,6 +38,7 @@ rtc:
   # LIVEKIT_NODE_IP is set in the environment, which is read by the LiveKit
   # entrypoint and exported as NODE_IP.
   use_external_ip: true
+@NAT_1_TO_1_IPS@
 
   # Don't advertise loopback ICE candidates — clients can't reach them.
   enable_loopback_candidate: false

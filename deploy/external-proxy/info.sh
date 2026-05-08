@@ -25,8 +25,32 @@ if [ -t 1 ]; then :; else GREEN= YELLOW= RED= CYAN= BOLD= DIM= NC=; fi
 cd "$(dirname "$0")" || exit 1
 
 if [ -f .env ]; then
-    # shellcheck disable=SC1091
-    set -a; . ./.env; set +a
+    # We used to `. .env` which is unsafe for values containing spaces
+    # (LIVEKIT_KEYS=meet_xxx: <hex>) — bash treats the colon-space as
+    # ending the assignment and tries to run the rest as a command,
+    # producing a noisy "command not found" error mid-output. Parse it
+    # ourselves instead: read KEY=VALUE lines, strip surrounding quotes,
+    # export. Same semantics as docker compose's .env parser.
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            ''|\#*) continue ;;
+            *=*)
+                _key="${_line%%=*}"
+                _val="${_line#*=}"
+                # Strip wrapping double or single quotes if present.
+                case "$_val" in
+                    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
+                    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
+                esac
+                # Skip lines whose key isn't a valid shell identifier
+                # (defends against stray content polluting the env).
+                case "$_key" in
+                    [A-Za-z_]*) export "$_key=$_val" ;;
+                esac
+                ;;
+        esac
+    done < .env
+    unset _line _key _val
 fi
 
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
