@@ -1,0 +1,100 @@
+# MEET — coturn config TEMPLATE.
+#
+# install.sh and update.sh substitute the @PLACEHOLDERS@ below from .env
+# and write the rendered file to deploy/external-proxy/turnserver.conf
+# (gitignored — it contains the static auth password).
+#
+# Don't edit this template to adjust your install — edit .env and re-run
+# update.sh. Edits here only take effect on a fresh install.
+
+# ── Listening ports ────────────────────────────────────────────────────
+# Plain TURN/STUN on UDP+TCP
+listening-port=@TURN_UDP_PORT@
+# TURN over TLS — the cellular-survivable port
+tls-listening-port=@TURN_TLS_PORT@
+
+# Bind on every interface; with network_mode: host this means the LXC's
+# external IP and any other interfaces it has.
+listening-ip=0.0.0.0
+
+# Relay traffic from the bridge IP — the address LiveKit's WebRTC
+# media ports listen on. Must be reachable both from the WAN (the
+# browser allocates a relay through coturn) and from livekit-server
+# (which receives relayed media as if from a peer).
+relay-ip=@BRIDGE_IP@
+
+# Advertise the public IP to clients. Without this, coturn would advertise
+# the LXC's bridge IP, which clients on the WAN can't reach.
+external-ip=@LIVEKIT_NODE_IP@/@BRIDGE_IP@
+
+# ── Realm + auth ──────────────────────────────────────────────────────
+# Realm matches TURN_DOMAIN (which matches the cert SAN). Browsers compare
+# the realm presented during TURN auth against the cert SAN; mismatch =
+# refused.
+realm=@TURN_DOMAIN@
+server-name=@TURN_DOMAIN@
+
+# Long-term credential mechanism with static user. The username +
+# password pair lives in .env (TURN_USERNAME / TURN_PASSWORD) and is
+# also embedded by meet-api in the iceServers field of /api/token.
+lt-cred-mech
+user=@TURN_USERNAME@:@TURN_PASSWORD@
+
+# ── Relay port range ──────────────────────────────────────────────────
+# Each TURN allocation grabs one UDP port from this range. Match
+# TURN_RELAY_RANGE_START/_END in .env and open the range on the host
+# firewall + cloud security group.
+min-port=@TURN_RELAY_RANGE_START@
+max-port=@TURN_RELAY_RANGE_END@
+
+# ── TLS cert ───────────────────────────────────────────────────────────
+# Operator-provided. Browsers reject self-signed certs on TURN/TLS.
+# install.sh / sync-cert.sh handle provisioning.
+cert=/etc/coturn/tls/turn.crt
+pkey=/etc/coturn/tls/turn.key
+
+# ── Hardening ─────────────────────────────────────────────────────────
+# No CLI; we manage via docker.
+no-cli
+
+# Drop deprecated TLS versions.
+no-tlsv1
+no-tlsv1_1
+
+# Add a fingerprint to TURN messages so peers detect spoofing.
+fingerprint
+
+# Don't allow relaying multicast traffic.
+no-multicast-peers
+
+# Deny relays to private/reserved address space EXCEPT the LXC's bridge
+# IP — clients shouldn't be able to use TURN to scan internal networks,
+# but livekit-server (sitting on the bridge) needs to receive relayed
+# media. The allowed-peer-ip line is added back below.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.88.99.0-192.88.99.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+
+# Allow relaying back to livekit-server on the LXC bridge.
+allowed-peer-ip=@BRIDGE_IP@
+
+# Per-allocation quota. Most calls use 1-2 allocations per participant;
+# 100 is generous for any single client and prevents a bad actor from
+# exhausting the relay range.
+total-quota=100
+
+# Verbose enough to debug, quiet enough to not flood logs.
+verbose
+no-stdout-log
+log-file=stdout

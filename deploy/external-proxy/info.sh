@@ -556,7 +556,27 @@ else
         fi
     else
         printf "    ${RED}✗${NC} cert files MISSING  ${DIM}($TURN_TLS_DIR/turn.crt and turn.key required)${NC}\n"
-        printf "    ${DIM}LiveKit will fail to start. See $TURN_TLS_DIR/README.md for cert provisioning options.${NC}\n"
+        printf "    ${DIM}coturn will fail to start. See $TURN_TLS_DIR/README.md for cert provisioning options.${NC}\n"
+    fi
+
+    # turnserver.conf rendered?
+    if [ -f "./turnserver.conf" ]; then
+        printf "    ${GREEN}✓${NC} turnserver.conf rendered  ${DIM}(./turnserver.conf)${NC}\n"
+    else
+        printf "    ${RED}✗${NC} turnserver.conf MISSING — re-run install.sh or update.sh to render it from template\n"
+    fi
+
+    # coturn container status
+    coturn_id=$(docker compose --profile turn ps -q coturn 2>/dev/null || true)
+    if [ -n "$coturn_id" ]; then
+        coturn_state=$(docker inspect -f '{{.State.Status}}' "$coturn_id" 2>/dev/null || echo "unknown")
+        if [ "$coturn_state" = "running" ]; then
+            printf "    ${GREEN}✓${NC} coturn container running\n"
+        else
+            printf "    ${RED}✗${NC} coturn container in state '%s' — check logs: ${YELLOW}docker compose --profile turn logs coturn${NC}\n" "$coturn_state"
+        fi
+    else
+        printf "    ${YELLOW}!${NC} coturn container not started — bring it up with: ${YELLOW}docker compose --profile turn up -d${NC}\n"
     fi
 
     # TLS port listening on the bridge?
@@ -564,7 +584,12 @@ else
         if ss -tlnH "sport = :$TURN_TLS_PORT" 2>/dev/null | grep -q LISTEN; then
             printf "    ${GREEN}✓${NC} tcp/%s listening on the LXC\n" "$TURN_TLS_PORT"
         else
-            printf "    ${RED}✗${NC} tcp/%s NOT listening — livekit may not be started or TURN failed to bind\n" "$TURN_TLS_PORT"
+            printf "    ${RED}✗${NC} tcp/%s NOT listening — coturn may not be started or failed to bind\n" "$TURN_TLS_PORT"
+        fi
+        if ss -ulnH "sport = :$TURN_UDP_PORT" 2>/dev/null | grep -q UNCONN; then
+            printf "    ${GREEN}✓${NC} udp/%s listening on the LXC\n" "$TURN_UDP_PORT"
+        else
+            printf "    ${YELLOW}!${NC} udp/%s NOT listening (some setups bind UDP only on demand)\n" "$TURN_UDP_PORT"
         fi
     fi
 

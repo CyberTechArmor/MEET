@@ -226,9 +226,52 @@ update_with_external_proxy() {
         fi
     fi
 
+    # If TURN is enabled, re-render turnserver.conf from the template +
+    # current .env. This catches: bridge IP changes, TURN_DOMAIN changes,
+    # TURN_PASSWORD rotations, and template improvements landing via git.
+    # Also pre-compute the --profile flag so coturn comes up alongside
+    # the rest of the stack.
+    local turn_enabled
+    turn_enabled=$(grep -E '^TURN_ENABLED=' "$dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_enabled=${turn_enabled:-false}
+    local profile_args=""
+    if [ "$turn_enabled" = "true" ]; then
+        profile_args="--profile turn"
+        if [ -f "$dir/turnserver.conf.template" ]; then
+            local turn_domain turn_username turn_password public_ip
+            turn_domain=$(grep -E '^TURN_DOMAIN='   "$dir/.env" | tail -n1 | cut -d= -f2-)
+            turn_username=$(grep -E '^TURN_USERNAME=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+            turn_password=$(grep -E '^TURN_PASSWORD=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+            public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+            local detected_bridge_ip
+            detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                                 | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                                 | cut -d/ -f1 | head -n1)
+            detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+            sed -e "s|@TURN_UDP_PORT@|3478|g" \
+                -e "s|@TURN_TLS_PORT@|5349|g" \
+                -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
+                -e "s|@TURN_RELAY_RANGE_END@|32000|g" \
+                -e "s|@TURN_DOMAIN@|$turn_domain|g" \
+                -e "s|@TURN_USERNAME@|$turn_username|g" \
+                -e "s|@TURN_PASSWORD@|$turn_password|g" \
+                -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
+                -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
+                "$dir/turnserver.conf.template" > "$dir/turnserver.conf"
+            echo -e "${YELLOW}!${NC} Re-rendered $dir/turnserver.conf from template"
+        fi
+    fi
+
     (
         cd "$dir"
-        rebuild_and_up "external-proxy stack"
+        # rebuild_and_up does docker compose build + up + healthcheck
+        # wait. We pass the profile so coturn is included when enabled.
+        local profiles_args="$profile_args"
+        if [ -n "$profiles_args" ]; then
+            rebuild_and_up "external-proxy stack (with TURN)" $profiles_args
+        else
+            rebuild_and_up "external-proxy stack"
+        fi
     )
 
     echo

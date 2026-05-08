@@ -1448,64 +1448,106 @@ install_with_external_proxy() {
     fi
 
     # TURN config. Reuse the previous .env's values on rerun; only ask the
-    # operator if we're starting fresh. Cellular users need TURN; if it's
-    # off, calls fail on cellular even when wifi works perfectly.
+    # operator if we're starting fresh. Cellular users need TURN; without
+    # it, calls fail on cellular even when wifi works perfectly.
+    #
+    # We deploy a dedicated coturn container (not LiveKit's built-in TURN).
+    # Cleaner separation: meet-api passes coturn's URL + creds to the
+    # browser via /api/token's iceServers field; livekit-server doesn't
+    # need to know about coturn at all.
     local turn_enabled="false"
     local turn_domain=""
+    local turn_username=""
+    local turn_password=""
     if [ -f "$compose_dir/.env" ]; then
         turn_enabled=$(grep -E '^TURN_ENABLED=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_domain=$(grep -E '^TURN_DOMAIN=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_username=$(grep -E '^TURN_USERNAME=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_password=$(grep -E '^TURN_PASSWORD=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_enabled=${turn_enabled:-false}
     fi
     if [ "$turn_enabled" != "true" ]; then
         echo ""
         echo -e "  ${BOLD}TURN server (cellular / restrictive-network fallback)${NC}"
         echo "    Cellular carriers use symmetric NAT — WebRTC's STUN-based hole punching"
-        echo "    can't get through. Without TURN, your phone-on-cellular users will see"
-        echo "    'Connecting…' forever even when wifi works. Strongly recommended."
+        echo "    can't get through. Without TURN, phone-on-cellular calls fail even when"
+        echo "    wifi works. Deploys a dedicated coturn container alongside livekit."
         echo ""
-        read -p "  Enable LiveKit's built-in TURN server? [Y/n]: " enable_turn
+        read -p "  Enable coturn? [Y/n]: " enable_turn
         if [[ ! "$enable_turn" =~ ^[Nn]$ ]]; then
             turn_enabled="true"
-            local default_turn_domain="turn.$public_host"
-            read -p "  TURN hostname [$default_turn_domain]: " turn_domain_in
-            turn_domain="${turn_domain_in:-$default_turn_domain}"
 
-            mkdir -p "$compose_dir/tls"
-            if [ ! -f "$compose_dir/tls/turn.crt" ] || [ ! -f "$compose_dir/tls/turn.key" ]; then
-                cat > "$compose_dir/tls/README.md" << 'TLS_README'
-# TURN TLS certificates
-
-LiveKit's embedded TURN server reads its TLS cert from this directory.
-Place your fullchain.pem here as `turn.crt` and the private key as
-`turn.key`. The cert must be valid for the TURN_DOMAIN set in `../.env`.
-
-Browsers reject self-signed certs on TURN over TLS, so a real CA-issued
-cert is required. Three common ways to get one:
-
-  1. Wildcard cert you already own:
-       cp /path/to/fullchain.pem turn.crt
-       cp /path/to/privkey.pem   turn.key
-
-  2. Dedicated cert via certbot HTTP-01 (run on the host that owns
-     the public IP for TURN_DOMAIN; needs port 80 free briefly):
-       certbot certonly --standalone -d turn.example.com --http-01-port 80
-       cp /etc/letsencrypt/live/turn.example.com/fullchain.pem turn.crt
-       cp /etc/letsencrypt/live/turn.example.com/privkey.pem   turn.key
-
-  3. Same cert as your reverse proxy serves for the main hostname.
-     Set TURN_DOMAIN to that exact hostname (e.g. meet.example.com)
-     in .env and copy the existing fullchain/privkey here.
-
-After installing the cert files, rebuild livekit:
-    docker compose up -d --force-recreate livekit
-TLS_README
-                echo -e "    ${YELLOW}!${NC} TLS cert files are missing. LiveKit will fail to start until"
-                echo -e "      you put a real cert at ${YELLOW}$compose_dir/tls/turn.{crt,key}${NC}."
-                echo -e "      See ${YELLOW}$compose_dir/tls/README.md${NC} for the three ways to get one."
-            fi
+            echo ""
+            echo "  Cert reuse:"
+            echo "    [1] Single-domain — reuse the cert your reverse proxy already serves"
+            echo "        for $public_host. No new DNS record. (recommended)"
+            echo "    [2] Dedicated turn.$public_host — separate cert, separate DNS record."
+            echo ""
+            read -p "  Cert mode [1]: " cert_mode
+            cert_mode=${cert_mode:-1}
+            case "$cert_mode" in
+                2)  turn_domain="turn.$public_host" ;;
+                *)  turn_domain="$public_host" ;;
+            esac
+            read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+            turn_domain="${turn_domain_in:-$turn_domain}"
         else
             turn_enabled="false"
+        fi
+    fi
+
+    # Generate creds if we don't already have them. Same idempotency rule
+    # as the LiveKit keys: never regenerate if .env already has them, so
+    # in-flight participants don't get kicked off by a re-install.
+    if [ "$turn_enabled" = "true" ]; then
+        if [ -z "$turn_username" ]; then
+            turn_username="meet"
+        fi
+        if [ -z "$turn_password" ]; then
+            turn_password=$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | xxd -p)
+        fi
+        mkdir -p "$compose_dir/tls"
+        if [ ! -f "$compose_dir/tls/README.md" ]; then
+            cat > "$compose_dir/tls/README.md" << 'TLS_README'
+# TURN TLS certificates
+
+coturn reads its TLS cert from this directory. Provide:
+
+    turn.crt   - fullchain (cert + intermediate(s))
+    turn.key   - private key, no passphrase
+
+The cert must be valid for the TURN_DOMAIN set in `../.env`. Browsers
+refuse self-signed certs on TURN/TLS, so a real CA-issued cert is
+required.
+
+## Single-domain mode (cert reuse — recommended)
+
+If TURN_DOMAIN equals your main public hostname (e.g. meet.example.com),
+just copy the cert your reverse proxy is already using:
+
+    # Wherever your reverse proxy stores its certs. Examples:
+    #   ProxyPilot/Caddy:  /var/lib/docker/volumes/proxypilot_caddy_data/_data/caddy/certificates/.../meet.example.com/
+    #   host nginx:        /etc/letsencrypt/live/meet.example.com/
+    cp /path/to/fullchain.pem turn.crt
+    cp /path/to/privkey.pem   turn.key
+
+Coturn rotates the cert when it next reloads. The deploy/external-proxy/
+sync-cert.sh helper automates re-copy + restart on a cron.
+
+## Dedicated turn.<host> mode
+
+    certbot certonly --standalone -d turn.example.com --http-01-port 80
+    cp /etc/letsencrypt/live/turn.example.com/fullchain.pem turn.crt
+    cp /etc/letsencrypt/live/turn.example.com/privkey.pem   turn.key
+
+After installing the cert files:
+    docker compose --profile turn up -d --force-recreate coturn
+TLS_README
+        fi
+        if [ ! -f "$compose_dir/tls/turn.crt" ] || [ ! -f "$compose_dir/tls/turn.key" ]; then
+            echo -e "  ${YELLOW}!${NC} TLS cert files are missing. coturn will fail to start until"
+            echo -e "    you put a real cert at ${YELLOW}$compose_dir/tls/turn.{crt,key}${NC}."
+            echo -e "    See ${YELLOW}$compose_dir/tls/README.md${NC} for instructions."
         fi
     fi
 
@@ -1533,21 +1575,50 @@ LIVEKIT_API_KEY=$lk_key
 LIVEKIT_API_SECRET=$lk_secret
 LIVEKIT_KEYS=$lk_key: $lk_secret
 
-# TURN — cellular / symmetric-NAT fallback. See tls/README.md if cert is missing.
+# TURN — cellular / symmetric-NAT fallback. Deployed via the coturn
+# service (profile-gated). The turnserver.conf is rendered from
+# turnserver.conf.template using these values; the password is also
+# embedded in /api/token's iceServers field for the browser.
+# See tls/README.md if cert is missing.
 TURN_ENABLED=$turn_enabled
 TURN_DOMAIN=$turn_domain
+TURN_USERNAME=$turn_username
+TURN_PASSWORD=$turn_password
 TURN_TLS_PORT=5349
 TURN_UDP_PORT=3478
 TURN_RELAY_RANGE_START=30000
 TURN_RELAY_RANGE_END=32000
 TURN_TLS_DIR=./tls
-TURN_EXTERNAL_TLS=false
 ENV_FILE
     echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
     if [ "$lk_keys_reused" = "1" ]; then
         echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (reused — meet-api ↔ livekit pair preserved)${NC}"
     else
         echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (newly generated — installed in both meet-api and livekit)${NC}"
+    fi
+
+    # Render turnserver.conf from the template if TURN is enabled. The
+    # bridge IP gets baked in here so coturn knows which interface to
+    # relay traffic on; if the bridge IP changes, re-run install.sh
+    # (or update.sh, which calls render_turnserver_conf via the same
+    # logic). The rendered file is gitignored.
+    if [ "$turn_enabled" = "true" ]; then
+        local detected_bridge_ip
+        detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                             | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                             | cut -d/ -f1 | head -n1)
+        detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+        sed -e "s|@TURN_UDP_PORT@|3478|g" \
+            -e "s|@TURN_TLS_PORT@|5349|g" \
+            -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
+            -e "s|@TURN_RELAY_RANGE_END@|32000|g" \
+            -e "s|@TURN_DOMAIN@|$turn_domain|g" \
+            -e "s|@TURN_USERNAME@|$turn_username|g" \
+            -e "s|@TURN_PASSWORD@|$turn_password|g" \
+            -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
+            -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
+            "$compose_dir/turnserver.conf.template" > "$compose_dir/turnserver.conf"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/turnserver.conf for TURN_DOMAIN=$turn_domain"
     fi
 
     echo ""
@@ -1558,7 +1629,13 @@ ENV_FILE
     if [ "${FORCE_REBUILD:-}" = "1" ]; then
         build_args="--no-cache"
     fi
-    if ! (cd "$compose_dir" && docker compose build $build_args && docker compose up -d); then
+    # --profile turn includes the coturn service when TURN_ENABLED=true.
+    # Without the profile, compose ignores any service marked profiles:[turn].
+    local compose_profiles=""
+    if [ "$turn_enabled" = "true" ]; then
+        compose_profiles="--profile turn"
+    fi
+    if ! (cd "$compose_dir" && docker compose $compose_profiles build $build_args && docker compose $compose_profiles up -d); then
         echo -e "${RED}✗ Failed to build or start Docker containers${NC}"
         echo "  Logs: (cd $compose_dir && docker compose logs)"
         exit 1

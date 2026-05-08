@@ -227,69 +227,90 @@ sudo tcpdump -ni any 'udp portrange 50000-60000' -c 20
 Cellular carriers run **symmetric (Carrier-Grade) NAT**. Wifi routers
 typically don't. The difference matters because WebRTC depends on
 STUN-based hole punching, which works through cone NAT but breaks
-through symmetric NAT — clients see signaling succeed and the call
-hangs at "Connecting…" forever, the same symptom as a missing Incus
-proxy device, but only on cellular. Without a TURN relay, users on
-phones won't connect.
+through symmetric NAT — phone-on-cellular calls hang at "Connecting…"
+even when wifi works. Without a TURN relay, those users won't connect.
 
-LiveKit has TURN built in. Enabling it doesn't add a container — it
-just opens additional ports on the existing `livekit` service.
+MEET ships a dedicated **coturn** container, profile-gated in the
+compose stack so it only starts when explicitly enabled. The browser
+learns about it via the `iceServers` field of every `/api/token`
+response; livekit-server itself doesn't reference coturn at all.
 
 ### 7a. Turn it on
 
-`install.sh` option 5 prompts whether to enable TURN; answering yes
-sets `TURN_ENABLED=true` in `deploy/external-proxy/.env`, prompts for
-a hostname (default `turn.<your-public-host>`), and creates an empty
-`deploy/external-proxy/tls/` directory.
+`install.sh` option 5 prompts whether to enable TURN; answering yes:
+
+- sets `TURN_ENABLED=true` in `deploy/external-proxy/.env`,
+- prompts whether to reuse the main reverse-proxy cert (single-domain,
+  recommended) or use a dedicated `turn.<host>`,
+- generates a random `TURN_PASSWORD`,
+- renders `turnserver.conf` from `turnserver.conf.template` against
+  the current bridge IP / domain / creds,
+- creates `deploy/external-proxy/tls/` and seeds it with a `README.md`
+  explaining cert provisioning,
+- starts the stack with `--profile turn` so `coturn` comes up.
 
 To enable manually on an existing install:
 
 ```bash
 cd deploy/external-proxy
 sed -i 's/^TURN_ENABLED=.*/TURN_ENABLED=true/' .env
-sed -i 's/^TURN_DOMAIN=.*/TURN_DOMAIN=turn.example.com/' .env
+sed -i 's|^TURN_DOMAIN=.*|TURN_DOMAIN=meet.example.com|' .env   # single-domain
+sed -i "s/^TURN_PASSWORD=.*/TURN_PASSWORD=$(openssl rand -hex 24)/" .env
 mkdir -p tls
-# Provision the cert (next subsection), then:
-docker compose up -d --force-recreate livekit
+# Drop a real cert into tls/turn.crt + turn.key (next section), then:
+cd ../..
+./update.sh                       # re-renders turnserver.conf and starts coturn
 ```
 
-### 7b. Provision the TLS cert
+### 7b. Provision the TLS cert (single-domain — easiest)
 
-Browsers refuse self-signed certs on TURN over TLS. The cert at
-`deploy/external-proxy/tls/turn.crt` (with key at `turn.key`) must be
-issued by a real CA and valid for `TURN_DOMAIN`. Three common ways:
+Reuse the cert your reverse proxy already serves for the main host.
+Set `TURN_DOMAIN` to that hostname (e.g. `meet.example.com`) — no new
+DNS record needed.
 
-**A. Wildcard cert you already own.** If you have a wildcard for
-`*.example.com`, set `TURN_DOMAIN=turn.example.com` and copy
-`fullchain.pem` to `tls/turn.crt`, `privkey.pem` to `tls/turn.key`.
-Easiest if you're already running an internal CA or a wildcard via
-DNS-01.
+Find the cert. ProxyPilot stores it inside its Caddy data volume; host
+Caddy stores it in `~/.local/share/caddy/...`; host certbot stores
+fullchain at `/etc/letsencrypt/live/<host>/`. The helper script
+`deploy/external-proxy/sync-cert.sh` knows about all three patterns
+and pushes the cert into the LXC, then restarts coturn.
 
-**B. Dedicated certbot HTTP-01 challenge.** Run on the host that
-holds the public IP for `turn.<host>`, briefly free up port 80:
+Run on the **Incus host** (not inside the LXC):
 
 ```bash
-certbot certonly --standalone -d turn.example.com --http-01-port 80
-cp /etc/letsencrypt/live/turn.example.com/fullchain.pem deploy/external-proxy/tls/turn.crt
-cp /etc/letsencrypt/live/turn.example.com/privkey.pem   deploy/external-proxy/tls/turn.key
+sudo bash /path/to/MEET/deploy/external-proxy/sync-cert.sh
+# Override discovery if needed:
+#   MEET_CONTAINER=<lxc-name>  TURN_DOMAIN=<host>  CADDY_CERT_DIR=<path>
 ```
 
-Add a renewal hook so the LXC picks up rotations:
+Schedule it daily so cert rotations propagate without operator
+intervention:
+
+```cron
+# /etc/cron.daily/meet-turn-cert-sync
+#!/bin/sh
+exec /path/to/MEET/deploy/external-proxy/sync-cert.sh
+```
+
+The TURN URL ends up looking like `turns:meet.example.com:5349`, which
+is unusual but valid — it's just where coturn happens to be listening.
+
+### 7c. Provision the TLS cert (dedicated turn.&lt;host&gt;)
+
+If you'd rather have a separate hostname:
+
+1. Add DNS: `turn.meet.example.com` → host's public IP.
+2. Set `TURN_DOMAIN=turn.meet.example.com` in `.env`.
+3. Run certbot on the **host** (briefly frees port 80):
 
 ```bash
-# /etc/letsencrypt/renewal-hooks/deploy/meet-turn.sh
-cp /etc/letsencrypt/live/turn.example.com/fullchain.pem /path/to/MEET/deploy/external-proxy/tls/turn.crt
-cp /etc/letsencrypt/live/turn.example.com/privkey.pem   /path/to/MEET/deploy/external-proxy/tls/turn.key
-docker compose -f /path/to/MEET/deploy/external-proxy/docker-compose.yml up -d --force-recreate livekit
+certbot certonly --standalone -d turn.meet.example.com --http-01-port 80
 ```
 
-**C. Reuse the cert your reverse proxy already serves.** Set
-`TURN_DOMAIN` to the **same** hostname your reverse proxy serves
-(e.g. `meet.example.com`) and copy that cert into `tls/`. No new DNS
-record needed. The TURN URL ends up as `turns:meet.example.com:5349`,
-which is unusual but valid.
+4. The same `sync-cert.sh` discovers the new cert under
+   `/etc/letsencrypt/live/turn.meet.example.com/` and pushes it to the
+   LXC. Same daily cron applies.
 
-### 7c. Open the firewall
+### 7d. Open the firewall
 
 Three things must be reachable from the internet, in addition to the
 existing tcp/443 + tcp/7881 + udp/50000-60000:
@@ -301,11 +322,13 @@ existing tcp/443 + tcp/7881 + udp/50000-60000:
 | `udp/30000-32000` | TURN relay range (configurable via `TURN_RELAY_RANGE_*`) |
 
 Open these on **both** the host firewall (`ufw`/`firewalld`) and the
-cloud-provider security group / VPC firewall — they're independent
-layers and missing either kills the relay.
+cloud-provider security group / VPC firewall — independent layers,
+missing either kills the relay.
 
 If the LXC's bridge isn't directly WAN-routable, add Incus proxy
-devices for each (run on the Incus host, with the actual bridge IP):
+devices for each (run on the Incus host, with the actual bridge IP).
+`bash deploy/external-proxy/info.sh` prints these with your real
+bridge IP filled in:
 
 ```bash
 incus config device add <container> turntls proxy \
@@ -316,20 +339,22 @@ incus config device add <container> turnrelay proxy \
     listen=udp:0.0.0.0:30000-32000 connect=udp:<bridge-ip>:30000-32000
 ```
 
-`bash deploy/external-proxy/info.sh` prints these with your real
-bridge IP filled in.
-
-### 7d. Verify on a real cellular phone
+### 7e. Verify on a real cellular phone
 
 The only test that matters is end-to-end. Open MEET on a phone with
 **wifi off, cellular only**. The call should connect within a couple
-of seconds — same as on wifi. If it still hangs, open
-`chrome://webrtc-internals` (Android Chrome) and look at the ICE
-candidate pairs for the failing connection. With TURN working, you'll
-see at least one pair where one side is type `relay` (the candidate
-LiveKit minted via TURN) and the pair reaches `state: succeeded`. If
-no `relay` candidates appear, the carrier is blocking `tcp/5349` and
-`udp/3478` — uncommon but known to happen on a few APNs.
+of seconds — same as on wifi. If it still hangs:
+
+1. Run `bash deploy/external-proxy/info.sh` inside the LXC. The TURN
+   status section should show ✓ for cert files, cert SAN match,
+   `turnserver.conf`, coturn container running, and `tcp/5349`
+   listening.
+2. Open `chrome://webrtc-internals` on Android Chrome. Find the failing
+   connection's ICE candidate pairs. With TURN working you'll see at
+   least one pair where one side is type `relay` and `state: succeeded`.
+   If no `relay` candidates appear, the carrier is blocking `tcp/5349`
+   — uncommon but real on a few APNs (ask the carrier or try a
+   different SIM as a sanity check).
 
 ## 8. Known limitations
 
