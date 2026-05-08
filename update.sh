@@ -483,7 +483,7 @@ update_with_external_proxy() {
         k=$(grep -E '^LIVEKIT_API_KEY='    "$dir/.env" | tail -n1 | cut -d= -f2-)
         s=$(grep -E '^LIVEKIT_API_SECRET=' "$dir/.env" | tail -n1 | cut -d= -f2-)
         if [ -n "$k" ] && [ -n "$s" ]; then
-            printf 'LIVEKIT_KEYS=%s: %s\n' "$k" "$s" >> "$dir/.env"
+            printf 'LIVEKIT_KEYS="%s: %s"\n' "$k" "$s" >> "$dir/.env"
             echo -e "${YELLOW}!${NC} Migrated $dir/.env: added LIVEKIT_KEYS from existing key/secret"
         else
             echo -e "${RED}✗ LIVEKIT_API_KEY / LIVEKIT_API_SECRET missing from $dir/.env${NC}"
@@ -491,6 +491,31 @@ update_with_external_proxy() {
             exit 1
         fi
     fi
+
+    # Older installs wrote LIVEKIT_KEYS unquoted, which makes `. .env`
+    # in info.sh choke on the colon-space (bash treats it as ending the
+    # assignment and tries to run the rest as a command). Detect and
+    # re-quote in place.
+    if grep -qE '^LIVEKIT_KEYS=[^"]' "$dir/.env"; then
+        local raw_val
+        raw_val=$(grep -E '^LIVEKIT_KEYS=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        if [ -n "$raw_val" ]; then
+            sed -i.bak "s|^LIVEKIT_KEYS=.*|LIVEKIT_KEYS=\"${raw_val}\"|" "$dir/.env"
+            rm -f "$dir/.env.bak"
+            echo -e "${YELLOW}!${NC} Migrated $dir/.env: quoted LIVEKIT_KEYS so info.sh can source .env safely"
+        fi
+    fi
+
+    # Detect the LXC bridge IP and read public IP from .env — needed by
+    # both turnserver.conf (relay-ip, when TURN is on) and livekit.yaml
+    # (nat_1_to_1_ips). Always run, regardless of turn_enabled, so even
+    # non-TURN deployments behind NAT get nat_1_to_1_ips advertised.
+    local detected_bridge_ip public_ip
+    detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                         | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                         | cut -d/ -f1 | head -n1)
+    detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+    public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
 
     # If TURN is enabled, re-render turnserver.conf from the template +
     # current .env. This catches: bridge IP changes, TURN_DOMAIN changes,
@@ -571,15 +596,9 @@ update_with_external_proxy() {
         fi
 
         if [ -f "$dir/turnserver.conf.template" ]; then
-            local turn_username turn_password public_ip
+            local turn_username turn_password
             turn_username=$(grep -E '^TURN_USERNAME=' "$dir/.env" | tail -n1 | cut -d= -f2-)
             turn_password=$(grep -E '^TURN_PASSWORD=' "$dir/.env" | tail -n1 | cut -d= -f2-)
-            public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
-            local detected_bridge_ip
-            detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
-                                 | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
-                                 | cut -d/ -f1 | head -n1)
-            detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
             sed -e "s|@TURN_UDP_PORT@|3478|g" \
                 -e "s|@TURN_TLS_PORT@|5349|g" \
                 -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
@@ -596,12 +615,31 @@ update_with_external_proxy() {
         fi
     fi
 
-    # Re-render livekit.yaml from its template every run. When TURN is
-    # enabled, populate rtc.turn_servers; when not, omit. This ensures
-    # operators upgrading from earlier versions (which committed a static
-    # livekit.yaml) automatically pick up the turn_servers config without
-    # editing the file by hand.
+    # Re-render livekit.yaml from its template every run. Substitute two
+    # placeholders:
+    #
+    # @NAT_1_TO_1_IPS@ — LiveKit's nat_1_to_1_ips config. When the LXC
+    #   bridge IP differs from the public IP (typical NAT'd-LXC case),
+    #   advertise BOTH so coturn (which is on the bridge) can relay to
+    #   LiveKit's bridge candidate directly without a host NAT-loopback.
+    #   Symptom of needing this: cellular calls connect slowly (10s+) or
+    #   fail with "camera/microphone unavailable".
+    #
+    # @TURN_SERVERS_BLOCK@ — LiveKit's rtc.turn_servers list. When TURN
+    #   is enabled, populate so LiveKit advertises coturn to clients via
+    #   the participant join response (a redundant path alongside
+    #   meet-api's /api/token iceServers).
     if [ -f "$dir/livekit.yaml.template" ]; then
+        local nat_1_to_1_block=""
+        if [ -n "$public_ip" ] && [ -n "$detected_bridge_ip" ] && [ "$public_ip" != "$detected_bridge_ip" ]; then
+            nat_1_to_1_block=$(cat <<NAT_BLOCK
+  nat_1_to_1_ips:
+    - $public_ip
+    - $detected_bridge_ip
+NAT_BLOCK
+)
+        fi
+
         local turn_servers_block=""
         if [ "$turn_enabled" = "true" ]; then
             local turn_domain_lk turn_username_lk turn_password_lk
@@ -619,10 +657,15 @@ update_with_external_proxy() {
 TURN_BLOCK
 )
         fi
-        awk -v block="$turn_servers_block" '
-            { gsub(/@TURN_SERVERS_BLOCK@/, block); print }
+        awk -v nat_block="$nat_1_to_1_block" \
+            -v turn_block="$turn_servers_block" '
+            {
+                gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                print
+            }
         ' "$dir/livekit.yaml.template" > "$dir/livekit.yaml"
-        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml${turn_servers_block:+ (with turn_servers block)}"
+        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
     fi
 
     (
