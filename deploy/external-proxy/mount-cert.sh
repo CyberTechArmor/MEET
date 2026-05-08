@@ -125,12 +125,16 @@ echo "  Triggering update.sh inside $CONTAINER…"
 echo
 
 if incus exec "$CONTAINER" -- bash -c "[ -f $LXC_REPO_DIR/update.sh ]" 2>/dev/null; then
-    incus exec "$CONTAINER" --env TERM=xterm-256color -- bash -c "cd $LXC_REPO_DIR && ./update.sh --mode 5"
+    # --enable-turn handles the case where the operator hasn't yet flipped
+    # TURN_ENABLED=true in .env. update.sh's prompt is gated on a TTY,
+    # which `incus exec` without -t doesn't provide; --enable-turn skips
+    # the prompt and takes defaults.
+    incus exec "$CONTAINER" --env TERM=xterm-256color -- bash -c "cd $LXC_REPO_DIR && ./update.sh --mode 5 --enable-turn"
     echo
     echo "✓ Done. coturn should be running. Verify inside the LXC:"
     echo "    incus exec $CONTAINER -- bash -c 'cd $LXC_DEPLOY_DIR && bash info.sh'"
 else
     echo "  update.sh not found at $LXC_REPO_DIR/update.sh inside $CONTAINER."
     echo "  Run it manually:"
-    echo "    incus exec $CONTAINER -- bash -c 'cd /path/to/MEET && ./update.sh'"
+    echo "    incus exec $CONTAINER -- bash -c 'cd /path/to/MEET && ./update.sh --enable-turn'"
 fi
