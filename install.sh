@@ -1625,8 +1625,10 @@ install_with_external_proxy() {
             # inside its container or it can't read the cert and the
             # TLS listener silently doesn't bind. Falls back to 0:0
             # (root, can read anything) if stat fails for any reason.
-            turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
-            turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            if [ -n "$cert_path" ] && [ -f "$cert_path" ]; then
+                turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
+                turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            fi
             if [ "$turn_uid" != "0" ] || [ "$turn_gid" != "0" ]; then
                 echo -e "  ${DIM}cert owned by uid:gid ${turn_uid}:${turn_gid} — coturn will run with that user${NC}"
             fi
@@ -1699,6 +1701,26 @@ ENV_FILE
                          | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
                          | cut -d/ -f1 | head -n1)
     detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+
+    # If a previous `docker compose up` ran before these files were
+    # rendered, Docker auto-created the bind-mount source paths
+    # (turnserver.conf, livekit.yaml) as DIRECTORIES — that's its default
+    # behavior when a bind-mount source doesn't exist. Re-running
+    # install.sh then fails on the awk/sed redirect with "Is a directory".
+    # Detect and remove the empty directories so the renders below can
+    # write real files. We only remove EMPTY directories — if Docker
+    # somehow accumulated content here, the operator should look at it.
+    for _stale in "$compose_dir/livekit.yaml" "$compose_dir/turnserver.conf"; do
+        if [ -d "$_stale" ]; then
+            if rmdir "$_stale" 2>/dev/null; then
+                echo -e "  ${YELLOW}!${NC} Removed empty directory at $_stale (Docker auto-created it before the file existed)"
+            else
+                echo -e "  ${RED}✗${NC} $_stale is a non-empty directory — refusing to clobber."
+                echo -e "    Inspect and remove manually, then re-run install.sh."
+                exit 1
+            fi
+        fi
+    done
 
     # Render turnserver.conf from the template if TURN is enabled. The
     # bridge IP gets baked in here so coturn knows which interface to

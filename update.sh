@@ -539,6 +539,23 @@ update_with_external_proxy() {
     detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
     public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
 
+    # If a previous `docker compose up` ran before these files were
+    # rendered, Docker auto-created the bind-mount source paths
+    # (turnserver.conf, livekit.yaml) as DIRECTORIES. Detect & remove
+    # the empty directories so the renders below can write real files.
+    local _stale
+    for _stale in "$dir/livekit.yaml" "$dir/turnserver.conf"; do
+        if [ -d "$_stale" ]; then
+            if rmdir "$_stale" 2>/dev/null; then
+                echo -e "${YELLOW}!${NC} Removed empty directory at $_stale (Docker auto-created it before the file existed)"
+            else
+                echo -e "${RED}✗${NC} $_stale is a non-empty directory — refusing to clobber."
+                echo -e "  Inspect and remove manually, then re-run update.sh."
+                exit 1
+            fi
+        fi
+    done
+
     # Port ranges, read from .env so operator customizations are honored.
     # Defaults match install.sh's freshly-rendered .env (post-migration).
     local lk_udp_start lk_udp_end turn_relay_start turn_relay_end
