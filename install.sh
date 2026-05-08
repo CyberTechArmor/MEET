@@ -446,13 +446,13 @@ setup_repository() {
     # Check if we're already in the MEET directory with required files
     if [ -f "docker-compose.yml" ] && [ -f "docker-compose.proxy.yml" ] && [ -f "Caddyfile" ]; then
         echo -e "${GREEN}✓${NC} Already in MEET directory"
-        # Pull latest changes if it's a git repo
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
+        # NOTE: we used to remove .env at the repo root here. The
+        # external-proxy mode (option 5) keeps its .env at
+        # deploy/external-proxy/.env which we leave alone — install.sh
+        # is idempotent for it. Removing the root .env stays for the
+        # demo / Caddy / nginx / proxypilot modes whose state is at
+        # the root.
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -461,13 +461,7 @@ setup_repository() {
     if [ -d "$MEET_DIR" ] && [ -f "$MEET_DIR/docker-compose.yml" ]; then
         echo -e "${DIM}Found existing MEET directory, switching to it...${NC}"
         cd "$MEET_DIR"
-        # Pull latest changes
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -485,6 +479,52 @@ setup_repository() {
         echo "  Please check your internet connection and try again."
         echo "  Or manually clone: git clone $MEET_REPO"
         exit 1
+    fi
+}
+
+# Pull latest with visibility into branch, before/after hash, and
+# behind/ahead. Doesn't fail the install on git errors (the user might
+# have intentionally pinned a branch) — but never silently swallows
+# them either.
+pull_latest_or_warn() {
+    [ -d ".git" ] || return 0
+    local branch before_hash
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+    before_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+    if [ -z "$branch" ]; then
+        echo -e "  ${YELLOW}!${NC} HEAD is detached at ${before_hash} — skipping pull."
+        echo -e "  ${DIM}You'll deploy whatever's at this commit. Run 'git checkout <branch>' first if that's not what you want.${NC}"
+        return 0
+    fi
+
+    echo -e "  ${DIM}branch:  ${branch}${NC}"
+    echo -e "  ${DIM}commit:  ${before_hash}${NC}"
+
+    if ! git fetch origin "$branch" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} git fetch failed (network?) — continuing with local copy."
+        return 0
+    fi
+
+    local behind ahead
+    behind=$(git rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)
+    ahead=$(git rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+        echo -e "  ${YELLOW}!${NC} Local branch has diverged from origin/$branch ($ahead local, $behind remote)."
+        echo -e "  ${DIM}Skipping pull. Resolve manually if you want the remote commits.${NC}"
+        return 0
+    fi
+    if [ "$behind" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} already up to date"
+        return 0
+    fi
+
+    if git pull --ff-only origin "$branch" >/dev/null 2>&1; then
+        local after_hash
+        after_hash=$(git rev-parse --short HEAD)
+        echo -e "  ${GREEN}✓${NC} pulled $behind commit(s); now at $after_hash"
+    else
+        echo -e "  ${YELLOW}!${NC} pull failed (likely uncommitted changes) — continuing with local copy."
     fi
 }
 

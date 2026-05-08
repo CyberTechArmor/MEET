@@ -49,30 +49,98 @@ git_pull() {
         echo
         return
     fi
-    local branch
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
-    echo -e "${BOLD}1. Pulling latest code${NC} ${DIM}(branch: ${branch:-detached})${NC}"
+    local branch before_hash before_subject
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+    before_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+    before_subject=$(git log -1 --format=%s 2>/dev/null || echo "?")
 
+    echo -e "${BOLD}1. Pulling latest code${NC}"
+    echo -e "   ${DIM}branch:  ${branch:-DETACHED HEAD}${NC}"
+    echo -e "   ${DIM}current: ${before_hash} ${before_subject}${NC}"
+
+    # Detached HEAD: refuse. Continuing would deploy whatever happens to
+    # be at this commit, which is rarely what's intended after a
+    # `git checkout <hash>` workflow. Better to stop early than to ship
+    # stale code silently.
+    if [ -z "$branch" ]; then
+        echo
+        echo -e "${RED}✗ HEAD is detached — refusing to proceed.${NC}"
+        echo -e "  This usually means an earlier 'git checkout <hash>' or '<tag>'."
+        echo -e "  update.sh wants to track a branch so it can pull and stay current."
+        echo
+        echo -e "  Fix: ${YELLOW}git checkout <branch>${NC}   (e.g. main, or your fork's deployment branch)"
+        exit 1
+    fi
+
+    # Dirty tree
     if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+        echo
         echo -e "  ${YELLOW}!${NC} Local changes detected:"
         git status --short
+        echo
         read -p "  Continue without pulling? [y/N]: " yn
         case "$yn" in
-            [Yy]*) echo "  Skipping git pull."; echo; return ;;
+            [Yy]*) echo "  Skipping git pull."; echo; check_working_tree_freshness; return ;;
             *) echo "  Aborted."; exit 1 ;;
         esac
     fi
 
-    if [ -n "$branch" ]; then
+    # Fetch first so we can report position relative to origin without
+    # changing local state.
+    if ! git fetch origin "$branch" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} git fetch failed (network?). Continuing with local copy."
+        check_working_tree_freshness
+        echo
+        return
+    fi
+
+    local behind ahead
+    behind=$(git rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)
+    ahead=$(git rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+
+    if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+        echo
+        echo -e "  ${RED}✗ Local branch has diverged from origin/$branch${NC}"
+        echo -e "    ${DIM}($ahead local commits not in origin, $behind remote commits not in local)${NC}"
+        echo -e "  Resolve manually (rebase, reset, or different branch), then re-run."
+        exit 1
+    fi
+
+    if [ "$behind" -gt 0 ]; then
+        echo -e "   ${DIM}behind:  $behind commit(s) — fast-forwarding${NC}"
         if ! git pull --ff-only origin "$branch" 2>&1; then
-            echo -e "  ${RED}✗ git pull failed${NC} (not fast-forward, conflicts, or network)."
-            echo -e "  ${DIM}Resolve manually, then re-run update.sh.${NC}"
+            echo -e "  ${RED}✗ git pull failed${NC}"
             exit 1
         fi
+        local after_hash after_subject
+        after_hash=$(git rev-parse --short HEAD)
+        after_subject=$(git log -1 --format=%s)
+        echo -e "   ${GREEN}✓${NC} now at: ${after_hash} ${after_subject}"
+    elif [ "$ahead" -gt 0 ]; then
+        echo -e "   ${YELLOW}!${NC} ahead: $ahead local commit(s) not pushed (won't pull)"
     else
-        echo -e "  ${YELLOW}!${NC} detached HEAD — skipping pull"
+        echo -e "   ${GREEN}✓${NC} already up to date"
     fi
+
+    check_working_tree_freshness
     echo
+}
+
+# Sanity-check that recently-added files exist in the working tree. If
+# they don't, the branch / tag the operator is on predates the work and
+# update.sh will silently skip features they expect. Surface this loudly
+# rather than letting them debug "why isn't coturn there".
+check_working_tree_freshness() {
+    local missing=()
+    [ ! -f "deploy/external-proxy/turnserver.conf.template" ] && missing+=("deploy/external-proxy/turnserver.conf.template")
+    [ ! -f "deploy/external-proxy/mount-cert.sh" ]            && missing+=("deploy/external-proxy/mount-cert.sh")
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo
+        echo -e "  ${YELLOW}!${NC} Working tree is missing files added by recent TURN/coturn work:"
+        for f in "${missing[@]}"; do echo "      $f"; done
+        echo -e "  ${DIM}If you expected to have those, your branch is older than that work.${NC}"
+        echo -e "  ${DIM}Check available branches: ${YELLOW}git branch -a${NC}"
+    fi
 }
 
 # Echo the mode numbers (1..5) that have running containers.
@@ -206,6 +274,36 @@ update_with_external_proxy() {
         echo -e "${RED}✗ $dir/.env not found — was install.sh option 5 ever run?${NC}"
         exit 1
     fi
+
+    # Config summary BEFORE doing anything. Most "I ran update.sh and X
+    # didn't happen" reports trace to a config flag the operator didn't
+    # know was set. Print TURN_ENABLED + cert mount status loudly so
+    # what's about to deploy is obvious.
+    echo -e "${BOLD}External-proxy config (from $dir/.env):${NC}"
+    local turn_enabled_now turn_domain_now turn_cert_mount_now
+    turn_enabled_now=$(grep -E '^TURN_ENABLED='   "$dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_domain_now=$(grep -E '^TURN_DOMAIN='    "$dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_cert_mount_now=$(grep -E '^TURN_CERT_MOUNT=' "$dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+    turn_enabled_now=${turn_enabled_now:-false}
+    turn_cert_mount_now=${turn_cert_mount_now:-/var/meet-tls}
+
+    if [ "$turn_enabled_now" = "true" ]; then
+        echo -e "  TURN:           ${GREEN}enabled${NC}  (coturn will be deployed)"
+        echo -e "  TURN_DOMAIN:    ${CYAN}${turn_domain_now:-<unset>}${NC}"
+        if [ -d "$turn_cert_mount_now" ]; then
+            echo -e "  Cert mount:     ${GREEN}✓${NC} ${turn_cert_mount_now}  (bind-mount in place)"
+        else
+            echo -e "  Cert mount:     ${RED}✗${NC} ${turn_cert_mount_now}  (NOT mounted — coturn will fail to start)"
+            echo -e "                  ${DIM}Run on the Incus host: ${YELLOW}sudo bash $dir/mount-cert.sh${NC}"
+        fi
+    else
+        echo -e "  TURN:           ${YELLOW}disabled${NC}  ${DIM}(coturn will NOT be deployed)${NC}"
+        echo -e "  ${DIM}Cellular users will see 'Connecting…' even when wifi works. To enable:${NC}"
+        echo -e "  ${DIM}  • re-run install.sh option 5 and answer Y, OR${NC}"
+        echo -e "  ${DIM}  • edit $dir/.env: set TURN_ENABLED=true and TURN_DOMAIN=<your-host>,${NC}"
+        echo -e "  ${DIM}    then run mount-cert.sh on the Incus host, then re-run update.sh.${NC}"
+    fi
+    echo
 
     # Older installs (before the LiveKit-keys fix) wrote LIVEKIT_API_KEY /
     # LIVEKIT_API_SECRET but no LIVEKIT_KEYS. Reconstruct it from the existing
