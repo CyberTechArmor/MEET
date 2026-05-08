@@ -12,7 +12,7 @@ import {
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll, setVideoQualityPreset } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
@@ -208,7 +208,15 @@ export function useLiveKit() {
       setConnectionState(ConnectionState.Connecting);
 
       // Get token from API
-      const { token, isHost: hostStatus } = await getToken(roomCode, displayName);
+      const tokenResponse = await getToken(roomCode, displayName);
+      const { token, isHost: hostStatus, quality, iceServers } = tokenResponse;
+
+      // Server picked a quality preset for this room (per-room override or
+      // platform default). Apply it before we build the room options below
+      // so the room picks up the right simulcast layers / codec / etc.
+      if (quality) {
+        setVideoQualityPreset(quality);
+      }
 
       // Set host status and room code
       setIsHost(hostStatus);
@@ -220,49 +228,49 @@ export function useLiveKit() {
       sharedRoomInstance = newRoom; // Store in singleton for cross-component access
       setupRoomEvents(newRoom);
 
-      // Connect to LiveKit
-      await newRoom.connect(getLiveKitUrl(), token);
+      // Connect to LiveKit. If the API issued TURN servers (i.e.
+      // TURN_ENABLED=true on the backend), pass them in via rtcConfig so
+      // the browser's ICE gatherer can use them. Without this, cellular
+      // clients can't reach the LXC media path even when the TURN server
+      // is up and listening.
+      const connectOpts = iceServers && iceServers.length > 0
+        ? { rtcConfig: { iceServers } as RTCConfiguration }
+        : undefined;
+      await newRoom.connect(getLiveKitUrl(), token, connectOpts);
 
-      // Try to enable camera and microphone, but handle missing devices gracefully
-      let micEnabled = false;
-      let cameraEnabled = false;
-
-      // Try to enable microphone
-      try {
-        await newRoom.localParticipant.setMicrophoneEnabled(true);
-        micEnabled = true;
-      } catch (micError) {
-        console.warn('Could not enable microphone:', micError);
-        // Continue without microphone
-      }
-
-      // Try to enable camera
-      try {
-        await newRoom.localParticipant.setCameraEnabled(true);
-        cameraEnabled = true;
-      } catch (cameraError) {
-        console.warn('Could not enable camera:', cameraError);
-        // Continue without camera
-      }
-
-      // Notify user if devices are missing
-      if (!micEnabled && !cameraEnabled) {
-        toast('Joined without camera/microphone', { icon: '📺' });
-      } else if (!micEnabled) {
-        toast('No microphone detected', { icon: '🔇' });
-      } else if (!cameraEnabled) {
-        toast('No camera detected', { icon: '📷' });
-      }
-
+      // Transition to the room view IMMEDIATELY after the signaling
+      // connection is up. Don't wait for track publishing — on a slow or
+      // symmetric-NAT'd network (cellular without TURN), setMic/setCamera
+      // can stall waiting for ICE to establish, never resolving and never
+      // rejecting. That used to leave the join screen showing "Connected"
+      // with mic/camera permissions granted by the OS but the user never
+      // moving to the call UI. Each track now publishes independently and
+      // its own state flag flips when it lands.
       setRoom(newRoom);
       setLocalParticipant(newRoom.localParticipant);
       setRemoteParticipants(Array.from(newRoom.remoteParticipants.values()));
-      setMicEnabled(micEnabled);
-      setCameraEnabled(cameraEnabled);
       setView('room');
 
       // Save session for auto-rejoin on refresh
       saveSession(roomCode, displayName, hostStatus);
+
+      // Fire-and-forget mic + camera. Promise.then/.catch instead of await,
+      // so a stuck publish never blocks the UI. The VideoRoom component
+      // listens for LocalTrackPublished and re-renders when the track lands.
+      newRoom.localParticipant.setMicrophoneEnabled(true).then(
+        () => setMicEnabled(true),
+        (err) => {
+          console.warn('Could not enable microphone:', err);
+          toast('Microphone unavailable', { icon: '🔇' });
+        },
+      );
+      newRoom.localParticipant.setCameraEnabled(true).then(
+        () => setCameraEnabled(true),
+        (err) => {
+          console.warn('Could not enable camera:', err);
+          toast('Camera unavailable', { icon: '📷' });
+        },
+      );
 
     } catch (error) {
       console.error('Failed to connect:', error);

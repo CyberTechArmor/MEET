@@ -32,50 +32,131 @@ const SERVER_START_TIME = Date.now();
 const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
 
 // ============================================================================
-// IN-MEMORY STORAGE (Use database in production)
+// PERSISTENT STORAGE
 // ============================================================================
+//
+// API keys, webhooks, server settings, and admin credentials live in SQLite
+// at ${MEET_DATA_DIR:-/data}/meet.db so they survive
+// `docker compose down && up`. CRUD goes through ./store; this file keeps
+// hot caches only for the per-request settings reads.
+//
+// Admin sessions stay in memory: they're TTL-bound (24h) and re-issued on
+// login, so losing them on restart is acceptable. Room metadata is also
+// transient (display names while a room exists).
 
-interface ApiKey {
-  id: string;
-  name: string;
-  key: string;
-  keyHash: string;
-  permissions: string[];
-  createdAt: Date;
-  lastUsedAt: Date | null;
+import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset } from './types.js';
+import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
+import * as store from './store.js';
+import { getDb } from './db.js';
+import { hashPassword, verifyPassword } from './auth.js';
+import * as webauthn from './webauthn.js';
+
+// Open the database before anything else can touch it.
+getDb();
+
+// Configure WebAuthn from the public-facing URL. Three-domain mode passes
+// the API URL as an extra origin so a passkey registered against
+// meet.<host> can also be used when the SPA is served by api.<host>.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || '';
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || '';
+const PUBLIC_LIVEKIT_URL = process.env.PUBLIC_LIVEKIT_URL || '';
+webauthn.configureWebAuthn(PUBLIC_BASE_URL, [PUBLIC_API_URL, PUBLIC_LIVEKIT_URL]);
+
+// TURN — coturn lives in the same compose stack. We don't talk to it
+// directly; we just embed its URL + creds in the iceServers field of
+// every /api/token response so the browser's RTCPeerConnection adds it
+// to its ICE candidate pool. When TURN_ENABLED=false, omit the field
+// entirely (no STUN/TURN ICE servers — the client falls back to its
+// browser defaults, which is fine for wifi).
+const TURN_ENABLED = (process.env.TURN_ENABLED || 'false').toLowerCase() === 'true';
+const TURN_DOMAIN = process.env.TURN_DOMAIN || '';
+const TURN_USERNAME = process.env.TURN_USERNAME || '';
+const TURN_PASSWORD = process.env.TURN_PASSWORD || '';
+const TURN_TLS_PORT = parseInt(process.env.TURN_TLS_PORT || '5349', 10);
+const TURN_UDP_PORT = parseInt(process.env.TURN_UDP_PORT || '3478', 10);
+
+interface IceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
 }
 
-interface Webhook {
-  id: string;
-  name: string;
-  url: string;
-  events: string[];
-  enabled: boolean;
-  secret: string;
-  createdAt: Date;
-  lastTriggeredAt: Date | null;
-  failureCount: number;
+function buildIceServers(): IceServer[] | undefined {
+  if (!TURN_ENABLED || !TURN_DOMAIN || !TURN_USERNAME || !TURN_PASSWORD) {
+    return undefined;
+  }
+  // Order matters: browsers try ICE candidates in roughly the order
+  // they're advertised. Put TURN/TLS first because it's the most
+  // restrictive-network-friendly path; then UDP (faster when it works),
+  // then TCP via the same TLS port. STUN is bundled separately by the
+  // browser; we don't override it here.
+  return [
+    {
+      urls: [
+        `turns:${TURN_DOMAIN}:${TURN_TLS_PORT}?transport=tcp`,
+        `turn:${TURN_DOMAIN}:${TURN_UDP_PORT}?transport=udp`,
+        `turn:${TURN_DOMAIN}:${TURN_TLS_PORT}?transport=tcp`,
+      ],
+      username: TURN_USERNAME,
+      credential: TURN_PASSWORD,
+    },
+  ];
 }
 
-interface AdminSession {
-  token: string;
-  createdAt: Date;
-  expiresAt: Date;
+// Lazy-migrate any v1 plaintext admin password into the v2 password_hash
+// column. Runs once per process; subsequent reads see only the hash.
+{
+  const raw = store.loadAdminCredentialsRaw();
+  if (raw.password && !raw.passwordHash) {
+    const hash = hashPassword(raw.password);
+    store.saveAdminCredentials({
+      username: raw.username,
+      passwordHash: hash,
+      firstLoginDone: raw.firstLoginDone,
+      userHandle: raw.userHandle,
+    });
+    console.log('[migration] hashed legacy plaintext admin password (scrypt)');
+  }
 }
 
-// Room metadata for display names
+// Room metadata for display names — transient.
+// videoQuality, when set, overrides the platform default for any token
+// minted against this room. Lost across restarts; re-set per room via the
+// admin API or implicitly when a room is created with `quality`.
 interface RoomMetadata {
   displayName: string;
   createdAt: Date;
+  videoQuality?: VideoQualityPreset;
 }
 
-// Storage
-let adminUsername: string = ADMIN_USERNAME;
-let adminPassword: string = ADMIN_PASSWORD;
-let isFirstLogin = !ADMIN_USERNAME || !ADMIN_PASSWORD;
-const apiKeys: Map<string, ApiKey> = new Map();
-const webhooks: Map<string, Webhook> = new Map();
-const adminSessions: Map<string, AdminSession> = new Map();
+// Admin credentials. Resolved with this priority:
+//   env vars (if both set)  >  values previously stored in db  >  empty
+// "First login" mode is on whenever neither the env nor the db gives us
+// a complete pair. Passwords (whether from env or db) are kept as scrypt
+// hashes in adminPasswordHash; verifyPassword() compares with timing-safe
+// equality.
+let adminUsername: string;
+let adminPasswordHash: string;
+let isFirstLogin: boolean;
+{
+  const stored = store.loadAdminCredentials();
+  if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+    // Hash env-supplied password fresh on every boot. We never persist this
+    // hash to the db — env is source of truth when set.
+    adminUsername = ADMIN_USERNAME;
+    adminPasswordHash = hashPassword(ADMIN_PASSWORD);
+    isFirstLogin = false;
+  } else if (stored.username && stored.passwordHash) {
+    adminUsername = stored.username;
+    adminPasswordHash = stored.passwordHash;
+    isFirstLogin = false;
+  } else {
+    adminUsername = '';
+    adminPasswordHash = '';
+    isFirstLogin = true;
+  }
+}
+
 const roomMetadata: Map<string, RoomMetadata> = new Map();
 
 // Server settings
@@ -86,6 +167,7 @@ interface ServerSettings {
   recommendedMaxParticipants: number;
   recommendedMaxMeetings: number;
   iframeAllowedDomains: string[]; // Empty array = allow all (*)
+  defaultVideoQuality: VideoQualityPreset; // platform-wide default
 }
 
 // Calculate recommended limits based on available resources
@@ -112,14 +194,43 @@ function getRecommendedLimits(): { participants: number; meetings: number } {
 
 const recommendedLimits = getRecommendedLimits();
 
-const serverSettings: ServerSettings = {
+// Load persisted settings or fall back to defaults; either way save back so
+// subsequent reads bypass the defaults.
+const SETTINGS_DEFAULTS: PersistedSettings = {
   publicAccessEnabled: true,
   maxParticipantsPerMeeting: 0, // 0 = unlimited
   maxConcurrentMeetings: 0, // 0 = unlimited
+  iframeAllowedDomains: [], // Empty = allow all domains (*)
+  defaultVideoQuality: 'auto', // dynamic — pushes the highest layer the network sustains
+};
+// Old persisted blobs predate defaultVideoQuality; merge with defaults so
+// fields added by a later schema version pick up sensible values without
+// requiring a forced settings save.
+const persistedRaw = store.loadSettings();
+const persistedSettings: PersistedSettings = persistedRaw
+  ? { ...SETTINGS_DEFAULTS, ...persistedRaw }
+  : SETTINGS_DEFAULTS;
+if (!persistedRaw) store.saveSettings(persistedSettings);
+
+// In-memory hot copy. The middleware at line ~245 reads serverSettings on
+// every request, so a per-request SQLite read would matter; we keep this
+// object as the source of truth at runtime and persist on every mutation.
+// recommendedMax* are derived at startup and are not persisted.
+const serverSettings: ServerSettings = {
+  ...persistedSettings,
   recommendedMaxParticipants: recommendedLimits.participants,
   recommendedMaxMeetings: recommendedLimits.meetings,
-  iframeAllowedDomains: [], // Empty = allow all domains (*)
 };
+
+function persistServerSettings(): void {
+  store.saveSettings({
+    publicAccessEnabled: serverSettings.publicAccessEnabled,
+    maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
+    maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
+    iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+    defaultVideoQuality: serverSettings.defaultVideoQuality,
+  });
+}
 
 // Webhook event types
 const WEBHOOK_EVENTS = [
@@ -184,7 +295,7 @@ async function triggerWebhooks(eventType: WebhookEventType, data: Record<string,
     data,
   };
 
-  for (const webhook of webhooks.values()) {
+  for (const webhook of store.listWebhooks()) {
     if (!webhook.enabled || !webhook.events.includes(eventType)) {
       continue;
     }
@@ -219,6 +330,7 @@ async function triggerWebhooks(eventType: WebhookEventType, data: Record<string,
       webhook.failureCount++;
       console.error(`Webhook ${webhook.id} error:`, error);
     }
+    store.saveWebhook(webhook);
   }
 }
 
@@ -273,14 +385,14 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
   // Check API key first
   if (apiKeyHeader) {
     const keyHash = hashString(apiKeyHeader);
-    for (const apiKey of apiKeys.values()) {
-      if (apiKey.keyHash === keyHash) {
-        apiKey.lastUsedAt = new Date();
-        req.apiKey = apiKey;
-        req.isAdmin = apiKey.permissions.includes('admin');
-        next();
-        return;
-      }
+    const apiKey = store.findApiKeyByHash(keyHash);
+    if (apiKey) {
+      apiKey.lastUsedAt = new Date();
+      store.saveApiKey(apiKey);
+      req.apiKey = apiKey;
+      req.isAdmin = apiKey.permissions.includes('admin');
+      next();
+      return;
     }
     res.status(401).json({ error: 'Invalid API key' });
     return;
@@ -291,15 +403,16 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
     const token = authHeader.substring(7);
 
     // Check if it's a session token
-    const session = adminSessions.get(token);
+    const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
       next();
       return;
     }
 
-    // Check if it's the admin password
-    if (adminPassword && token === adminPassword) {
+    // Check if it's the admin password (sent as plaintext Bearer; verified
+    // against the scrypt hash with timing-safe equality).
+    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -316,13 +429,13 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
   // Check API key
   if (apiKeyHeader) {
     const keyHash = hashString(apiKeyHeader);
-    for (const apiKey of apiKeys.values()) {
-      if (apiKey.keyHash === keyHash) {
-        apiKey.lastUsedAt = new Date();
-        req.apiKey = apiKey;
-        next();
-        return;
-      }
+    const apiKey = store.findApiKeyByHash(keyHash);
+    if (apiKey) {
+      apiKey.lastUsedAt = new Date();
+      store.saveApiKey(apiKey);
+      req.apiKey = apiKey;
+      next();
+      return;
     }
     res.status(401).json({ error: 'Invalid API key' });
     return;
@@ -331,13 +444,13 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
   // Check Bearer token
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const session = adminSessions.get(token);
+    const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
       next();
       return;
     }
-    if (adminPassword && token === adminPassword) {
+    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -364,6 +477,7 @@ app.get('/health', (_req: Request, res: Response) => {
 app.get('/api/status', (_req: Request, res: Response) => {
   res.json({
     publicAccessEnabled: serverSettings.publicAccessEnabled,
+    defaultVideoQuality: serverSettings.defaultVideoQuality,
     version: API_VERSION,
   });
 });
@@ -449,6 +563,11 @@ Configure webhooks to receive real-time notifications for events like:
                   type: 'object',
                   properties: {
                     publicAccessEnabled: { type: 'boolean', description: 'Whether public (non-API) access is allowed' },
+                    defaultVideoQuality: {
+                      type: 'string',
+                      enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                      description: 'Platform-wide default video quality preset.',
+                    },
                     version: { type: 'string', example: '1.0.0' },
                   },
                 },
@@ -492,6 +611,23 @@ Configure webhooks to receive real-time notifications for events like:
                     participantName: { type: 'string' },
                     participantIdentity: { type: 'string' },
                     isHost: { type: 'boolean' },
+                    quality: {
+                      type: 'string',
+                      enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                      description: 'Video quality preset chosen for this participant. Per-room override (set when the room was created) wins over the platform default. The frontend should call setVideoQualityPreset(quality) before connecting.',
+                    },
+                    iceServers: {
+                      type: 'array',
+                      description: 'Optional. When TURN is configured server-side, this contains the TURN server URL(s) + ephemeral credentials the browser should pass to RTCPeerConnection.iceServers. Omitted entirely when TURN is disabled.',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          urls: { type: 'array', items: { type: 'string' } },
+                          username: { type: 'string' },
+                          credential: { type: 'string' },
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -648,6 +784,11 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited' },
                         maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited' },
                         iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty = allow all (*)' },
+                        defaultVideoQuality: {
+                          type: 'string',
+                          enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                          description: 'Platform-wide default video quality preset.',
+                        },
                       },
                     },
                     recommendations: {
@@ -656,6 +797,11 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer', description: 'Recommended based on server resources' },
                         maxConcurrentMeetings: { type: 'integer', description: 'Recommended based on server resources' },
                       },
+                    },
+                    videoQualityOptions: {
+                      type: 'array',
+                      items: { type: 'string', enum: ['auto', 'high', 'max', 'balanced', 'low'] },
+                      description: 'Valid values for defaultVideoQuality.',
                     },
                   },
                 },
@@ -679,6 +825,11 @@ Configure webhooks to receive real-time notifications for events like:
                   maxParticipantsPerMeeting: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
                   maxConcurrentMeetings: { type: 'integer', description: '0 = unlimited, or set a specific limit' },
                   iframeAllowedDomains: { type: 'array', items: { type: 'string' }, description: 'Domains allowed to embed MEET in iframes. Empty array = allow all (*)' },
+                  defaultVideoQuality: {
+                    type: 'string',
+                    enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                    description: 'Platform-wide default video quality preset for new tokens.',
+                  },
                 },
               },
             },
@@ -700,6 +851,7 @@ Configure webhooks to receive real-time notifications for events like:
                         maxParticipantsPerMeeting: { type: 'integer' },
                         maxConcurrentMeetings: { type: 'integer' },
                         iframeAllowedDomains: { type: 'array', items: { type: 'string' } },
+                        defaultVideoQuality: { type: 'string', enum: ['auto', 'high', 'max', 'balanced', 'low'] },
                       },
                     },
                   },
@@ -761,6 +913,11 @@ Configure webhooks to receive real-time notifications for events like:
                   displayName: { type: 'string', description: 'Friendly display name for the room', example: 'Team Standup' },
                   maxParticipants: { type: 'integer', description: 'Maximum number of participants', default: 100 },
                   emptyTimeout: { type: 'integer', description: 'Seconds before empty room is deleted', default: 300 },
+                  quality: {
+                    type: 'string',
+                    enum: ['auto', 'high', 'max', 'balanced', 'low'],
+                    description: 'Per-room video quality override. When set, every token minted for this room returns this preset instead of the platform default. Lost on API restart (transient room metadata).',
+                  },
                 },
               },
             },
@@ -910,6 +1067,201 @@ Configure webhooks to receive real-time notifications for events like:
         responses: {
           '200': { description: 'API key revoked' },
           '404': { description: 'API key not found' },
+        },
+      },
+    },
+    '/api/admin/api-keys/{keyId}/rotate': {
+      post: {
+        tags: ['API Keys'],
+        summary: 'Rotate API key secret',
+        description: 'Generate a new secret for the given API key, preserving id/name/permissions. The previous secret stops working immediately. The new secret is returned exactly once.',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'keyId', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': {
+            description: 'API key rotated; new secret in `key`.',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string' },
+                    key: { type: 'string', description: 'New secret. Only returned by this endpoint; cannot be recovered later.' },
+                    permissions: { type: 'array', items: { type: 'string' } },
+                    createdAt: { type: 'string', format: 'date-time', description: 'Original creation timestamp; not changed by rotation.' },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'API key not found' },
+        },
+      },
+    },
+    '/api/admin/webauthn/status': {
+      get: {
+        tags: ['Passkeys'],
+        summary: 'Passkey availability',
+        description: 'Check whether passkeys are configured (PUBLIC_BASE_URL is set) and how many are registered. No authentication required so the login form can show or hide the "Sign in with passkey" button.',
+        responses: {
+          '200': {
+            description: 'Passkey status',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    configured: { type: 'boolean', description: 'False if PUBLIC_BASE_URL is empty.' },
+                    registeredCount: { type: 'integer' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/webauthn/register/options': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Begin passkey registration',
+        description: 'Returns a WebAuthn registration challenge for the calling admin. The browser passes this to navigator.credentials.create(); send the result to /register/verify.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'Challenge generated',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    ticket: { type: 'string', description: 'Opaque server-side challenge id; pass back to /register/verify.' },
+                    options: { type: 'object', description: 'PublicKeyCredentialCreationOptionsJSON.' },
+                  },
+                },
+              },
+            },
+          },
+          '503': { description: 'Passkeys not configured (PUBLIC_BASE_URL empty)' },
+        },
+      },
+    },
+    '/api/admin/webauthn/register/verify': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Complete passkey registration',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'response'],
+                properties: {
+                  ticket: { type: 'string' },
+                  label: { type: 'string', description: "Human-readable name for the passkey, e.g. 'Work laptop'." },
+                  response: { type: 'object', description: 'Authenticator attestation (RegistrationResponseJSON).' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': {
+            description: 'Passkey registered',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              success: { type: 'boolean' }, id: { type: 'string' }, label: { type: 'string' },
+            } } } },
+          },
+          '400': { description: 'Challenge expired or attestation failed verification' },
+        },
+      },
+    },
+    '/api/admin/webauthn/auth/options': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Begin passkey sign-in',
+        description: 'Public endpoint — this is the auth itself. Returns a WebAuthn authentication challenge. The browser passes it to navigator.credentials.get(); send the result to /auth/verify.',
+        responses: {
+          '200': {
+            description: 'Challenge generated',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              ticket: { type: 'string' },
+              options: { type: 'object', description: 'PublicKeyCredentialRequestOptionsJSON.' },
+            } } } },
+          },
+          '404': { description: 'No passkeys registered yet' },
+          '503': { description: 'Passkeys not configured (PUBLIC_BASE_URL empty)' },
+        },
+      },
+    },
+    '/api/admin/webauthn/auth/verify': {
+      post: {
+        tags: ['Passkeys'],
+        summary: 'Complete passkey sign-in',
+        description: 'Public endpoint. Verifies the assertion and issues an admin session token (same shape as /api/admin/login).',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['ticket', 'response'], properties: {
+            ticket: { type: 'string' },
+            response: { type: 'object', description: 'Authenticator assertion (AuthenticationResponseJSON).' },
+          } } } },
+        },
+        responses: {
+          '200': {
+            description: 'Session token issued',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              success: { type: 'boolean' },
+              token: { type: 'string' },
+              expiresAt: { type: 'string', format: 'date-time' },
+              isFirstLogin: { type: 'boolean' },
+              username: { type: 'string' },
+            } } } },
+          },
+          '400': { description: 'Invalid request (missing ticket or response)' },
+          '401': { description: 'Assertion failed verification or unknown passkey' },
+        },
+      },
+    },
+    '/api/admin/webauthn/credentials': {
+      get: {
+        tags: ['Passkeys'],
+        summary: 'List registered passkeys',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'List of registered passkeys',
+            content: { 'application/json': { schema: { type: 'object', properties: {
+              credentials: { type: 'array', items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  label: { type: 'string' },
+                  transports: { type: 'array', items: { type: 'string' } },
+                  createdAt: { type: 'string', format: 'date-time' },
+                  lastUsedAt: { type: 'string', format: 'date-time', nullable: true },
+                },
+              } },
+            } } } },
+          },
+        },
+      },
+    },
+    '/api/admin/webauthn/credentials/{id}': {
+      delete: {
+        tags: ['Passkeys'],
+        summary: 'Delete a registered passkey',
+        security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'id', in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: {
+          '200': { description: 'Passkey deleted' },
+          '404': { description: 'Passkey not found' },
         },
       },
     },
@@ -1209,12 +1561,26 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       isHost,
     });
 
+    // Quality preset to apply for this participant: per-room override
+    // takes precedence over the platform default. The frontend reads
+    // this and calls setVideoQualityPreset() before joining.
+    const roomMeta = roomMetadata.get(sanitizedRoomName);
+    const quality: VideoQualityPreset =
+      roomMeta?.videoQuality ?? serverSettings.defaultVideoQuality;
+
+    const iceServers = buildIceServers();
+
     res.json({
       token: jwt,
       roomName: sanitizedRoomName,
       participantName: sanitizedParticipantName,
       participantIdentity,
       isHost,
+      quality,
+      // Only set when TURN is configured. The frontend passes this into
+      // Room.connect's rtcConfig.iceServers; without it, the browser's
+      // default STUN-only set is used (fine for wifi, fails on cellular).
+      ...(iceServers ? { iceServers } : {}),
     });
   } catch (error) {
     console.error('Token generation error:', error);
@@ -1292,41 +1658,39 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
     return;
   }
 
-  // If no admin credentials are set, first login sets them
+  // If no admin credentials are set, first login sets them and persists.
+  // The provided password is hashed with scrypt before storage; we never
+  // persist plaintext.
+  const wasFirstLogin = isFirstLogin;
   if (isFirstLogin) {
     adminUsername = username;
-    adminPassword = password;
+    adminPasswordHash = hashPassword(password);
     isFirstLogin = false;
+    store.saveAdminCredentials({
+      username,
+      passwordHash: adminPasswordHash,
+      firstLoginDone: true,
+      userHandle: store.loadAdminCredentialsRaw().userHandle,
+    });
     console.log(`Admin credentials set by first login: ${username}`);
   }
 
-  if (username !== adminUsername || password !== adminPassword) {
+  if (username !== adminUsername || !verifyPassword(password, adminPasswordHash)) {
     res.status(401).json({ error: 'Invalid username or password' });
     return;
   }
 
-  // Create session token
+  // Create session token (persisted across restarts in admin_sessions).
   const token = generateSessionToken();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-
-  adminSessions.set(token, {
-    token,
-    createdAt: new Date(),
-    expiresAt,
-  });
-
-  // Clean up expired sessions
-  for (const [key, session] of adminSessions.entries()) {
-    if (session.expiresAt < new Date()) {
-      adminSessions.delete(key);
-    }
-  }
+  store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+  store.purgeExpiredAdminSessions();
 
   res.json({
     success: true,
     token,
     expiresAt: expiresAt.toISOString(),
-    isFirstLogin: !ADMIN_USERNAME && adminSessions.size === 1,
+    isFirstLogin: wasFirstLogin,
     username: adminUsername,
   });
 });
@@ -1336,7 +1700,120 @@ app.post('/api/admin/logout', authenticateAdmin, (req: AuthRequest, res: Respons
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    adminSessions.delete(token);
+    store.deleteAdminSession(token);
+  }
+  res.json({ success: true });
+});
+
+// ─────────────────────── WebAuthn / passkey ────────────────────────────
+//
+// Tells the SPA whether passkeys are usable on this deployment.
+// Public so the login form can show or hide the "Sign in with passkey"
+// button without requiring auth itself.
+app.get('/api/admin/webauthn/status', (_req: Request, res: Response) => {
+  res.json({
+    configured: webauthn.isWebAuthnConfigured(),
+    registeredCount: store.listPasskeys().length,
+  });
+});
+
+// Step 1 of registering a new passkey. Requires existing authentication
+// (password or session) so a randomly visiting attacker can't claim a
+// passkey on top of an admin account.
+app.post('/api/admin/webauthn/register/options', authenticateAdmin, async (_req: AuthRequest, res: Response) => {
+  try {
+    const cred = store.loadAdminCredentials();
+    const result = await webauthn.buildRegistrationOptions(cred.username || 'admin', cred.userHandle);
+    res.json(result);
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+interface PasskeyRegisterVerifyBody {
+  ticket: string;
+  label: string;
+  response: webauthn.RegistrationVerifyInput['response'];
+}
+
+app.post('/api/admin/webauthn/register/verify', authenticateAdmin, async (req: Request<object, object, PasskeyRegisterVerifyBody>, res: Response) => {
+  try {
+    const { ticket, label, response } = req.body;
+    if (!ticket || !response) {
+      res.status(400).json({ error: 'ticket and response are required' });
+      return;
+    }
+    const result = await webauthn.verifyRegistration({ ticket, label, response });
+    res.json({ success: true, ...result });
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+// Step 1 of signing in with a passkey. NOT authenticated — this IS the
+// auth.
+app.post('/api/admin/webauthn/auth/options', async (_req: Request, res: Response) => {
+  try {
+    const result = await webauthn.buildAuthOptions();
+    res.json(result);
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 500;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+interface PasskeyAuthVerifyBody {
+  ticket: string;
+  response: webauthn.AuthVerifyInput['response'];
+}
+
+app.post('/api/admin/webauthn/auth/verify', async (req: Request<object, object, PasskeyAuthVerifyBody>, res: Response) => {
+  try {
+    const { ticket, response } = req.body;
+    if (!ticket || !response) {
+      res.status(400).json({ error: 'ticket and response are required' });
+      return;
+    }
+    await webauthn.verifyAuth({ ticket, response });
+
+    // Issue a session token (same shape as password login).
+    const token = generateSessionToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+    store.purgeExpiredAdminSessions();
+
+    res.json({
+      success: true,
+      token,
+      expiresAt: expiresAt.toISOString(),
+      isFirstLogin: false,
+      username: adminUsername,
+    });
+  } catch (e) {
+    const status = (e as { statusCode?: number })?.statusCode ?? 401;
+    res.status(status).json({ error: (e as Error).message });
+  }
+});
+
+// List + delete registered passkeys.
+app.get('/api/admin/webauthn/credentials', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json({
+    credentials: store.listPasskeys().map((p) => ({
+      id: p.id,
+      label: p.label,
+      transports: p.transports,
+      createdAt: p.createdAt.toISOString(),
+      lastUsedAt: p.lastUsedAt ? p.lastUsedAt.toISOString() : null,
+    })),
+  });
+});
+
+app.delete('/api/admin/webauthn/credentials/:id', authenticateAdmin, (req: Request<{ id: string }>, res: Response) => {
+  if (!store.deletePasskey(req.params.id)) {
+    res.status(404).json({ error: 'Passkey not found' });
+    return;
   }
   res.json({ success: true });
 });
@@ -1350,8 +1827,8 @@ app.get('/api/admin/stats', authenticateApiKeyOrAdmin, async (_req: AuthRequest,
     res.json({
       activeRooms: rooms.length,
       totalParticipants,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     });
@@ -1360,8 +1837,8 @@ app.get('/api/admin/stats', authenticateApiKeyOrAdmin, async (_req: AuthRequest,
     res.json({
       activeRooms: 0,
       totalParticipants: 0,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     });
@@ -1376,11 +1853,13 @@ app.get('/api/admin/settings', authenticateAdmin, (_req: AuthRequest, res: Respo
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
       iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+      defaultVideoQuality: serverSettings.defaultVideoQuality,
     },
     recommendations: {
       maxParticipantsPerMeeting: serverSettings.recommendedMaxParticipants,
       maxConcurrentMeetings: serverSettings.recommendedMaxMeetings,
     },
+    videoQualityOptions: VIDEO_QUALITY_PRESET_VALUES,
   });
 });
 
@@ -1390,10 +1869,11 @@ interface UpdateSettingsRequest {
   maxParticipantsPerMeeting?: number;
   maxConcurrentMeetings?: number;
   iframeAllowedDomains?: string[];
+  defaultVideoQuality?: string;
 }
 
 app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, UpdateSettingsRequest>, res: Response) => {
-  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings, iframeAllowedDomains } = req.body;
+  const { publicAccessEnabled, maxParticipantsPerMeeting, maxConcurrentMeetings, iframeAllowedDomains, defaultVideoQuality } = req.body;
 
   if (publicAccessEnabled !== undefined) {
     serverSettings.publicAccessEnabled = publicAccessEnabled;
@@ -1425,6 +1905,18 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
     serverSettings.iframeAllowedDomains = validDomains;
   }
 
+  if (defaultVideoQuality !== undefined) {
+    if (!isValidVideoQuality(defaultVideoQuality)) {
+      res.status(400).json({
+        error: `defaultVideoQuality must be one of: ${VIDEO_QUALITY_PRESET_VALUES.join(', ')}`,
+      });
+      return;
+    }
+    serverSettings.defaultVideoQuality = defaultVideoQuality;
+  }
+
+  persistServerSettings();
+
   res.json({
     success: true,
     settings: {
@@ -1432,6 +1924,7 @@ app.put('/api/admin/settings', authenticateAdmin, (req: Request<object, object, 
       maxParticipantsPerMeeting: serverSettings.maxParticipantsPerMeeting,
       maxConcurrentMeetings: serverSettings.maxConcurrentMeetings,
       iframeAllowedDomains: serverSettings.iframeAllowedDomains,
+      defaultVideoQuality: serverSettings.defaultVideoQuality,
     },
   });
 });
@@ -1465,10 +1958,21 @@ interface CreateRoomRequest {
   displayName?: string;
   maxParticipants?: number;
   emptyTimeout?: number; // seconds before empty room is deleted
+  // Optional video quality override for this room. When set, every token
+  // minted for this room returns this preset instead of the platform
+  // default. Useful for stamping low-bandwidth meetings (`'low'`) or
+  // quality-critical recordings (`'max'`).
+  quality?: string;
 }
 
 app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, object, CreateRoomRequest>, res: Response) => {
-  const { roomName, displayName, maxParticipants, emptyTimeout } = req.body;
+  const { roomName, displayName, maxParticipants, emptyTimeout, quality } = req.body;
+  if (quality !== undefined && !isValidVideoQuality(quality)) {
+    res.status(400).json({
+      error: `quality must be one of: ${VIDEO_QUALITY_PRESET_VALUES.join(', ')}`,
+    });
+    return;
+  }
 
   if (!roomName || typeof roomName !== 'string') {
     res.status(400).json({ error: 'roomName is required' });
@@ -1497,11 +2001,13 @@ app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, ob
       emptyTimeout: emptyTimeout || 300, // 5 minutes default
     });
 
-    // Store metadata if display name provided
-    if (displayName) {
+    // Store metadata if display name OR quality override provided.
+    if (displayName || quality) {
+      const existing = roomMetadata.get(sanitizedRoomName);
       roomMetadata.set(sanitizedRoomName, {
-        displayName,
-        createdAt: new Date(),
+        displayName: displayName ?? existing?.displayName ?? sanitizedRoomName,
+        createdAt: existing?.createdAt ?? new Date(),
+        videoQuality: (quality as VideoQualityPreset | undefined) ?? existing?.videoQuality,
       });
     }
 
@@ -1574,7 +2080,7 @@ app.put('/api/rooms/:roomName', authenticateApiKeyOrAdmin, async (req: Request<{
 
 // List API keys
 app.get('/api/admin/api-keys', authenticateAdmin, (_req: AuthRequest, res: Response) => {
-  const keys = Array.from(apiKeys.values()).map(key => ({
+  const keys = store.listApiKeys().map(key => ({
     id: key.id,
     name: key.name,
     keyPrefix: maskApiKey(key.key),
@@ -1616,7 +2122,7 @@ app.post('/api/admin/api-keys', authenticateAdmin, (req: Request<object, object,
     lastUsedAt: null,
   };
 
-  apiKeys.set(id, apiKey);
+  store.saveApiKey(apiKey);
 
   res.status(201).json({
     id,
@@ -1631,13 +2137,41 @@ app.post('/api/admin/api-keys', authenticateAdmin, (req: Request<object, object,
 app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyId: string }>, res: Response) => {
   const { keyId } = req.params;
 
-  if (!apiKeys.has(keyId)) {
+  if (!store.deleteApiKey(keyId)) {
+    res.status(404).json({ error: 'API key not found' });
+    return;
+  }
+  res.json({ success: true, message: 'API key revoked' });
+});
+
+// Rotate API key — replace the secret while keeping the id, name, and
+// permissions. The previous secret stops working immediately. Useful when
+// a key may have leaked but the consumer can be reconfigured without
+// recreating the integration.
+app.post('/api/admin/api-keys/:keyId/rotate', authenticateAdmin, (req: Request<{ keyId: string }>, res: Response) => {
+  const { keyId } = req.params;
+  const existing = store.getApiKey(keyId);
+  if (!existing) {
     res.status(404).json({ error: 'API key not found' });
     return;
   }
 
-  apiKeys.delete(keyId);
-  res.json({ success: true, message: 'API key revoked' });
+  const newKey = generateApiKey();
+  const rotated: ApiKey = {
+    ...existing,
+    key: newKey,
+    keyHash: hashString(newKey),
+    lastUsedAt: null, // reset; the new key has never been used
+  };
+  store.saveApiKey(rotated);
+
+  res.json({
+    id: rotated.id,
+    name: rotated.name,
+    key: newKey, // Only returned on rotation; cannot be recovered later.
+    permissions: rotated.permissions,
+    createdAt: rotated.createdAt.toISOString(),
+  });
 });
 
 // ============================================================================
@@ -1646,7 +2180,7 @@ app.delete('/api/admin/api-keys/:keyId', authenticateAdmin, (req: Request<{ keyI
 
 // List webhooks
 app.get('/api/admin/webhooks', authenticateAdmin, (_req: AuthRequest, res: Response) => {
-  const hooks = Array.from(webhooks.values()).map(webhook => ({
+  const hooks = store.listWebhooks().map(webhook => ({
     id: webhook.id,
     name: webhook.name,
     url: webhook.url,
@@ -1715,7 +2249,7 @@ app.post('/api/admin/webhooks', authenticateAdmin, (req: Request<object, object,
     failureCount: 0,
   };
 
-  webhooks.set(id, webhook);
+  store.saveWebhook(webhook);
 
   res.status(201).json({
     id,
@@ -1733,7 +2267,7 @@ app.post('/api/admin/webhooks', authenticateAdmin, (req: Request<object, object,
 // Get webhook
 app.get('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1763,7 +2297,7 @@ interface UpdateWebhookRequest {
 
 app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }, object, UpdateWebhookRequest>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1799,6 +2333,8 @@ app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ web
     webhook.enabled = enabled;
   }
 
+  store.saveWebhook(webhook);
+
   res.json({
     id: webhook.id,
     name: webhook.name,
@@ -1816,19 +2352,18 @@ app.put('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ web
 app.delete('/api/admin/webhooks/:webhookId', authenticateAdmin, (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
 
-  if (!webhooks.has(webhookId)) {
+  if (!store.deleteWebhook(webhookId)) {
     res.status(404).json({ error: 'Webhook not found' });
     return;
   }
 
-  webhooks.delete(webhookId);
   res.json({ success: true, message: 'Webhook deleted' });
 });
 
 // Test webhook
 app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: Request<{ webhookId: string }>, res: Response) => {
   const { webhookId } = req.params;
-  const webhook = webhooks.get(webhookId);
+  const webhook = store.getWebhook(webhookId);
 
   if (!webhook) {
     res.status(404).json({ error: 'Webhook not found' });
@@ -1975,13 +2510,13 @@ async function getAdminData(): Promise<{
     stats: {
       activeRooms: rooms.length,
       totalParticipants,
-      apiKeysCount: apiKeys.size,
-      webhooksCount: webhooks.size,
+      apiKeysCount: store.countApiKeys(),
+      webhooksCount: store.countWebhooks(),
       uptime: Math.floor((Date.now() - SERVER_START_TIME) / 1000),
       version: API_VERSION,
     },
     rooms,
-    apiKeys: Array.from(apiKeys.values()).map((key) => ({
+    apiKeys: store.listApiKeys().map((key) => ({
       id: key.id,
       name: key.name,
       keyPrefix: maskApiKey(key.key),
@@ -1989,7 +2524,7 @@ async function getAdminData(): Promise<{
       createdAt: key.createdAt.toISOString(),
       lastUsedAt: key.lastUsedAt?.toISOString() || null,
     })),
-    webhooks: Array.from(webhooks.values()).map((webhook) => ({
+    webhooks: store.listWebhooks().map((webhook) => ({
       id: webhook.id,
       name: webhook.name,
       url: webhook.url,
@@ -2021,7 +2556,7 @@ wss.on('connection', (ws: WebSocket) => {
         const token = message.token;
 
         // Check if it's a valid session token
-        const session = adminSessions.get(token);
+        const session = store.getAdminSession(token);
         if (session && session.expiresAt > new Date()) {
           client.isAuthenticated = true;
           client.token = token;
@@ -2030,7 +2565,7 @@ wss.on('connection', (ws: WebSocket) => {
           // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-        } else if (adminPassword && token === adminPassword) {
+        } else if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
           client.isAuthenticated = true;
           client.token = token;
           authenticatedClients.add(client);

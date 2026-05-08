@@ -1,0 +1,69 @@
+# LiveKit config TEMPLATE for the "external reverse proxy" install
+# option. Rendered to livekit.yaml by install.sh / update.sh from .env.
+# Don't edit this template to adjust your install — edit .env and re-run
+# update.sh; edits here only take effect on a fresh install.
+#
+# This file is bind-mounted read-only into the livekit container. WebRTC
+# UDP media bypasses the reverse proxy and reaches LiveKit directly on
+# the host UDP range below.
+#
+# Auto-rendered fields (substituted from .env at install/update time):
+#   - rtc.turn_servers — populated only when TURN_ENABLED=true. Tells
+#                        LiveKit's signaling server to advertise coturn
+#                        to clients via the participant join response's
+#                        iceServers. Belt-and-suspenders against the
+#                        meet-api /api/token iceServers path failing
+#                        for any reason. Two entries are rendered: one
+#                        TURN-over-TLS (the cellular-survivable path)
+#                        and one plain UDP (faster when the network
+#                        allows it).
+#   - rtc.port_range_start / _end — WebRTC UDP media range. Default is
+#                        50000-54900 (54901 ports), leaving 55000-60000
+#                        for coturn's relay range so the host edge can
+#                        forward a single contiguous udp/50000-60000
+#                        range. Override via LIVEKIT_UDP_PORT_RANGE_*
+#                        in .env if the split needs to move.
+#   - rtc.nat_1_to_1_ips — when LIVEKIT_NODE_IP differs from BRIDGE_IP
+#                        (the typical LXC-behind-NAT case), tells
+#                        LiveKit to advertise BOTH addresses as ICE
+#                        candidates. Without this, coturn would have to
+#                        relay browser → public-IP-of-host → host-NAT-
+#                        hairpin → bridge → LiveKit, which fails when
+#                        the host doesn't support NAT loopback. With
+#                        it, browsers (via TURN) can reach LiveKit's
+#                        bridge IP directly through coturn (which is
+#                        also on the bridge), no hairpin needed.
+#                        Symptom of missing this: cellular calls
+#                        connect slowly (10s+) or unreliably.
+
+port: 7880
+
+rtc:
+  tcp_port: 7881
+  port_range_start: @LIVEKIT_UDP_PORT_RANGE_START@
+  port_range_end: @LIVEKIT_UDP_PORT_RANGE_END@
+
+  # Auto-detect the public IP via STUN. Overridden by node_ip below when
+  # LIVEKIT_NODE_IP is set in the environment, which is read by the LiveKit
+  # entrypoint and exported as NODE_IP.
+  use_external_ip: true
+@NAT_1_TO_1_IPS@
+
+  # Don't advertise loopback ICE candidates — clients can't reach them.
+  enable_loopback_candidate: false
+
+  stun_servers:
+    - stun.l.google.com:19302
+    - stun1.l.google.com:19302
+@TURN_SERVERS_BLOCK@
+
+# Fallback keys for direct `docker run` use only. The compose stack sets
+# LIVEKIT_KEYS in the environment, which OVERRIDES this block at runtime
+# (see deploy/external-proxy/docker-compose.yml). install.sh writes the
+# matching <key>: <secret> there from a single source of truth, so this
+# fallback shouldn't normally be reached.
+keys:
+  devkey: secret
+
+logging:
+  level: info

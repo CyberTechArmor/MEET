@@ -18,9 +18,33 @@ function App() {
   const { setDisplayName, setRoomCode, setHideEndCall } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
-  const [showAdmin, setShowAdmin] = useState(false);
+  // Hash-driven so a refresh while the admin panel is open lands back in
+  // the same panel + tab instead of bouncing to the join screen.
+  // #admin              → dashboard
+  // #admin/settings     → settings tab (etc.)
+  const [showAdmin, setShowAdmin] = useState(
+    () => typeof window !== 'undefined' && window.location.hash.startsWith('#admin')
+  );
   const [publicAccessEnabled, setPublicAccessEnabled] = useState<boolean | null>(null);
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
+
+  // Mirror showAdmin into the URL hash, and react to back/forward.
+  useEffect(() => {
+    const hashIsAdmin = window.location.hash.startsWith('#admin');
+    if (showAdmin && !hashIsAdmin) {
+      window.history.replaceState(null, '', '#admin');
+    } else if (!showAdmin && hashIsAdmin) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  }, [showAdmin]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      setShowAdmin(window.location.hash.startsWith('#admin'));
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   // Check public access status on mount
   useEffect(() => {

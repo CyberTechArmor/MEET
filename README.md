@@ -27,6 +27,20 @@ cd MEET
 ./install.sh
 ```
 
+### Updating an existing install
+
+```bash
+cd MEET
+./update.sh                    # auto-detects mode, pulls, rebuilds, restarts
+FORCE_REBUILD=1 ./update.sh    # force a clean rebuild (no layer cache)
+./update.sh --mode 5           # skip detection if you know the mode
+```
+
+`update.sh` does **not** regenerate secrets, certificates, or hostnames —
+your `.env`, Let's Encrypt certs, and LiveKit API keys are preserved.
+For the external-proxy / LXC mode, it also reconstructs `LIVEKIT_KEYS`
+in `.env` if a pre-fix install left it out.
+
 ### Requirements
 
 - Docker
@@ -36,11 +50,17 @@ That's it! The installer will automatically install missing dependencies.
 
 ### Installation Modes
 
-The installer offers three modes:
+The installer offers five modes:
 
 1. **Demo Mode** - Quick local development (http://localhost:3000)
-2. **Demo + Reverse Proxy** - Deployment with Caddy for automatic HTTPS
-3. **Production Mode** - Full deployment (coming soon)
+2. **Deploy with Caddy** - Bundled Caddy reverse proxy with automatic Let's Encrypt
+3. **Deploy with host Nginx + Certbot** - Uses host-installed Nginx for SSL
+4. **Deploy with ProxyPilot / NPM** - Each component on its own subdomain
+5. **Behind external reverse proxy (LXC / bare-metal)** - Host already runs
+   Caddy/nginx as the TLS edge; this stack ships no TLS and binds 0.0.0.0
+   so the host proxy can reach it. Walk-through:
+   [`docs/install/external-reverse-proxy.md`](docs/install/external-reverse-proxy.md)
+6. **Production Mode** - Full deployment (coming soon)
 
 ## Features
 
@@ -296,6 +316,87 @@ The cleanup script removes:
 1. Some browsers require HTTPS for screen sharing (localhost is exempt)
 2. On macOS, grant screen recording permission in System Preferences
 3. Try selecting a specific window instead of entire screen
+
+### Operator state persistence (external-proxy mode)
+
+API keys, webhooks, server settings, and the admin username/password are
+persisted in SQLite at `/data/meet.db` inside the `meet-api` container.
+The compose stack mounts the named volume `meet-api-data` there, so all
+of those survive `docker compose down && up`. `docker compose down -v`
+wipes the volume — use it only when you intend a full reset.
+
+To back up or inspect the file from the host:
+
+```bash
+docker compose cp meet-api:/data/meet.db ./meet-backup.db
+```
+
+### Lost admin password or passkey
+
+Run from the external-proxy directory on the host:
+
+```bash
+bash deploy/external-proxy/reset-admin.sh --help
+bash deploy/external-proxy/reset-admin.sh --set-password 'newpass'
+bash deploy/external-proxy/reset-admin.sh --clear-passkeys
+bash deploy/external-proxy/reset-admin.sh                # default: full reset (interactive password)
+```
+
+The script execs into the running `meet-api` container and edits the
+SQLite database directly — no API restart required.
+
+Note: this is the first MEET version with persistent state. Prior to it,
+admin keys/webhooks/settings were lost on every container recreate.
+Running `update.sh` from a previous install creates an empty database on
+first start; any keys configured before will need to be re-created.
+
+### External-proxy / LXC mode
+
+Run `bash deploy/external-proxy/info.sh` first — it surfaces most of these
+automatically. Top failure modes, in the order they tend to bite:
+
+1. **LiveKit logs `could not validate external IP … context canceled` and
+   the stack works anyway.** Normal when `LIVEKIT_NODE_IP` is set in
+   `deploy/external-proxy/.env` (which `install.sh` does by default). LiveKit
+   tries STUN, can't NAT-loopback the host's own public IP, then falls
+   back to `NODE_IP`. The warning is only a problem if `LIVEKIT_NODE_IP`
+   is **empty** — then LiveKit fails to start and you'll see `/livekit`
+   502s and `/api/rooms` 500s. Set it and `docker compose up -d livekit`.
+2. **Login works, admin panel shows Disconnected, `/api/rooms` returns
+   `Unauthorized: invalid API key`.** `meet-api` and the `livekit`
+   container disagree on the LiveKit auth pair. Re-run `./install.sh`
+   option 5 (idempotent — preserves the existing key but rewrites
+   `LIVEKIT_KEYS` so both services match), then `info.sh` should show
+   the LiveKit auth probe ✓.
+3. **Rooms get created in the admin panel, but joining hangs at
+   "Connecting…" and the browser logs `could not establish pc connection`.**
+   ICE didn't pair because UDP isn't reaching the LXC. ProxyPilot/Caddy
+   can't proxy UDP — you need Incus proxy devices for `udp/50000-60000`
+   and `tcp/7881`. `info.sh` prints the exact commands with your bridge
+   IP filled in. If those are in place and only same-LAN testing fails,
+   it's NAT hairpinning (test from cellular to confirm).
+4. **Calls work on every wifi but fail on cellular.** Cellular carriers
+   use symmetric NAT, which defeats WebRTC's STUN-based hole punching.
+   Enable LiveKit's built-in TURN: re-run `install.sh` and answer Y to
+   the TURN prompt, provision a TLS cert at
+   `deploy/external-proxy/tls/turn.crt`/`turn.key` (see §7 of the
+   external-reverse-proxy doc for three ways), and open `tcp/5349`,
+   `udp/3478`, and `udp/30000-32000` on the host firewall + cloud
+   security group. Verify with `bash deploy/external-proxy/info.sh` —
+   the **TURN status** section reports cert validity and listening
+   state. The only authoritative test is a phone on cellular with
+   wifi off; with TURN working it connects in seconds.
+4. **`POST /api/admin/login` returns 404 `Cannot POST /admin/login`.**
+   Reverse proxy is stripping the `/api` prefix. Only `/livekit/*` should
+   strip; `/api/*` and `/ws/*` must preserve. ProxyPilot has a per-route
+   strip toggle.
+5. **Iframe embedding rejected with `X-Frame-Options: SAMEORIGIN`.** The
+   reverse proxy is injecting it. The MEET frontend and API both already
+   strip it; if you see it, your proxy is adding it as a default header.
+   Remove it for this site (Caddy `-X-Frame-Options`) and set
+   `Content-Security-Policy: frame-ancestors *`.
+
+Full walk-through: [`docs/install/external-reverse-proxy.md`](docs/install/external-reverse-proxy.md).
 
 ## License
 

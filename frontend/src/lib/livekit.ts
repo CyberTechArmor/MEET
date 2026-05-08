@@ -71,16 +71,20 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
     audioRed: true,
   },
   /**
-   * Adaptive quality (recommended)
-   * Best for: Most use cases, automatically adapts to network conditions
-   * Resolution: 1080p capture with dynamic adjustment
-   * Bitrate: Adaptive based on network
+   * Adaptive quality (default).
+   *
+   * Captures at 1080p and ships three simulcast layers including 1080p,
+   * so LiveKit's selective forwarding can hand each receiver the highest
+   * resolution their downlink + decoder can handle. Combined with
+   * adaptiveStream on the receiver, this is "push the highest possible
+   * while in a call" — clients on a flaky connection downgrade
+   * automatically without blocking everyone else.
    */
   auto: {
     captureResolution: VideoPresets.h1080,
-    simulcastLayers: [VideoPresets.h180, VideoPresets.h360, VideoPresets.h720],
+    simulcastLayers: [VideoPresets.h180, VideoPresets.h540, VideoPresets.h1080],
     videoCodec: 'vp9',
-    screenSharePreset: ScreenSharePresets.h1080fps15,
+    screenSharePreset: ScreenSharePresets.h1080fps30,
     audioDtx: true,
     audioRed: true,
   },
@@ -114,8 +118,13 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
   },
 };
 
-/** Current video quality preset (can be changed at runtime) */
-let currentQualityPreset: VideoQualityPreset = 'high';
+/** Current video quality preset (can be changed at runtime).
+ *
+ * Default is 'auto' — adaptive simulcast pushing the highest layer the
+ * network sustains. The /api/token response can override this per-room
+ * via its `quality` field; useLiveKit applies it before connect().
+ */
+let currentQualityPreset: VideoQualityPreset = 'auto';
 
 /**
  * Set the video quality preset
@@ -265,6 +274,18 @@ export interface TokenResponse {
   participantName: string;
   participantIdentity: string;
   isHost: boolean;
+  /**
+   * Video quality preset chosen by the server for this participant.
+   * Per-room metadata wins over the platform default. Apply with
+   * setVideoQualityPreset() before connecting.
+   */
+  quality?: VideoQualityPreset;
+  /**
+   * Server-issued TURN/STUN servers. Pass to Room.connect's rtcConfig
+   * so the browser uses them in ICE gathering. Only present when TURN
+   * is configured server-side.
+   */
+  iceServers?: RTCIceServer[];
 }
 
 export interface RoomCodeResponse {
@@ -290,6 +311,7 @@ export async function getToken(roomName: string, participantName: string): Promi
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get token' }));
     throw new Error(error.error || 'Failed to get token');
@@ -304,6 +326,7 @@ export async function getToken(roomName: string, participantName: string): Promi
 export async function generateRoomCode(): Promise<string> {
   const response = await fetch(`${API_URL}/api/room-code`);
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Fallback to client-side generation
     const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -653,6 +676,7 @@ export interface PublicStatusResponse {
 export async function getPublicStatus(): Promise<PublicStatusResponse> {
   const response = await fetch(`${API_URL}/api/status`);
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Default to enabled if we can't reach the status endpoint
     return { publicAccessEnabled: true, version: '1.0.0' };
@@ -676,6 +700,7 @@ export async function endMeetingForAll(roomName: string, participantIdentity: st
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to end meeting' }));
     throw new Error(error.error || 'Failed to end meeting');
@@ -729,6 +754,137 @@ export interface AdminLoginResponse {
 }
 
 /**
+ * Treat 401 responses on any admin endpoint as "your session is gone";
+ * fire a window event so AdminPanel.tsx can clear local auth and bounce
+ * the user back to the login form. Without this, a server restart that
+ * dropped sessions left the SPA showing the admin shell with every
+ * sub-request 401-ing in the network tab.
+ */
+function notifyUnauthorizedIfNeeded(response: Response): void {
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('admin:unauthorized'));
+  }
+}
+
+// ─────────────────────────────── passkey ──────────────────────────────
+
+export interface PasskeyStatus {
+  configured: boolean;
+  registeredCount: number;
+}
+
+export interface PasskeyCredentialInfo {
+  id: string;
+  label: string;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function getPasskeyStatus(): Promise<PasskeyStatus> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/status`);
+  if (!response.ok) return { configured: false, registeredCount: 0 };
+  return response.json();
+}
+
+/**
+ * Register a passkey. Caller must already be authenticated (we use the
+ * existing session token). Throws on failure with a human-readable message.
+ */
+export async function registerPasskey(token: string, label: string): Promise<{ id: string; label: string }> {
+  // Lazy-import the browser SDK so it isn't pulled into the main bundle
+  // for non-admin users.
+  const { startRegistration } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/register/options`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(optsRes);
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'Failed to start passkey registration' }));
+    throw new Error(err.error || 'Failed to start passkey registration');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  // Browser prompts the user; throws if they cancel or no authenticator.
+  const attestation = await startRegistration({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/register/verify`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ticket, label, response: attestation }),
+  });
+  notifyUnauthorizedIfNeeded(verifyRes);
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey registration failed' }));
+    throw new Error(err.error || 'Passkey registration failed');
+  }
+  return verifyRes.json();
+}
+
+/**
+ * Sign in with a passkey. Returns the same shape as adminLogin so callers
+ * can drop the result into adminStore.setAuth().
+ */
+export async function signInWithPasskey(): Promise<AdminLoginResponse> {
+  const { startAuthentication } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/auth/options`, { method: 'POST' });
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'No passkeys registered' }));
+    throw new Error(err.error || 'No passkeys registered');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  const assertion = await startAuthentication({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/auth/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, response: assertion }),
+  });
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey sign-in failed' }));
+    throw new Error(err.error || 'Passkey sign-in failed');
+  }
+  return verifyRes.json();
+}
+
+export async function listRegisteredPasskeys(token: string): Promise<PasskeyCredentialInfo[]> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error('Failed to list passkeys');
+  const body = await response.json();
+  return body.credentials;
+}
+
+export async function deleteRegisteredPasskey(token: string, id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials/${id}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Failed to delete passkey' }));
+    throw new Error(err.error || 'Failed to delete passkey');
+  }
+}
+
+/**
+ * Whether the current browser supports WebAuthn at all. Use this to hide
+ * passkey UI on platforms that can't deliver it.
+ */
+export function browserSupportsPasskeys(): boolean {
+  return typeof window !== 'undefined' && !!window.PublicKeyCredential;
+}
+
+/**
  * Admin login
  */
 export async function adminLogin(username: string, password: string): Promise<AdminLoginResponse> {
@@ -740,6 +896,7 @@ export async function adminLogin(username: string, password: string): Promise<Ad
     body: JSON.stringify({ username, password }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Login failed' }));
     throw new Error(error.error || 'Login failed');
@@ -779,6 +936,7 @@ export async function getServerStats(token: string): Promise<ServerStats> {
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get stats' }));
     throw new Error(error.error || 'Failed to get stats');
@@ -805,6 +963,7 @@ export async function listRooms(token: string): Promise<{ rooms: RoomInfo[]; tot
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list rooms' }));
     throw new Error(error.error || 'Failed to list rooms');
@@ -830,6 +989,7 @@ export async function updateRoomDisplayName(
     body: JSON.stringify({ displayName }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update room' }));
     throw new Error(error.error || 'Failed to update room');
@@ -866,6 +1026,7 @@ export async function listApiKeys(token: string): Promise<{ apiKeys: ApiKeyInfo[
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list API keys' }));
     throw new Error(error.error || 'Failed to list API keys');
@@ -891,6 +1052,7 @@ export async function createApiKey(
     body: JSON.stringify({ name, permissions }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create API key' }));
     throw new Error(error.error || 'Failed to create API key');
@@ -910,6 +1072,7 @@ export async function revokeApiKey(token: string, keyId: string): Promise<void> 
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to revoke API key' }));
     throw new Error(error.error || 'Failed to revoke API key');
@@ -954,6 +1117,7 @@ export async function listWebhooks(token: string): Promise<{ webhooks: WebhookIn
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list webhooks' }));
     throw new Error(error.error || 'Failed to list webhooks');
@@ -981,6 +1145,7 @@ export async function createWebhook(
     body: JSON.stringify({ name, url, events, enabled }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create webhook' }));
     throw new Error(error.error || 'Failed to create webhook');
@@ -1006,6 +1171,7 @@ export async function updateWebhook(
     body: JSON.stringify(updates),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update webhook' }));
     throw new Error(error.error || 'Failed to update webhook');
@@ -1025,6 +1191,7 @@ export async function deleteWebhook(token: string, webhookId: string): Promise<v
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to delete webhook' }));
     throw new Error(error.error || 'Failed to delete webhook');
@@ -1049,6 +1216,7 @@ export async function testWebhook(token: string, webhookId: string): Promise<Web
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to test webhook' }));
     throw new Error(error.error || 'Failed to test webhook');
@@ -1063,6 +1231,7 @@ export interface ServerSettings {
   maxParticipantsPerMeeting: number;
   maxConcurrentMeetings: number;
   iframeAllowedDomains: string[];
+  defaultVideoQuality: VideoQualityPreset;
 }
 
 export interface ServerSettingsResponse {
@@ -1071,6 +1240,7 @@ export interface ServerSettingsResponse {
     maxParticipantsPerMeeting: number;
     maxConcurrentMeetings: number;
   };
+  videoQualityOptions: VideoQualityPreset[];
 }
 
 /**
@@ -1083,6 +1253,7 @@ export async function getServerSettings(token: string): Promise<ServerSettingsRe
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get settings' }));
     throw new Error(error.error || 'Failed to get settings');
@@ -1107,6 +1278,7 @@ export async function updateServerSettings(
     body: JSON.stringify(settings),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
     throw new Error(error.error || 'Failed to update settings');

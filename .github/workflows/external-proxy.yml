@@ -1,0 +1,83 @@
+name: external-proxy install variant
+
+# Validates the "Behind external reverse proxy (LXC / bare-metal)" install
+# option: compose syntax, image build, services healthy, /health endpoints
+# answer 200 from the host (i.e. on 0.0.0.0).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/external-proxy/**"
+      - "frontend/**"
+      - "api/**"
+      - ".github/workflows/external-proxy.yml"
+  pull_request:
+    paths:
+      - "deploy/external-proxy/**"
+      - "frontend/**"
+      - "api/**"
+      - ".github/workflows/external-proxy.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/external-proxy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed .env from .env.example
+        run: cp .env.example .env
+
+      - name: docker compose config (lint compose file)
+        run: docker compose config --quiet
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Bring stack up
+        run: docker compose up -d
+
+      - name: Wait for services to become healthy
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            unhealthy=$(docker compose ps --format '{{.Name}} {{.Health}}' \
+              | awk '$2 != "healthy" && $2 != "" {print $1}')
+            if [ -z "$unhealthy" ]; then
+              echo "All services healthy."
+              exit 0
+            fi
+            echo "Waiting on: $unhealthy"
+            sleep 5
+          done
+          echo "Timed out waiting for healthy state."
+          docker compose ps
+          docker compose logs --tail 200
+          exit 1
+
+      - name: /health on every externally-routed port answers from 0.0.0.0
+        run: |
+          set -e
+          # Frontend (nginx returns "OK" at /health).
+          curl -fsS http://127.0.0.1:3000/health
+          # API (Express returns JSON at /health).
+          curl -fsS http://127.0.0.1:8080/health | grep -q '"status":"ok"'
+          # LiveKit (HTTP root on the signaling port returns "OK").
+          curl -fsS http://127.0.0.1:7880/
+
+      - name: Confirm no port is bound to 127.0.0.1 only
+        run: |
+          # docker compose ports listing should show 0.0.0.0 (or [::]) for
+          # every published port; loopback-only would be 127.0.0.1:.
+          docker compose ps --format '{{.Name}} {{.Ports}}'
+          if docker compose ps --format '{{.Ports}}' | grep -E '127\.0\.0\.1:'; then
+            echo "ERROR: a service is bound to 127.0.0.1 — defeats the point of this install option."
+            exit 1
+          fi
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
