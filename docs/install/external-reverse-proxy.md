@@ -273,7 +273,17 @@ rotates, the LXC sees the new content immediately. No cron, no copy,
 no two-sources-of-truth.
 
 Set `TURN_DOMAIN` to your main hostname (e.g. `meet.example.com`),
-then run on the **Incus host** (not inside the LXC):
+then either:
+
+**Option 1 (recommended if your reverse proxy is ProxyPilot):** open
+the LXC's detail page in ProxyPilot, find the "TLS bind-mount" section,
+pick the cert hostname, target LXC, target path (`/var/meet-tls`), and
+click "Bind-mount". ProxyPilot runs the same `incus config device add`
+this script does, with no host-side shell access required. After it
+completes, jump straight to step 7d.
+
+**Option 2 (any reverse proxy):** run on the **Incus host** (not inside
+the LXC):
 
 ```bash
 sudo bash /path/to/MEET/deploy/external-proxy/mount-cert.sh

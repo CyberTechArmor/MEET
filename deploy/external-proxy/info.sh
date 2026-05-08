@@ -305,9 +305,16 @@ if [ -n "$PUBLIC_BASE_URL" ]; then
     # the proxy strips /livekit and we end up at LiveKit's /v1 (the WS path);
     # without /v1 we hit LiveKit's "/" which returns 200 OK and looks like a
     # broken proxy when it isn't.
+    # LiveKit's WebSocket signal endpoint is /rtc (livekit-client JS
+    # connects to ${url}/rtc?access_token=…). After Caddy's
+    # handle_path strip on /livekit/*, /livekit/rtc → /rtc which is
+    # what LiveKit actually serves. /v1 is not a LiveKit path; an
+    # earlier version of this probe got a 404 not because the route
+    # was misconfigured but because it was hitting a non-existent
+    # path. Only useful to compare /rtc behavior here.
     case "$layout" in
-        single-domain) ws_url="${PUBLIC_BASE_URL%/}/livekit/v1" ;;
-        *)             ws_url="${PUBLIC_LIVEKIT_URL:-wss://livekit.$public_host}/v1" ;;
+        single-domain) ws_url="${PUBLIC_BASE_URL%/}/livekit/rtc" ;;
+        *)             ws_url="${PUBLIC_LIVEKIT_URL:-wss://livekit.$public_host}/rtc" ;;
     esac
     # Force https scheme for curl (it speaks ws over http(s) natively when
     # the right Upgrade headers are sent).
@@ -345,11 +352,11 @@ if [ -n "$PUBLIC_BASE_URL" ]; then
             ;;
         200)
             # We probably hit LiveKit's "/" by mistake (proxy stripped to "/"
-            # instead of "/v1"), or the proxy isn't passing Upgrade headers.
+            # instead of "/rtc"), or the proxy isn't passing Upgrade headers.
             printf "    ${YELLOW}!${NC} 200 in ${elapsed}s — got a regular HTTP 200, not a WS upgrade.\n"
             printf "    ${DIM}Caddy may have stripped the path to '/' (LiveKit's root returns 200 'OK')${NC}\n"
             printf "    ${DIM}or isn't passing Upgrade/Connection headers. Real WS clients hitting${NC}\n"
-            printf "    ${DIM}/livekit/v1?access_token=… may still work; try a real call.${NC}\n"
+            printf "    ${DIM}/livekit/rtc?access_token=… may still work; try a real call.${NC}\n"
             ;;
         404)
             printf "    ${RED}✗${NC} 404 — /livekit/* route missing or pointed at the wrong upstream\n"
@@ -601,15 +608,37 @@ else
 
     # TLS port listening on the bridge?
     if command -v ss >/dev/null 2>&1; then
+        local tls_listening=0 udp_listening=0
         if ss -tlnH "sport = :$TURN_TLS_PORT" 2>/dev/null | grep -q LISTEN; then
             printf "    ${GREEN}✓${NC} tcp/%s listening on the LXC\n" "$TURN_TLS_PORT"
+            tls_listening=1
         else
-            printf "    ${RED}✗${NC} tcp/%s NOT listening — coturn may not be started or failed to bind\n" "$TURN_TLS_PORT"
+            printf "    ${RED}✗${NC} tcp/%s NOT listening — coturn may have failed to bind\n" "$TURN_TLS_PORT"
         fi
         if ss -ulnH "sport = :$TURN_UDP_PORT" 2>/dev/null | grep -q UNCONN; then
             printf "    ${GREEN}✓${NC} udp/%s listening on the LXC\n" "$TURN_UDP_PORT"
+            udp_listening=1
         else
             printf "    ${YELLOW}!${NC} udp/%s NOT listening (some setups bind UDP only on demand)\n" "$TURN_UDP_PORT"
+        fi
+
+        # If coturn is running but the TLS port didn't bind, tail its
+        # logs so the operator (and the next AI helping debug) sees
+        # the actual reason. Most common: cert read permission — coturn
+        # logs "Cannot find or read TLS certificate file" when the
+        # file is mode 0600 owned by a uid the in-container user can't
+        # read. Pin user: in compose to fix.
+        if [ "$tls_listening" = "0" ] && [ -n "$coturn_id" ]; then
+            echo
+            printf "    ${BOLD}Last 15 lines of coturn logs (look for cert / TLS errors):${NC}\n"
+            docker compose --profile turn logs --tail 15 coturn 2>&1 \
+                | sed "s/^/      /" \
+                | head -30
+            echo
+            printf "    ${DIM}Common: 'cannot read' or 'Permission denied' on the cert file →${NC}\n"
+            printf "    ${DIM}coturn's in-container uid doesn't match the cert owner. Re-run${NC}\n"
+            printf "    ${DIM}update.sh to refresh TURN_UID/TURN_GID in .env from the cert,${NC}\n"
+            printf "    ${DIM}then ${YELLOW}docker compose --profile turn up -d --force-recreate coturn${NC}.${NC}\n"
         fi
     fi
 

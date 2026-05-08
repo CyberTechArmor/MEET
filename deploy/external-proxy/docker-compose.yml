@@ -153,6 +153,18 @@ services:
     image: coturn/coturn:latest
     profiles: ["turn"]
     network_mode: host
+    # Run as the same uid/gid that owns the cert files in TURN_CERT_MOUNT.
+    # Caddy stores certs as mode 0600 owned by its own uid (typically 999
+    # in the ProxyPilot/Caddy container); the bind-mount surfaces that
+    # ownership inside the MEET LXC and inside this container. Without
+    # matching the uid, coturn can stat() the cert but can't read() it,
+    # silently skipping its TLS listener — coturn comes up, udp/3478
+    # binds, tcp/5349 doesn't, cellular still fails.
+    #
+    # install.sh / update.sh stat the cert at render time and write
+    # TURN_UID / TURN_GID to .env; default 0:0 (root) is the safe
+    # fallback that can read anything.
+    user: "${TURN_UID:-0}:${TURN_GID:-0}"
     command: ["-c", "/etc/coturn/turnserver.conf"]
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
