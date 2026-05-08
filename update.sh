@@ -622,6 +622,34 @@ update_with_external_proxy() {
             /*) mig_mount_abs="$turn_cert_mount" ;;
             *)  mig_mount_abs="$dir/${turn_cert_mount#./}" ;;
         esac
+
+        # Probe alternate layouts if the saved path doesn't resolve.
+        # Older installs might have a flat path written but the actual
+        # cert at <mount>/<domain>/<domain>.crt (Caddy nested) or
+        # <mount>/{fullchain,privkey}.pem (certbot). Re-point .env to
+        # whichever layout is actually present.
+        if [ ! -f "$mig_mount_abs/$turn_cert_file" ]; then
+            local _new_cert="" _new_key=""
+            if [ -f "$mig_mount_abs/$turn_domain/$turn_domain.crt" ] \
+               && [ -f "$mig_mount_abs/$turn_domain/$turn_domain.key" ]; then
+                _new_cert="$turn_domain/$turn_domain.crt"
+                _new_key="$turn_domain/$turn_domain.key"
+            elif [ -f "$mig_mount_abs/fullchain.pem" ] && [ -f "$mig_mount_abs/privkey.pem" ]; then
+                _new_cert="fullchain.pem"
+                _new_key="privkey.pem"
+            fi
+            if [ -n "$_new_cert" ]; then
+                sed -i.bak \
+                    -e "s|^TURN_CERT_FILE=.*|TURN_CERT_FILE=$_new_cert|" \
+                    -e "s|^TURN_KEY_FILE=.*|TURN_KEY_FILE=$_new_key|" \
+                    "$dir/.env"
+                rm -f "$dir/.env.bak"
+                turn_cert_file="$_new_cert"
+                turn_key_file="$_new_key"
+                echo -e "${YELLOW}!${NC} Migrated $dir/.env: TURN_CERT_FILE/TURN_KEY_FILE re-pointed to actual cert location ($_new_cert)"
+            fi
+        fi
+
         if [ -f "$mig_mount_abs/$turn_cert_file" ]; then
             stat_uid=$(stat -c '%u' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
             stat_gid=$(stat -c '%g' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
