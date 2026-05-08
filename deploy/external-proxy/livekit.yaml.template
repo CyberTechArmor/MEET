@@ -13,7 +13,16 @@
 #                        to clients via the participant join response's
 #                        iceServers. Belt-and-suspenders against the
 #                        meet-api /api/token iceServers path failing
-#                        for any reason.
+#                        for any reason. Two entries are rendered: one
+#                        TURN-over-TLS (the cellular-survivable path)
+#                        and one plain UDP (faster when the network
+#                        allows it).
+#   - rtc.port_range_start / _end — WebRTC UDP media range. Default is
+#                        50000-54900 (54901 ports), leaving 55000-60000
+#                        for coturn's relay range so the host edge can
+#                        forward a single contiguous udp/50000-60000
+#                        range. Override via LIVEKIT_UDP_PORT_RANGE_*
+#                        in .env if the split needs to move.
 #   - rtc.nat_1_to_1_ips — when LIVEKIT_NODE_IP differs from BRIDGE_IP
 #                        (the typical LXC-behind-NAT case), tells
 #                        LiveKit to advertise BOTH addresses as ICE
@@ -31,8 +40,8 @@ port: 7880
 
 rtc:
   tcp_port: 7881
-  port_range_start: 50000
-  port_range_end: 60000
+  port_range_start: @LIVEKIT_UDP_PORT_RANGE_START@
+  port_range_end: @LIVEKIT_UDP_PORT_RANGE_END@
 
   # Auto-detect the public IP via STUN. Overridden by node_ip below when
   # LIVEKIT_NODE_IP is set in the environment, which is read by the LiveKit

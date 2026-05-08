@@ -1647,7 +1647,7 @@ MEET_LIVEKIT_WS_PORT=7880
 MEET_LIVEKIT_TCP_PORT=7881
 
 LIVEKIT_UDP_PORT_RANGE_START=50000
-LIVEKIT_UDP_PORT_RANGE_END=60000
+LIVEKIT_UDP_PORT_RANGE_END=54900
 LIVEKIT_NODE_IP=$public_ip
 
 # LiveKit auth — DO NOT EDIT EITHER OF THESE WITHOUT UPDATING LIVEKIT_KEYS BELOW.
@@ -1672,8 +1672,8 @@ TURN_USERNAME=$turn_username
 TURN_PASSWORD=$turn_password
 TURN_TLS_PORT=5349
 TURN_UDP_PORT=3478
-TURN_RELAY_RANGE_START=30000
-TURN_RELAY_RANGE_END=32000
+TURN_RELAY_RANGE_START=55000
+TURN_RELAY_RANGE_END=60000
 TURN_CERT_MOUNT=$turn_cert_mount
 TURN_CERT_FILE=$turn_cert_file
 TURN_KEY_FILE=$turn_key_file
@@ -1708,8 +1708,8 @@ ENV_FILE
     if [ "$turn_enabled" = "true" ]; then
         sed -e "s|@TURN_UDP_PORT@|3478|g" \
             -e "s|@TURN_TLS_PORT@|5349|g" \
-            -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
-            -e "s|@TURN_RELAY_RANGE_END@|32000|g" \
+            -e "s|@TURN_RELAY_RANGE_START@|55000|g" \
+            -e "s|@TURN_RELAY_RANGE_END@|60000|g" \
             -e "s|@TURN_DOMAIN@|$turn_domain|g" \
             -e "s|@TURN_USERNAME@|$turn_username|g" \
             -e "s|@TURN_PASSWORD@|$turn_password|g" \
@@ -1746,6 +1746,11 @@ NAT_BLOCK
 )
         fi
 
+        # Render TWO turn_servers entries: TURN-over-TLS (the cellular-
+        # survivable path) and plain UDP (faster when the network allows
+        # it). The browser tries them in order; LiveKit advertises both
+        # via JoinResponse iceServers so even clients that ignore
+        # /api/token's iceServers get a working relay path.
         local turn_servers_block=""
         if [ "$turn_enabled" = "true" ]; then
             turn_servers_block=$(cat <<TURN_BLOCK
@@ -1756,16 +1761,25 @@ NAT_BLOCK
       protocol: tls
       username: $turn_username
       credential: $turn_password
+    - host: $turn_domain
+      port: 3478
+      protocol: udp
+      username: $turn_username
+      credential: $turn_password
 TURN_BLOCK
 )
         fi
         # Use awk to do the substitution because the blocks have newlines
         # and special chars that would confuse sed.
         awk -v nat_block="$nat_1_to_1_block" \
-            -v turn_block="$turn_servers_block" '
+            -v turn_block="$turn_servers_block" \
+            -v lk_udp_start="50000" \
+            -v lk_udp_end="54900" '
             {
                 gsub(/@NAT_1_TO_1_IPS@/, nat_block);
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
                 print
             }
         ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
@@ -1864,7 +1878,10 @@ TURN_BLOCK
     printf "     %-6s ${CYAN}%-26s${NC} %s\n" "HTTP"  "$bridge_ip:8080"          "meet-api  (/api/*, /ws/*)"
     printf "     %-6s ${CYAN}%-26s${NC} %s\n" "WS"    "$bridge_ip:7880"          "livekit signaling  (24h timeouts)"
     printf "     %-6s ${CYAN}%-26s${NC} %s\n" "TCP"   "$bridge_ip:7881"          "livekit TCP fb  (L4, NOT proxied)"
-    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "UDP"   "$bridge_ip:50000-60000"   "livekit RTC media  (L4, NOT proxied)"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "UDP"   "$bridge_ip:50000-54900"   "livekit RTC media  (L4, NOT proxied)"
+    if [ "$turn_enabled" = "true" ]; then
+        printf "     %-6s ${CYAN}%-26s${NC} %s\n" "UDP"   "$bridge_ip:55000-60000"   "coturn TURN relay  (L4, NOT proxied)"
+    fi
     echo ""
     if [ "$layout" = "1" ]; then
         echo -e "  ${BOLD}Routing for ${CYAN}$public_host${NC}:"
@@ -1887,15 +1904,17 @@ TURN_BLOCK
     echo -e "  ${BOLD}Host firewall (internet-facing):${NC}"
     echo "     tcp/443             (HTTPS via your reverse proxy)"
     echo "     tcp/7881            (LiveKit RTC TCP fallback)"
-    echo "     udp/50000-60000     (LiveKit RTC media)"
     if [ "$turn_enabled" = "true" ]; then
+        echo "     udp/50000-60000     (LiveKit RTC media + coturn relay — single contiguous range)"
         echo "     tcp/5349            (TURN-TLS — cellular fallback)"
         echo "     udp/3478            (TURN — STUN/TURN bind)"
-        echo "     udp/30000-32000     (TURN relay)"
+    else
+        echo "     udp/50000-54900     (LiveKit RTC media)"
     fi
     echo ""
     echo -e "  ${BOLD}LXC users:${NC} the livekit container runs with host networking, so"
-    echo -e "  ports 7880/7881/50000-60000 already bind on ${CYAN}$bridge_ip${NC}."
+    echo -e "  ports 7880/7881/50000-54900 already bind on ${CYAN}$bridge_ip${NC} (plus"
+    echo -e "  55000-60000 when coturn is enabled, also via host networking)."
     echo -e "  Open the firewall to the internet pointed at that IP. If your"
     echo -e "  bridge isn't directly routable from the WAN, forward with:"
     echo -e "    ${YELLOW}incus config device add <container> rtcudp proxy \\${NC}"
