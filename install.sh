@@ -1447,6 +1447,68 @@ install_with_external_proxy() {
         lk_secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
     fi
 
+    # TURN config. Reuse the previous .env's values on rerun; only ask the
+    # operator if we're starting fresh. Cellular users need TURN; if it's
+    # off, calls fail on cellular even when wifi works perfectly.
+    local turn_enabled="false"
+    local turn_domain=""
+    if [ -f "$compose_dir/.env" ]; then
+        turn_enabled=$(grep -E '^TURN_ENABLED=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_domain=$(grep -E '^TURN_DOMAIN=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_enabled=${turn_enabled:-false}
+    fi
+    if [ "$turn_enabled" != "true" ]; then
+        echo ""
+        echo -e "  ${BOLD}TURN server (cellular / restrictive-network fallback)${NC}"
+        echo "    Cellular carriers use symmetric NAT — WebRTC's STUN-based hole punching"
+        echo "    can't get through. Without TURN, your phone-on-cellular users will see"
+        echo "    'Connecting…' forever even when wifi works. Strongly recommended."
+        echo ""
+        read -p "  Enable LiveKit's built-in TURN server? [Y/n]: " enable_turn
+        if [[ ! "$enable_turn" =~ ^[Nn]$ ]]; then
+            turn_enabled="true"
+            local default_turn_domain="turn.$public_host"
+            read -p "  TURN hostname [$default_turn_domain]: " turn_domain_in
+            turn_domain="${turn_domain_in:-$default_turn_domain}"
+
+            mkdir -p "$compose_dir/tls"
+            if [ ! -f "$compose_dir/tls/turn.crt" ] || [ ! -f "$compose_dir/tls/turn.key" ]; then
+                cat > "$compose_dir/tls/README.md" << 'TLS_README'
+# TURN TLS certificates
+
+LiveKit's embedded TURN server reads its TLS cert from this directory.
+Place your fullchain.pem here as `turn.crt` and the private key as
+`turn.key`. The cert must be valid for the TURN_DOMAIN set in `../.env`.
+
+Browsers reject self-signed certs on TURN over TLS, so a real CA-issued
+cert is required. Three common ways to get one:
+
+  1. Wildcard cert you already own:
+       cp /path/to/fullchain.pem turn.crt
+       cp /path/to/privkey.pem   turn.key
+
+  2. Dedicated cert via certbot HTTP-01 (run on the host that owns
+     the public IP for TURN_DOMAIN; needs port 80 free briefly):
+       certbot certonly --standalone -d turn.example.com --http-01-port 80
+       cp /etc/letsencrypt/live/turn.example.com/fullchain.pem turn.crt
+       cp /etc/letsencrypt/live/turn.example.com/privkey.pem   turn.key
+
+  3. Same cert as your reverse proxy serves for the main hostname.
+     Set TURN_DOMAIN to that exact hostname (e.g. meet.example.com)
+     in .env and copy the existing fullchain/privkey here.
+
+After installing the cert files, rebuild livekit:
+    docker compose up -d --force-recreate livekit
+TLS_README
+                echo -e "    ${YELLOW}!${NC} TLS cert files are missing. LiveKit will fail to start until"
+                echo -e "      you put a real cert at ${YELLOW}$compose_dir/tls/turn.{crt,key}${NC}."
+                echo -e "      See ${YELLOW}$compose_dir/tls/README.md${NC} for the three ways to get one."
+            fi
+        else
+            turn_enabled="false"
+        fi
+    fi
+
     cat > "$compose_dir/.env" << ENV_FILE
 # MEET Configuration — External Reverse Proxy Mode
 PUBLIC_BASE_URL=$public_base_url
@@ -1470,6 +1532,16 @@ LIVEKIT_NODE_IP=$public_ip
 LIVEKIT_API_KEY=$lk_key
 LIVEKIT_API_SECRET=$lk_secret
 LIVEKIT_KEYS=$lk_key: $lk_secret
+
+# TURN — cellular / symmetric-NAT fallback. See tls/README.md if cert is missing.
+TURN_ENABLED=$turn_enabled
+TURN_DOMAIN=$turn_domain
+TURN_TLS_PORT=5349
+TURN_UDP_PORT=3478
+TURN_RELAY_RANGE_START=30000
+TURN_RELAY_RANGE_END=32000
+TURN_TLS_DIR=./tls
+TURN_EXTERNAL_TLS=false
 ENV_FILE
     echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
     if [ "$lk_keys_reused" = "1" ]; then
@@ -1588,6 +1660,11 @@ ENV_FILE
     echo "     tcp/443             (HTTPS via your reverse proxy)"
     echo "     tcp/7881            (LiveKit RTC TCP fallback)"
     echo "     udp/50000-60000     (LiveKit RTC media)"
+    if [ "$turn_enabled" = "true" ]; then
+        echo "     tcp/5349            (TURN-TLS — cellular fallback)"
+        echo "     udp/3478            (TURN — STUN/TURN bind)"
+        echo "     udp/30000-32000     (TURN relay)"
+    fi
     echo ""
     echo -e "  ${BOLD}LXC users:${NC} the livekit container runs with host networking, so"
     echo -e "  ports 7880/7881/50000-60000 already bind on ${CYAN}$bridge_ip${NC}."

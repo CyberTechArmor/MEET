@@ -375,6 +375,17 @@ automatically. Top failure modes, in the order they tend to bite:
    and `tcp/7881`. `info.sh` prints the exact commands with your bridge
    IP filled in. If those are in place and only same-LAN testing fails,
    it's NAT hairpinning (test from cellular to confirm).
+4. **Calls work on every wifi but fail on cellular.** Cellular carriers
+   use symmetric NAT, which defeats WebRTC's STUN-based hole punching.
+   Enable LiveKit's built-in TURN: re-run `install.sh` and answer Y to
+   the TURN prompt, provision a TLS cert at
+   `deploy/external-proxy/tls/turn.crt`/`turn.key` (see §7 of the
+   external-reverse-proxy doc for three ways), and open `tcp/5349`,
+   `udp/3478`, and `udp/30000-32000` on the host firewall + cloud
+   security group. Verify with `bash deploy/external-proxy/info.sh` —
+   the **TURN status** section reports cert validity and listening
+   state. The only authoritative test is a phone on cellular with
+   wifi off; with TURN working it connects in seconds.
 4. **`POST /api/admin/login` returns 404 `Cannot POST /admin/login`.**
    Reverse proxy is stripping the `/api` prefix. Only `/livekit/*` should
    strip; `/api/*` and `/ws/*` must preserve. ProxyPilot has a per-route
