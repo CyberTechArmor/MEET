@@ -262,53 +262,63 @@ cd ../..
 ./update.sh                       # re-renders turnserver.conf and starts coturn
 ```
 
-### 7b. Provision the TLS cert (single-domain — easiest)
+### 7b. Bind-mount the cert (single-domain — recommended)
 
-Reuse the cert your reverse proxy already serves for the main host.
-Set `TURN_DOMAIN` to that hostname (e.g. `meet.example.com`) — no new
-DNS record needed.
+The cert your reverse proxy already serves for the main host can be
+**reused directly**. We don't copy it into the LXC; we bind-mount the
+host's Caddy/certbot cert directory into the LXC as a read-only Incus
+disk device. The cert file inside the LXC is then literally the same
+file the host's reverse proxy is writing — when Caddy/certbot
+rotates, the LXC sees the new content immediately. No cron, no copy,
+no two-sources-of-truth.
 
-Find the cert. ProxyPilot stores it inside its Caddy data volume; host
-Caddy stores it in `~/.local/share/caddy/...`; host certbot stores
-fullchain at `/etc/letsencrypt/live/<host>/`. The helper script
-`deploy/external-proxy/sync-cert.sh` knows about all three patterns
-and pushes the cert into the LXC, then restarts coturn.
-
-Run on the **Incus host** (not inside the LXC):
+Set `TURN_DOMAIN` to your main hostname (e.g. `meet.example.com`),
+then run on the **Incus host** (not inside the LXC):
 
 ```bash
-sudo bash /path/to/MEET/deploy/external-proxy/sync-cert.sh
-# Override discovery if needed:
-#   MEET_CONTAINER=<lxc-name>  TURN_DOMAIN=<host>  CADDY_CERT_DIR=<path>
+sudo bash /path/to/MEET/deploy/external-proxy/mount-cert.sh
 ```
 
-Schedule it daily so cert rotations propagate without operator
-intervention:
+It auto-discovers ProxyPilot's Caddy data volume, host Caddy
+(`~/.local/share/caddy/`), and host certbot
+(`/etc/letsencrypt/live/<host>/`); then runs:
 
-```cron
-# /etc/cron.daily/meet-turn-cert-sync
-#!/bin/sh
-exec /path/to/MEET/deploy/external-proxy/sync-cert.sh
+```bash
+incus config device add <container> meet-tls disk \
+    source=/path/to/cert/dir \
+    path=/var/meet-tls \
+    readonly=true
 ```
 
-The TURN URL ends up looking like `turns:meet.example.com:5349`, which
-is unusual but valid — it's just where coturn happens to be listening.
+Idempotent — re-running with the same source is a no-op; re-running
+with a different source rebinds. Override discovery via env vars
+(`MEET_CONTAINER`, `TURN_DOMAIN`, `CADDY_CERT_DIR`, `LXC_MOUNT_PATH`)
+if your layout's exotic.
 
-### 7c. Provision the TLS cert (dedicated turn.&lt;host&gt;)
+Then in the LXC, `./update.sh` picks up the mount automatically. The
+TURN URL ends up looking like `turns:meet.example.com:5349`, which is
+unusual but valid.
+
+**Cert rotation:** zero operator action. Caddy renews on its own
+schedule (60 days), writes the new cert to the same path, and coturn
+picks up the new cert on its next TLS handshake. Existing TURN
+allocations finish on the old cert; new ones use the new one.
+
+### 7c. Provision a dedicated turn.&lt;host&gt; cert
 
 If you'd rather have a separate hostname:
 
 1. Add DNS: `turn.meet.example.com` → host's public IP.
 2. Set `TURN_DOMAIN=turn.meet.example.com` in `.env`.
-3. Run certbot on the **host** (briefly frees port 80):
+3. Issue a cert on the **host** (briefly frees port 80):
 
 ```bash
 certbot certonly --standalone -d turn.meet.example.com --http-01-port 80
 ```
 
-4. The same `sync-cert.sh` discovers the new cert under
-   `/etc/letsencrypt/live/turn.meet.example.com/` and pushes it to the
-   LXC. Same daily cron applies.
+4. Run `mount-cert.sh` on the host the same way; it discovers the new
+   cert under `/etc/letsencrypt/live/turn.meet.example.com/` and binds
+   it into the LXC at `/var/meet-tls`. Same zero-cron rotation story.
 
 ### 7d. Open the firewall
 

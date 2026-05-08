@@ -48,10 +48,17 @@ min-port=@TURN_RELAY_RANGE_START@
 max-port=@TURN_RELAY_RANGE_END@
 
 # ── TLS cert ───────────────────────────────────────────────────────────
-# Operator-provided. Browsers reject self-signed certs on TURN/TLS.
-# install.sh / sync-cert.sh handle provisioning.
-cert=/etc/coturn/tls/turn.crt
-pkey=/etc/coturn/tls/turn.key
+# Filenames inside /etc/coturn/certs (which is bind-mounted from the
+# host by mount-cert.sh). Caddy stores certs as <hostname>.crt and
+# <hostname>.key, so install.sh substitutes the actual filenames here
+# from TURN_CERT_FILE / TURN_KEY_FILE in .env.
+#
+# Browsers reject self-signed certs on TURN/TLS — the cert MUST be
+# issued by a real CA. ProxyPilot's Caddy already does this for the
+# main hostname; mount-cert.sh just makes that file readable from
+# inside the LXC.
+cert=/etc/coturn/certs/@TURN_CERT_FILE@
+pkey=/etc/coturn/certs/@TURN_KEY_FILE@
 
 # ── Hardening ─────────────────────────────────────────────────────────
 # No CLI; we manage via docker.

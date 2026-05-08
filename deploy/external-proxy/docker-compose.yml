@@ -156,7 +156,14 @@ services:
     command: ["-c", "/etc/coturn/turnserver.conf"]
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
-      - ${TURN_TLS_DIR:-./tls}:/etc/coturn/tls:ro
+      # Bind-mount the host's reverse-proxy cert dir into coturn's container
+      # READONLY. The directory is itself bind-mounted into the LXC by
+      # mount-cert.sh (host-side), so the cert file at TURN_CERT_MOUNT/
+      # ${TURN_DOMAIN}.crt is the SAME inode the host's Caddy/certbot is
+      # writing — rotations propagate live. Default ${TURN_CERT_MOUNT:-./tls}
+      # falls back to the in-repo tls/ dir for installs that haven't run
+      # mount-cert.sh on the host yet.
+      - ${TURN_CERT_MOUNT:-./tls}:/etc/coturn/certs:ro
     restart: unless-stopped
 
 networks:

@@ -44,7 +44,9 @@ TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
 TURN_UDP_PORT=${TURN_UDP_PORT:-3478}
 TURN_RELAY_RANGE_START=${TURN_RELAY_RANGE_START:-30000}
 TURN_RELAY_RANGE_END=${TURN_RELAY_RANGE_END:-32000}
-TURN_TLS_DIR=${TURN_TLS_DIR:-./tls}
+TURN_CERT_MOUNT=${TURN_CERT_MOUNT:-${TURN_TLS_DIR:-/var/meet-tls}}
+TURN_CERT_FILE=${TURN_CERT_FILE:-${TURN_DOMAIN:+${TURN_DOMAIN}.crt}}
+TURN_KEY_FILE=${TURN_KEY_FILE:-${TURN_DOMAIN:+${TURN_DOMAIN}.key}}
 LIVEKIT_NODE_IP=${LIVEKIT_NODE_IP:-}
 
 # Pick the LXC's external IPv4 — the address the host reverse proxy actually
@@ -531,13 +533,25 @@ else
     printf "    %-22s ${CYAN}%s${NC}\n" "UDP port:"    "${TURN_UDP_PORT}"
     printf "    %-22s ${CYAN}%s${NC}\n" "Relay range:" "udp/${TURN_RELAY_RANGE_START}-${TURN_RELAY_RANGE_END}"
 
-    # Cert files present?
-    if [ -f "$TURN_TLS_DIR/turn.crt" ] && [ -f "$TURN_TLS_DIR/turn.key" ]; then
-        printf "    ${GREEN}✓${NC} cert files present  ${DIM}($TURN_TLS_DIR/turn.{crt,key})${NC}\n"
+    # Cert mount + files present?
+    cert_path="$TURN_CERT_MOUNT/$TURN_CERT_FILE"
+    key_path="$TURN_CERT_MOUNT/$TURN_KEY_FILE"
+    if [ ! -d "$TURN_CERT_MOUNT" ]; then
+        printf "    ${RED}✗${NC} cert mount %s does NOT exist  ${DIM}(bind-mount not set up)${NC}\n" "$TURN_CERT_MOUNT"
+        printf "    ${DIM}Run on the Incus host: ${YELLOW}sudo bash mount-cert.sh${NC}\n"
+    elif [ -f "$cert_path" ] && [ -f "$key_path" ]; then
+        printf "    ${GREEN}✓${NC} cert files present  ${DIM}(%s)${NC}\n" "$cert_path"
+        # mtime hint — if recent, the bind-mount is live and pulling
+        # rotations. Stale mtime + recent expiry = manual copy that
+        # didn't get refreshed.
+        if command -v stat >/dev/null 2>&1; then
+            cert_mtime=$(stat -c '%y' "$cert_path" 2>/dev/null | cut -d. -f1 || true)
+            [ -n "$cert_mtime" ] && printf "    ${DIM}    last modified: %s${NC}\n" "$cert_mtime"
+        fi
         # If openssl is available, check the cert covers TURN_DOMAIN.
         if command -v openssl >/dev/null 2>&1 && [ -n "$TURN_DOMAIN" ]; then
-            cert_subject=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -subject 2>/dev/null || true)
-            cert_sans=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -text 2>/dev/null \
+            cert_subject=$(openssl x509 -in "$cert_path" -noout -subject 2>/dev/null || true)
+            cert_sans=$(openssl x509 -in "$cert_path" -noout -text 2>/dev/null \
                         | awk '/X509v3 Subject Alternative Name/{getline; print}' || true)
             if printf '%s' "$cert_subject $cert_sans" | grep -qiE "(CN ?= ?$TURN_DOMAIN|DNS:$TURN_DOMAIN|DNS:\*\.[^,]+)" ; then
                 printf "    ${GREEN}✓${NC} cert appears valid for ${BOLD}%s${NC}\n" "$TURN_DOMAIN"
@@ -547,16 +561,22 @@ else
                 if [ -n "$cert_sans" ]; then printf "    ${DIM}    SAN:     %s${NC}\n" "$cert_sans"; fi
             fi
             # Expiry check
-            if openssl x509 -in "$TURN_TLS_DIR/turn.crt" -checkend 86400 -noout >/dev/null 2>&1; then
-                cert_end=$(openssl x509 -in "$TURN_TLS_DIR/turn.crt" -noout -enddate 2>/dev/null | cut -d= -f2)
+            if openssl x509 -in "$cert_path" -checkend 86400 -noout >/dev/null 2>&1; then
+                cert_end=$(openssl x509 -in "$cert_path" -noout -enddate 2>/dev/null | cut -d= -f2)
                 printf "    ${GREEN}✓${NC} cert expires ${DIM}%s${NC}\n" "$cert_end"
             else
-                printf "    ${RED}✗${NC} cert has expired or expires within 24h — renew before clients fail\n"
+                printf "    ${RED}✗${NC} cert has expired or expires within 24h\n"
+                printf "    ${DIM}If using bind-mount, host's reverse proxy hasn't rotated the cert.${NC}\n"
             fi
         fi
     else
-        printf "    ${RED}✗${NC} cert files MISSING  ${DIM}($TURN_TLS_DIR/turn.crt and turn.key required)${NC}\n"
-        printf "    ${DIM}coturn will fail to start. See $TURN_TLS_DIR/README.md for cert provisioning options.${NC}\n"
+        printf "    ${RED}✗${NC} cert files MISSING  ${DIM}(expected %s and %s)${NC}\n" "$cert_path" "$key_path"
+        # Show what IS in the mount, if anything.
+        if [ -d "$TURN_CERT_MOUNT" ]; then
+            avail=$(ls -1 "$TURN_CERT_MOUNT" 2>/dev/null | head -3 | tr '\n' ' ')
+            [ -n "$avail" ] && printf "    ${DIM}    files in %s: %s${NC}\n" "$TURN_CERT_MOUNT" "$avail"
+        fi
+        printf "    ${DIM}coturn will fail to start until the cert is reachable at the path above.${NC}\n"
     fi
 
     # turnserver.conf rendered?

@@ -1452,18 +1452,21 @@ install_with_external_proxy() {
     # it, calls fail on cellular even when wifi works perfectly.
     #
     # We deploy a dedicated coturn container (not LiveKit's built-in TURN).
-    # Cleaner separation: meet-api passes coturn's URL + creds to the
-    # browser via /api/token's iceServers field; livekit-server doesn't
-    # need to know about coturn at all.
+    # The cert is bind-mounted live from the host's reverse proxy
+    # (ProxyPilot's Caddy / host certbot / etc.) at TURN_CERT_MOUNT, set
+    # up once on the host via mount-cert.sh. Rotations propagate
+    # automatically; MEET never holds a copy.
     local turn_enabled="false"
     local turn_domain=""
     local turn_username=""
     local turn_password=""
+    local turn_cert_mount=""
     if [ -f "$compose_dir/.env" ]; then
         turn_enabled=$(grep -E '^TURN_ENABLED=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_domain=$(grep -E '^TURN_DOMAIN=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_username=$(grep -E '^TURN_USERNAME=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_password=$(grep -E '^TURN_PASSWORD=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_cert_mount=$(grep -E '^TURN_CERT_MOUNT=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
         turn_enabled=${turn_enabled:-false}
     fi
     if [ "$turn_enabled" != "true" ]; then
@@ -1498,7 +1501,9 @@ install_with_external_proxy() {
 
     # Generate creds if we don't already have them. Same idempotency rule
     # as the LiveKit keys: never regenerate if .env already has them, so
-    # in-flight participants don't get kicked off by a re-install.
+    # already-issued JWTs (with embedded TURN creds) keep working.
+    local turn_cert_file=""
+    local turn_key_file=""
     if [ "$turn_enabled" = "true" ]; then
         if [ -z "$turn_username" ]; then
             turn_username="meet"
@@ -1506,48 +1511,45 @@ install_with_external_proxy() {
         if [ -z "$turn_password" ]; then
             turn_password=$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | xxd -p)
         fi
-        mkdir -p "$compose_dir/tls"
-        if [ ! -f "$compose_dir/tls/README.md" ]; then
-            cat > "$compose_dir/tls/README.md" << 'TLS_README'
-# TURN TLS certificates
-
-coturn reads its TLS cert from this directory. Provide:
-
-    turn.crt   - fullchain (cert + intermediate(s))
-    turn.key   - private key, no passphrase
-
-The cert must be valid for the TURN_DOMAIN set in `../.env`. Browsers
-refuse self-signed certs on TURN/TLS, so a real CA-issued cert is
-required.
-
-## Single-domain mode (cert reuse — recommended)
-
-If TURN_DOMAIN equals your main public hostname (e.g. meet.example.com),
-just copy the cert your reverse proxy is already using:
-
-    # Wherever your reverse proxy stores its certs. Examples:
-    #   ProxyPilot/Caddy:  /var/lib/docker/volumes/proxypilot_caddy_data/_data/caddy/certificates/.../meet.example.com/
-    #   host nginx:        /etc/letsencrypt/live/meet.example.com/
-    cp /path/to/fullchain.pem turn.crt
-    cp /path/to/privkey.pem   turn.key
-
-Coturn rotates the cert when it next reloads. The deploy/external-proxy/
-sync-cert.sh helper automates re-copy + restart on a cron.
-
-## Dedicated turn.<host> mode
-
-    certbot certonly --standalone -d turn.example.com --http-01-port 80
-    cp /etc/letsencrypt/live/turn.example.com/fullchain.pem turn.crt
-    cp /etc/letsencrypt/live/turn.example.com/privkey.pem   turn.key
-
-After installing the cert files:
-    docker compose --profile turn up -d --force-recreate coturn
-TLS_README
+        # Default mount path matches mount-cert.sh's default. Fall back
+        # to ./tls if the operator hasn't run mount-cert.sh on the host
+        # yet — that path works for the manual-copy fallback.
+        if [ -z "$turn_cert_mount" ]; then
+            if [ -d "/var/meet-tls" ]; then
+                turn_cert_mount="/var/meet-tls"
+            else
+                turn_cert_mount="./tls"
+                mkdir -p "$compose_dir/tls"
+            fi
         fi
-        if [ ! -f "$compose_dir/tls/turn.crt" ] || [ ! -f "$compose_dir/tls/turn.key" ]; then
-            echo -e "  ${YELLOW}!${NC} TLS cert files are missing. coturn will fail to start until"
-            echo -e "    you put a real cert at ${YELLOW}$compose_dir/tls/turn.{crt,key}${NC}."
-            echo -e "    See ${YELLOW}$compose_dir/tls/README.md${NC} for instructions."
+        # Caddy stores certs as <hostname>.{crt,key}. install.sh fills
+        # these in based on TURN_DOMAIN; coturn reads them via the
+        # rendered turnserver.conf.
+        turn_cert_file="$turn_domain.crt"
+        turn_key_file="$turn_domain.key"
+
+        # Validate cert files. Bind-mount path means the files might be
+        # there already (host's Caddy is writing them); just check.
+        local cert_path="$turn_cert_mount/$turn_cert_file"
+        local key_path="$turn_cert_mount/$turn_key_file"
+        if [ ! -d "$turn_cert_mount" ]; then
+            echo ""
+            echo -e "  ${YELLOW}!${NC} TURN_CERT_MOUNT (${turn_cert_mount}) doesn't exist in this LXC."
+            echo -e "  ${BOLD}Run on the Incus host (NOT inside this LXC):${NC}"
+            echo -e "    ${YELLOW}sudo bash $compose_dir/mount-cert.sh${NC}"
+            echo "  Then re-run install.sh / update.sh. coturn won't start until the"
+            echo "  cert is reachable, but the rest of the stack will be fine."
+        elif [ ! -f "$cert_path" ] || [ ! -f "$key_path" ]; then
+            echo ""
+            echo -e "  ${YELLOW}!${NC} Cert files not found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
+            echo -e "  Make sure your reverse proxy has issued a cert for ${BOLD}${turn_domain}${NC},"
+            echo -e "  or re-run ${YELLOW}sudo bash $compose_dir/mount-cert.sh${NC} on the Incus host"
+            echo "  if you're using a different cert location."
+            ls -1 "$turn_cert_mount/" 2>/dev/null \
+                | head -5 \
+                | sed "s|^|    ${turn_cert_mount}/|"
+        else
+            echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
         fi
     fi
 
@@ -1579,7 +1581,11 @@ LIVEKIT_KEYS=$lk_key: $lk_secret
 # service (profile-gated). The turnserver.conf is rendered from
 # turnserver.conf.template using these values; the password is also
 # embedded in /api/token's iceServers field for the browser.
-# See tls/README.md if cert is missing.
+#
+# TURN_CERT_MOUNT is the path INSIDE the LXC where the host's reverse-
+# proxy cert dir is bind-mounted (run mount-cert.sh on the Incus host).
+# TURN_CERT_FILE / TURN_KEY_FILE are the filenames under that path
+# (Caddy uses <hostname>.{crt,key}).
 TURN_ENABLED=$turn_enabled
 TURN_DOMAIN=$turn_domain
 TURN_USERNAME=$turn_username
@@ -1588,7 +1594,9 @@ TURN_TLS_PORT=5349
 TURN_UDP_PORT=3478
 TURN_RELAY_RANGE_START=30000
 TURN_RELAY_RANGE_END=32000
-TURN_TLS_DIR=./tls
+TURN_CERT_MOUNT=$turn_cert_mount
+TURN_CERT_FILE=$turn_cert_file
+TURN_KEY_FILE=$turn_key_file
 ENV_FILE
     echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
     if [ "$lk_keys_reused" = "1" ]; then
@@ -1615,6 +1623,8 @@ ENV_FILE
             -e "s|@TURN_DOMAIN@|$turn_domain|g" \
             -e "s|@TURN_USERNAME@|$turn_username|g" \
             -e "s|@TURN_PASSWORD@|$turn_password|g" \
+            -e "s|@TURN_CERT_FILE@|$turn_cert_file|g" \
+            -e "s|@TURN_KEY_FILE@|$turn_key_file|g" \
             -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
             -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
             "$compose_dir/turnserver.conf.template" > "$compose_dir/turnserver.conf"

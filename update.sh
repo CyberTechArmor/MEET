@@ -237,9 +237,46 @@ update_with_external_proxy() {
     local profile_args=""
     if [ "$turn_enabled" = "true" ]; then
         profile_args="--profile turn"
+
+        # Backfill TURN_CERT_MOUNT / TURN_CERT_FILE / TURN_KEY_FILE for
+        # installs that predate the bind-mount refactor. Same pattern as
+        # the LIVEKIT_KEYS migration: fill in sensible defaults so update
+        # is non-destructive.
+        local turn_domain turn_cert_mount turn_cert_file turn_key_file
+        turn_domain=$(grep -E '^TURN_DOMAIN=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        turn_cert_mount=$(grep -E '^TURN_CERT_MOUNT=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        turn_cert_file=$(grep -E '^TURN_CERT_FILE=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        turn_key_file=$(grep -E '^TURN_KEY_FILE=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        if [ -z "$turn_cert_mount" ]; then
+            if [ -d "/var/meet-tls" ]; then
+                turn_cert_mount="/var/meet-tls"
+            else
+                turn_cert_mount="./tls"
+            fi
+            printf 'TURN_CERT_MOUNT=%s\n' "$turn_cert_mount" >> "$dir/.env"
+            echo -e "${YELLOW}!${NC} Migrated $dir/.env: added TURN_CERT_MOUNT=$turn_cert_mount"
+        fi
+        if [ -z "$turn_cert_file" ] && [ -n "$turn_domain" ]; then
+            turn_cert_file="$turn_domain.crt"
+            printf 'TURN_CERT_FILE=%s\n' "$turn_cert_file" >> "$dir/.env"
+            echo -e "${YELLOW}!${NC} Migrated $dir/.env: added TURN_CERT_FILE=$turn_cert_file"
+        fi
+        if [ -z "$turn_key_file" ] && [ -n "$turn_domain" ]; then
+            turn_key_file="$turn_domain.key"
+            printf 'TURN_KEY_FILE=%s\n' "$turn_key_file" >> "$dir/.env"
+            echo -e "${YELLOW}!${NC} Migrated $dir/.env: added TURN_KEY_FILE=$turn_key_file"
+        fi
+
+        # Warn if the bind-mount path doesn't exist — coturn will fail
+        # to start, but the rest of the stack should be fine.
+        if [ ! -d "$turn_cert_mount" ]; then
+            echo -e "${YELLOW}!${NC} TURN_CERT_MOUNT ($turn_cert_mount) doesn't exist."
+            echo -e "  Run on the Incus host: ${YELLOW}sudo bash $dir/mount-cert.sh${NC}"
+            echo -e "  Then re-run update.sh."
+        fi
+
         if [ -f "$dir/turnserver.conf.template" ]; then
-            local turn_domain turn_username turn_password public_ip
-            turn_domain=$(grep -E '^TURN_DOMAIN='   "$dir/.env" | tail -n1 | cut -d= -f2-)
+            local turn_username turn_password public_ip
             turn_username=$(grep -E '^TURN_USERNAME=' "$dir/.env" | tail -n1 | cut -d= -f2-)
             turn_password=$(grep -E '^TURN_PASSWORD=' "$dir/.env" | tail -n1 | cut -d= -f2-)
             public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
@@ -255,6 +292,8 @@ update_with_external_proxy() {
                 -e "s|@TURN_DOMAIN@|$turn_domain|g" \
                 -e "s|@TURN_USERNAME@|$turn_username|g" \
                 -e "s|@TURN_PASSWORD@|$turn_password|g" \
+                -e "s|@TURN_CERT_FILE@|$turn_cert_file|g" \
+                -e "s|@TURN_KEY_FILE@|$turn_key_file|g" \
                 -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
                 -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
                 "$dir/turnserver.conf.template" > "$dir/turnserver.conf"
