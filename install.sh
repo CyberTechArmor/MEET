@@ -1598,35 +1598,69 @@ install_with_external_proxy() {
             /*) _mount_abs="$turn_cert_mount" ;;
             *)  _mount_abs="$compose_dir/${turn_cert_mount#./}" ;;
         esac
+        # Caddy's storage layout typically writes <mount>/<domain>.crt,
+        # but some setups (or future Caddy versions) nest one level
+        # deeper at <mount>/<domain>/<domain>.crt. Probe both. Also
+        # accept a generic fullchain.pem / privkey.pem pair (certbot's
+        # naming) so the same install.sh handles host-certbot mounts
+        # without forcing operators to rename files.
         local cert_path="$_mount_abs/$turn_cert_file"
         local key_path="$_mount_abs/$turn_key_file"
         local turn_uid="0"
         local turn_gid="0"
+        local cert_layout=""
+        if [ -f "$cert_path" ] && [ -f "$key_path" ]; then
+            cert_layout="flat"
+        elif [ -f "$_mount_abs/$turn_domain/$turn_cert_file" ] \
+          && [ -f "$_mount_abs/$turn_domain/$turn_key_file" ]; then
+            cert_path="$_mount_abs/$turn_domain/$turn_cert_file"
+            key_path="$_mount_abs/$turn_domain/$turn_key_file"
+            turn_cert_file="$turn_domain/$turn_cert_file"
+            turn_key_file="$turn_domain/$turn_key_file"
+            cert_layout="nested"
+        elif [ -f "$_mount_abs/fullchain.pem" ] && [ -f "$_mount_abs/privkey.pem" ]; then
+            cert_path="$_mount_abs/fullchain.pem"
+            key_path="$_mount_abs/privkey.pem"
+            turn_cert_file="fullchain.pem"
+            turn_key_file="privkey.pem"
+            cert_layout="certbot"
+        fi
+
         if [ ! -d "$_mount_abs" ]; then
             echo ""
             echo -e "  ${YELLOW}!${NC} TURN_CERT_MOUNT (${turn_cert_mount}) doesn't exist in this LXC."
-            echo -e "  ${BOLD}Run on the Incus host (NOT inside this LXC):${NC}"
+            echo -e "  ${BOLD}If the mount is set up via your Incus host's UI (ProxyPilot, etc.):${NC}"
+            echo -e "    confirm it's active and the LXC can see it. Otherwise run on the host:"
             echo -e "    ${YELLOW}sudo bash $compose_dir/mount-cert.sh${NC}"
-            echo "  Then re-run install.sh / update.sh. coturn won't start until the"
-            echo "  cert is reachable, but the rest of the stack will be fine."
-        elif [ ! -f "$cert_path" ] || [ ! -f "$key_path" ]; then
+            echo "  coturn won't start until the cert is reachable; the rest of the stack will be fine."
+        elif [ -z "$cert_layout" ]; then
             echo ""
-            echo -e "  ${YELLOW}!${NC} Cert files not found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
-            echo -e "  Make sure your reverse proxy has issued a cert for ${BOLD}${turn_domain}${NC},"
-            echo -e "  or re-run ${YELLOW}sudo bash $compose_dir/mount-cert.sh${NC} on the Incus host"
-            echo "  if you're using a different cert location."
-            ls -1 "$turn_cert_mount/" 2>/dev/null \
-                | head -5 \
-                | sed "s|^|    ${turn_cert_mount}/|"
+            echo -e "  ${YELLOW}!${NC} Cert files not found under ${turn_cert_mount}/ for ${BOLD}${turn_domain}${NC}."
+            echo -e "  Tried: ${DIM}<mount>/${turn_domain}.{crt,key}, <mount>/${turn_domain}/${turn_domain}.{crt,key}, <mount>/{fullchain,privkey}.pem${NC}"
+            echo ""
+            echo -e "  ${BOLD}What's actually visible to this LXC at ${turn_cert_mount}/:${NC}"
+            if ls -la --color=never "$turn_cert_mount/" 2>&1 | head -8 | sed "s|^|    |"; then :; fi
+            echo ""
+            echo -e "  ${DIM}If the listing is empty or shows EACCES, the bind-mount is set up but"
+            echo -e "  uid mapping in this (unprivileged) LXC blocks reads. Either run the LXC as"
+            echo -e "  privileged, or relax permissions on the host cert dir, or copy the files in.${NC}"
         else
-            echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
+            if [ "$cert_layout" = "nested" ]; then
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}/${turn_domain}.{crt,key} (nested layout)"
+            elif [ "$cert_layout" = "certbot" ]; then
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/{fullchain,privkey}.pem (certbot layout)"
+            else
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
+            fi
             # Detect the cert's owner uid/gid. Caddy stores certs as
             # 0600 owned by its own uid; coturn must run as that uid
             # inside its container or it can't read the cert and the
             # TLS listener silently doesn't bind. Falls back to 0:0
             # (root, can read anything) if stat fails for any reason.
-            turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
-            turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            if [ -n "$cert_path" ] && [ -f "$cert_path" ]; then
+                turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
+                turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            fi
             if [ "$turn_uid" != "0" ] || [ "$turn_gid" != "0" ]; then
                 echo -e "  ${DIM}cert owned by uid:gid ${turn_uid}:${turn_gid} — coturn will run with that user${NC}"
             fi
@@ -1699,6 +1733,26 @@ ENV_FILE
                          | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
                          | cut -d/ -f1 | head -n1)
     detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+
+    # If a previous `docker compose up` ran before these files were
+    # rendered, Docker auto-created the bind-mount source paths
+    # (turnserver.conf, livekit.yaml) as DIRECTORIES — that's its default
+    # behavior when a bind-mount source doesn't exist. Re-running
+    # install.sh then fails on the awk/sed redirect with "Is a directory".
+    # Detect and remove the empty directories so the renders below can
+    # write real files. We only remove EMPTY directories — if Docker
+    # somehow accumulated content here, the operator should look at it.
+    for _stale in "$compose_dir/livekit.yaml" "$compose_dir/turnserver.conf"; do
+        if [ -d "$_stale" ]; then
+            if rmdir "$_stale" 2>/dev/null; then
+                echo -e "  ${YELLOW}!${NC} Removed empty directory at $_stale (Docker auto-created it before the file existed)"
+            else
+                echo -e "  ${RED}✗${NC} $_stale is a non-empty directory — refusing to clobber."
+                echo -e "    Inspect and remove manually, then re-run install.sh."
+                exit 1
+            fi
+        fi
+    done
 
     # Render turnserver.conf from the template if TURN is enabled. The
     # bridge IP gets baked in here so coturn knows which interface to

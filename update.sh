@@ -539,6 +539,23 @@ update_with_external_proxy() {
     detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
     public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
 
+    # If a previous `docker compose up` ran before these files were
+    # rendered, Docker auto-created the bind-mount source paths
+    # (turnserver.conf, livekit.yaml) as DIRECTORIES. Detect & remove
+    # the empty directories so the renders below can write real files.
+    local _stale
+    for _stale in "$dir/livekit.yaml" "$dir/turnserver.conf"; do
+        if [ -d "$_stale" ]; then
+            if rmdir "$_stale" 2>/dev/null; then
+                echo -e "${YELLOW}!${NC} Removed empty directory at $_stale (Docker auto-created it before the file existed)"
+            else
+                echo -e "${RED}✗${NC} $_stale is a non-empty directory — refusing to clobber."
+                echo -e "  Inspect and remove manually, then re-run update.sh."
+                exit 1
+            fi
+        fi
+    done
+
     # Port ranges, read from .env so operator customizations are honored.
     # Defaults match install.sh's freshly-rendered .env (post-migration).
     local lk_udp_start lk_udp_end turn_relay_start turn_relay_end
@@ -605,6 +622,34 @@ update_with_external_proxy() {
             /*) mig_mount_abs="$turn_cert_mount" ;;
             *)  mig_mount_abs="$dir/${turn_cert_mount#./}" ;;
         esac
+
+        # Probe alternate layouts if the saved path doesn't resolve.
+        # Older installs might have a flat path written but the actual
+        # cert at <mount>/<domain>/<domain>.crt (Caddy nested) or
+        # <mount>/{fullchain,privkey}.pem (certbot). Re-point .env to
+        # whichever layout is actually present.
+        if [ ! -f "$mig_mount_abs/$turn_cert_file" ]; then
+            local _new_cert="" _new_key=""
+            if [ -f "$mig_mount_abs/$turn_domain/$turn_domain.crt" ] \
+               && [ -f "$mig_mount_abs/$turn_domain/$turn_domain.key" ]; then
+                _new_cert="$turn_domain/$turn_domain.crt"
+                _new_key="$turn_domain/$turn_domain.key"
+            elif [ -f "$mig_mount_abs/fullchain.pem" ] && [ -f "$mig_mount_abs/privkey.pem" ]; then
+                _new_cert="fullchain.pem"
+                _new_key="privkey.pem"
+            fi
+            if [ -n "$_new_cert" ]; then
+                sed -i.bak \
+                    -e "s|^TURN_CERT_FILE=.*|TURN_CERT_FILE=$_new_cert|" \
+                    -e "s|^TURN_KEY_FILE=.*|TURN_KEY_FILE=$_new_key|" \
+                    "$dir/.env"
+                rm -f "$dir/.env.bak"
+                turn_cert_file="$_new_cert"
+                turn_key_file="$_new_key"
+                echo -e "${YELLOW}!${NC} Migrated $dir/.env: TURN_CERT_FILE/TURN_KEY_FILE re-pointed to actual cert location ($_new_cert)"
+            fi
+        fi
+
         if [ -f "$mig_mount_abs/$turn_cert_file" ]; then
             stat_uid=$(stat -c '%u' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
             stat_gid=$(stat -c '%g' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
