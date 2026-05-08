@@ -1825,19 +1825,36 @@ ENV_FILE
     # If TURN was enabled, the cert mount is the one remaining manual
     # step (we run inside the LXC; mount-cert.sh runs on the Incus host).
     # Flag it loudly with the exact one-liner so it isn't missed.
-    if [ "$turn_enabled" = "true" ] && [ ! -d "$turn_cert_mount" ]; then
-        echo -e "  ${BOLD}${YELLOW}━━━ Final step (run on the Incus host, NOT this LXC) ━━━${NC}"
-        echo ""
-        echo "  TURN's TLS cert needs to be bind-mounted from the host. One command,"
-        echo "  idempotent, auto-discovers ProxyPilot's Caddy / host certbot / host"
-        echo "  Caddy. After it runs, coturn will start automatically."
-        echo ""
-        echo -e "    ${YELLOW}sudo bash <path-to-MEET-on-host>/deploy/external-proxy/mount-cert.sh${NC}"
-        echo ""
-        echo -e "  ${DIM}Or copy the mount-cert.sh out of the LXC if you don't have the repo on the host:${NC}"
-        echo -e "  ${DIM}    incus file pull <container>/root/MEET/deploy/external-proxy/mount-cert.sh /tmp/mount-cert.sh${NC}"
-        echo -e "  ${DIM}    sudo bash /tmp/mount-cert.sh${NC}"
-        echo ""
+    #
+    # Check for the cert FILES, not just the directory — install.sh
+    # auto-creates ./tls/ as a fallback before the cert is provisioned,
+    # so a directory check is always true and the message never showed.
+    if [ "$turn_enabled" = "true" ]; then
+        local _cert_path="$compose_dir/$turn_cert_mount/$turn_cert_file"
+        # If TURN_CERT_MOUNT is absolute (e.g. /var/meet-tls), use it directly.
+        case "$turn_cert_mount" in
+            /*) _cert_path="$turn_cert_mount/$turn_cert_file" ;;
+        esac
+        if [ ! -f "$_cert_path" ]; then
+            echo -e "  ${BOLD}${YELLOW}━━━ Final step (run on the Incus host, NOT this LXC) ━━━${NC}"
+            echo ""
+            echo "  TURN's TLS cert isn't in place yet — coturn started but will fail TLS"
+            echo "  handshakes until you give it a real cert. One command does it: idempotent,"
+            echo "  auto-discovers ProxyPilot's Caddy / host certbot / host Caddy, then runs"
+            echo "  update.sh in the LXC for you so coturn picks up the new cert."
+            echo ""
+            echo -e "    ${YELLOW}sudo bash <path-to-MEET-on-host>/deploy/external-proxy/mount-cert.sh${NC}"
+            echo ""
+            echo -e "  ${DIM}Don't have the repo on the host? Pull mount-cert.sh out of the LXC:${NC}"
+            echo -e "  ${DIM}    incus file pull <container>/root/MEET/deploy/external-proxy/mount-cert.sh /tmp/mount-cert.sh${NC}"
+            echo -e "  ${DIM}    sudo bash /tmp/mount-cert.sh${NC}"
+            echo ""
+            echo -e "  ${DIM}Looking for $_cert_path inside the LXC.${NC}"
+            echo ""
+        else
+            echo -e "  ${GREEN}✓${NC} TURN cert in place at ${DIM}$_cert_path${NC}"
+            echo ""
+        fi
     fi
     if [ "$layout" != "1" ]; then
         echo -e "  ${YELLOW}!${NC} ${BOLD}Three-domain mode:${NC} the frontend was built with"

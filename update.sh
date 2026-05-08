@@ -7,6 +7,8 @@
 #
 #   ./update.sh             # auto-detect; prompts only when ambiguous
 #   ./update.sh --mode 5    # match install.sh option numbers (1..5)
+#   ./update.sh --enable-turn   # for mode 5: enable TURN without prompting
+#                                 (also: ENABLE_TURN=1 ./update.sh)
 #
 # To force a clean rebuild (no Docker layer cache):
 #   FORCE_REBUILD=1 ./update.sh
@@ -300,14 +302,22 @@ configure_turn_in_env() {
     echo "        for $turn_domain. (recommended)"
     echo "    [2] Dedicated turn.<host> — separate cert + DNS record."
     echo
-    read -p "  Cert mode [1]: " cert_mode
-    cert_mode=${cert_mode:-1}
-    case "$cert_mode" in
-        2)  turn_domain="turn.$turn_domain" ;;
-        *)  ;;
-    esac
-    read -p "  TURN hostname [$turn_domain]: " turn_domain_in
-    turn_domain="${turn_domain_in:-$turn_domain}"
+    # Skip interactive prompts when running non-interactively. ENABLE_TURN=1
+    # OR a non-TTY environment means "take the defaults" (cert mode 1,
+    # hostname = current $turn_domain).
+    local cert_mode="1"
+    if [ "${ENABLE_TURN:-0}" != "1" ] && [ -t 0 ] && [ -t 1 ]; then
+        read -p "  Cert mode [1]: " cert_mode
+        cert_mode=${cert_mode:-1}
+        case "$cert_mode" in
+            2)  turn_domain="turn.$turn_domain" ;;
+            *)  ;;
+        esac
+        read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+        turn_domain="${turn_domain_in:-$turn_domain}"
+    else
+        echo -e "  ${DIM}Non-interactive — using cert mode 1 (single-domain) with hostname $turn_domain${NC}"
+    fi
 
     # Generate creds if missing (idempotent on re-run).
     [ -z "$turn_username" ] && turn_username="meet"
@@ -399,22 +409,39 @@ update_with_external_proxy() {
         echo -e "  ${DIM}Cellular users will see 'Connecting…' even when wifi works.${NC}"
         echo
 
-        # Offer to enable it right now. Default Y because no operator who
-        # cares enough to be running update.sh wants cellular to fail.
-        # Skip the prompt entirely on non-TTY runs (cron, CI) — those
-        # operators set TURN_ENABLED=true in .env explicitly.
-        if [ -t 0 ] && [ -t 1 ]; then
-            local enable_turn_now
+        # Three paths to enable:
+        #   1. ENABLE_TURN=1 env var or --enable-turn CLI flag — for
+        #      non-interactive runs (ProxyPilot, CI, scripts).
+        #   2. Interactive Y/n prompt — for normal operator runs.
+        #   3. Non-TTY without ENABLE_TURN — VERY loud message rather
+        #      than silent skip, since "I ran update and TURN didn't
+        #      turn on" is the most common debug.
+        local enable_turn_now=""
+        if [ "${ENABLE_TURN:-0}" = "1" ]; then
+            enable_turn_now="Y"
+            echo -e "  ${DIM}ENABLE_TURN=1 — enabling without prompt.${NC}"
+        elif [ -t 0 ] && [ -t 1 ]; then
             read -p "  Enable TURN now? [Y/n]: " enable_turn_now
-            if [[ ! "$enable_turn_now" =~ ^[Nn]$ ]]; then
-                configure_turn_in_env "$dir"
-                # Re-read so the rest of update_with_external_proxy sees
-                # the freshly-written values.
-                turn_enabled_now="true"
-            fi
         else
-            echo -e "  ${DIM}Non-interactive run; skipping prompt. Set TURN_ENABLED=true in${NC}"
-            echo -e "  ${DIM}.env or re-run from a terminal to enable.${NC}"
+            echo -e "  ${YELLOW}!${NC} ${BOLD}Non-interactive run — TURN was NOT enabled.${NC}"
+            echo -e "  ${DIM}stdin or stdout isn't a TTY (piped output, IDE terminal, incus exec${NC}"
+            echo -e "  ${DIM}without -t, etc.). Skipping the prompt to avoid hanging.${NC}"
+            echo
+            echo -e "  ${BOLD}To enable TURN, do one of:${NC}"
+            echo -e "    ${YELLOW}./update.sh --enable-turn${NC}        # one-shot, takes defaults"
+            echo -e "    ${YELLOW}ENABLE_TURN=1 ./update.sh${NC}        # same, env-var form"
+            echo -e "    edit $dir/.env: set TURN_ENABLED=true and TURN_DOMAIN=<host>,"
+            echo -e "      then re-run update.sh"
+            echo
+        fi
+
+        if [[ "$enable_turn_now" =~ ^[Yy]?$ ]]; then
+            configure_turn_in_env "$dir"
+            # Re-read so the rest of update_with_external_proxy sees
+            # the freshly-written values.
+            turn_enabled_now="true"
+        elif [[ "$enable_turn_now" =~ ^[Nn]$ ]]; then
+            echo -e "  ${DIM}OK — leaving TURN disabled. Re-run with --enable-turn to flip later.${NC}"
         fi
     fi
     echo
@@ -534,10 +561,14 @@ update_with_external_proxy() {
 
 main() {
     local cli_mode=""
+    # CLI flag for non-interactive runs that want TURN turned on without
+    # an operator at the prompt. Sets ENABLE_TURN=1 which
+    # update_with_external_proxy reads in place of the TTY prompt.
     while [ $# -gt 0 ]; do
         case "$1" in
             --mode)    cli_mode="$2"; shift 2 ;;
             --mode=*)  cli_mode="${1#--mode=}"; shift ;;
+            --enable-turn) export ENABLE_TURN=1; shift ;;
             -h|--help)
                 # Print the leading comment block as usage.
                 awk '/^#!/{next} /^[^#]/{exit} {sub(/^# ?/,""); print}' "$0"
