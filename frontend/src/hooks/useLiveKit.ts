@@ -209,7 +209,7 @@ export function useLiveKit() {
 
       // Get token from API
       const tokenResponse = await getToken(roomCode, displayName);
-      const { token, isHost: hostStatus, quality } = tokenResponse;
+      const { token, isHost: hostStatus, quality, iceServers } = tokenResponse;
 
       // Server picked a quality preset for this room (per-room override or
       // platform default). Apply it before we build the room options below
@@ -228,8 +228,15 @@ export function useLiveKit() {
       sharedRoomInstance = newRoom; // Store in singleton for cross-component access
       setupRoomEvents(newRoom);
 
-      // Connect to LiveKit
-      await newRoom.connect(getLiveKitUrl(), token);
+      // Connect to LiveKit. If the API issued TURN servers (i.e.
+      // TURN_ENABLED=true on the backend), pass them in via rtcConfig so
+      // the browser's ICE gatherer can use them. Without this, cellular
+      // clients can't reach the LXC media path even when the TURN server
+      // is up and listening.
+      const connectOpts = iceServers && iceServers.length > 0
+        ? { rtcConfig: { iceServers } as RTCConfiguration }
+        : undefined;
+      await newRoom.connect(getLiveKitUrl(), token, connectOpts);
 
       // Transition to the room view IMMEDIATELY after the signaling
       // connection is up. Don't wait for track publishing — on a slow or

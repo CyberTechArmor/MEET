@@ -72,6 +72,15 @@ services:
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       - PUBLIC_API_URL=${PUBLIC_API_URL:-}
       - PUBLIC_LIVEKIT_URL=${PUBLIC_LIVEKIT_URL:-}
+      # TURN config — meet-api embeds these in /api/token's iceServers
+      # field so the browser's WebRTC stack uses them for ICE gathering.
+      # When TURN_ENABLED=false the iceServers field is omitted.
+      - TURN_ENABLED=${TURN_ENABLED:-false}
+      - TURN_DOMAIN=${TURN_DOMAIN:-}
+      - TURN_USERNAME=${TURN_USERNAME:-}
+      - TURN_PASSWORD=${TURN_PASSWORD:-}
+      - TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
+      - TURN_UDP_PORT=${TURN_UDP_PORT:-3478}
       - MEET_DATA_DIR=/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -118,36 +127,44 @@ services:
       # populates LIVEKIT_API_KEY / LIVEKIT_API_SECRET on meet-api, so the
       # two services can never drift. Don't set this by hand.
       - LIVEKIT_KEYS=${LIVEKIT_KEYS:-}
-      # LiveKit's built-in TURN. When TURN_ENABLED=true the server starts a
-      # TURN listener on TURN_TLS_PORT (TLS) and TURN_UDP_PORT (plain UDP)
-      # in addition to its WebRTC media ports. Required for clients on
-      # cellular networks (carrier-grade NAT) and corporate firewalls
-      # blocking the udp/50000-60000 media range. Disabled by default
-      # because it needs a real TLS cert provisioned in TURN_TLS_DIR.
-      - LIVEKIT_TURN_ENABLED=${TURN_ENABLED:-false}
-      - LIVEKIT_TURN_DOMAIN=${TURN_DOMAIN:-}
-      - LIVEKIT_TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
-      - LIVEKIT_TURN_UDP_PORT=${TURN_UDP_PORT:-3478}
-      - LIVEKIT_TURN_RELAY_RANGE_START=${TURN_RELAY_RANGE_START:-30000}
-      - LIVEKIT_TURN_RELAY_RANGE_END=${TURN_RELAY_RANGE_END:-32000}
-      - LIVEKIT_TURN_CERT_FILE=/etc/livekit-tls/turn.crt
-      - LIVEKIT_TURN_KEY_FILE=/etc/livekit-tls/turn.key
-      - LIVEKIT_TURN_EXTERNAL_TLS=${TURN_EXTERNAL_TLS:-false}
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
-      # TLS cert dir for the embedded TURN. Bind-mounted read-only; the
-      # files inside are owned by the operator (provisioned via certbot,
-      # copied from the host's Caddy/nginx, or a wildcard cert).
-      # Default ./tls is created by install.sh as an empty directory; if
-      # TURN_ENABLED=true and the dir is empty, livekit fails fast at
-      # startup. Skipped harmlessly when TURN_ENABLED=false.
-      - ${TURN_TLS_DIR:-./tls}:/etc/livekit-tls:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${MEET_LIVEKIT_WS_PORT:-7880}/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  # coturn — dedicated TURN/STUN relay for clients on cellular networks
+  # (Carrier-Grade symmetric NAT) and corporate firewalls blocking the
+  # WebRTC media UDP range. The browser learns about this server via the
+  # iceServers field in /api/token; LiveKit-server itself doesn't need
+  # to reference it (decoupled architecture).
+  #
+  # Profile-gated: only starts when explicitly enabled via
+  # `docker compose --profile turn up -d`. install.sh / update.sh do
+  # this automatically when TURN_ENABLED=true in .env.
+  #
+  # Reads /etc/coturn/turnserver.conf (rendered by install.sh from
+  # turnserver.conf.template) and /etc/coturn/tls/turn.{crt,key}
+  # (operator-provided cert valid for TURN_DOMAIN).
+  coturn:
+    image: coturn/coturn:latest
+    profiles: ["turn"]
+    network_mode: host
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # Bind-mount the host's reverse-proxy cert dir into coturn's container
+      # READONLY. The directory is itself bind-mounted into the LXC by
+      # mount-cert.sh (host-side), so the cert file at TURN_CERT_MOUNT/
+      # ${TURN_DOMAIN}.crt is the SAME inode the host's Caddy/certbot is
+      # writing — rotations propagate live. Default ${TURN_CERT_MOUNT:-./tls}
+      # falls back to the in-repo tls/ dir for installs that haven't run
+      # mount-cert.sh on the host yet.
+      - ${TURN_CERT_MOUNT:-./tls}:/etc/coturn/certs:ro
+    restart: unless-stopped
 
 networks:
   meet-network:

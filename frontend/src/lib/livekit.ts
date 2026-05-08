@@ -280,6 +280,12 @@ export interface TokenResponse {
    * setVideoQualityPreset() before connecting.
    */
   quality?: VideoQualityPreset;
+  /**
+   * Server-issued TURN/STUN servers. Pass to Room.connect's rtcConfig
+   * so the browser uses them in ICE gathering. Only present when TURN
+   * is configured server-side.
+   */
+  iceServers?: RTCIceServer[];
 }
 
 export interface RoomCodeResponse {

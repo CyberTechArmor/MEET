@@ -62,6 +62,47 @@ const PUBLIC_API_URL = process.env.PUBLIC_API_URL || '';
 const PUBLIC_LIVEKIT_URL = process.env.PUBLIC_LIVEKIT_URL || '';
 webauthn.configureWebAuthn(PUBLIC_BASE_URL, [PUBLIC_API_URL, PUBLIC_LIVEKIT_URL]);
 
+// TURN — coturn lives in the same compose stack. We don't talk to it
+// directly; we just embed its URL + creds in the iceServers field of
+// every /api/token response so the browser's RTCPeerConnection adds it
+// to its ICE candidate pool. When TURN_ENABLED=false, omit the field
+// entirely (no STUN/TURN ICE servers — the client falls back to its
+// browser defaults, which is fine for wifi).
+const TURN_ENABLED = (process.env.TURN_ENABLED || 'false').toLowerCase() === 'true';
+const TURN_DOMAIN = process.env.TURN_DOMAIN || '';
+const TURN_USERNAME = process.env.TURN_USERNAME || '';
+const TURN_PASSWORD = process.env.TURN_PASSWORD || '';
+const TURN_TLS_PORT = parseInt(process.env.TURN_TLS_PORT || '5349', 10);
+const TURN_UDP_PORT = parseInt(process.env.TURN_UDP_PORT || '3478', 10);
+
+interface IceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
+function buildIceServers(): IceServer[] | undefined {
+  if (!TURN_ENABLED || !TURN_DOMAIN || !TURN_USERNAME || !TURN_PASSWORD) {
+    return undefined;
+  }
+  // Order matters: browsers try ICE candidates in roughly the order
+  // they're advertised. Put TURN/TLS first because it's the most
+  // restrictive-network-friendly path; then UDP (faster when it works),
+  // then TCP via the same TLS port. STUN is bundled separately by the
+  // browser; we don't override it here.
+  return [
+    {
+      urls: [
+        `turns:${TURN_DOMAIN}:${TURN_TLS_PORT}?transport=tcp`,
+        `turn:${TURN_DOMAIN}:${TURN_UDP_PORT}?transport=udp`,
+        `turn:${TURN_DOMAIN}:${TURN_TLS_PORT}?transport=tcp`,
+      ],
+      username: TURN_USERNAME,
+      credential: TURN_PASSWORD,
+    },
+  ];
+}
+
 // Lazy-migrate any v1 plaintext admin password into the v2 password_hash
 // column. Runs once per process; subsequent reads see only the hash.
 {
@@ -574,6 +615,18 @@ Configure webhooks to receive real-time notifications for events like:
                       type: 'string',
                       enum: ['auto', 'high', 'max', 'balanced', 'low'],
                       description: 'Video quality preset chosen for this participant. Per-room override (set when the room was created) wins over the platform default. The frontend should call setVideoQualityPreset(quality) before connecting.',
+                    },
+                    iceServers: {
+                      type: 'array',
+                      description: 'Optional. When TURN is configured server-side, this contains the TURN server URL(s) + ephemeral credentials the browser should pass to RTCPeerConnection.iceServers. Omitted entirely when TURN is disabled.',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          urls: { type: 'array', items: { type: 'string' } },
+                          username: { type: 'string' },
+                          credential: { type: 'string' },
+                        },
+                      },
                     },
                   },
                 },
@@ -1515,6 +1568,8 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
     const quality: VideoQualityPreset =
       roomMeta?.videoQuality ?? serverSettings.defaultVideoQuality;
 
+    const iceServers = buildIceServers();
+
     res.json({
       token: jwt,
       roomName: sanitizedRoomName,
@@ -1522,6 +1577,10 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       participantIdentity,
       isHost,
       quality,
+      // Only set when TURN is configured. The frontend passes this into
+      // Room.connect's rtcConfig.iceServers; without it, the browser's
+      // default STUN-only set is used (fine for wifi, fails on cellular).
+      ...(iceServers ? { iceServers } : {}),
     });
   } catch (error) {
     console.error('Token generation error:', error);
