@@ -372,8 +372,8 @@ configure_turn_in_env() {
     write_env_kv TURN_PASSWORD      "$turn_password"   "$env_file"
     write_env_kv TURN_TLS_PORT      "5349"             "$env_file"
     write_env_kv TURN_UDP_PORT      "3478"             "$env_file"
-    write_env_kv TURN_RELAY_RANGE_START "30000"        "$env_file"
-    write_env_kv TURN_RELAY_RANGE_END   "32000"        "$env_file"
+    write_env_kv TURN_RELAY_RANGE_START "55000"        "$env_file"
+    write_env_kv TURN_RELAY_RANGE_END   "60000"        "$env_file"
     write_env_kv TURN_CERT_MOUNT    "$turn_cert_mount" "$env_file"
     write_env_kv TURN_CERT_FILE     "$turn_cert_file"  "$env_file"
     write_env_kv TURN_KEY_FILE      "$turn_key_file"   "$env_file"
@@ -506,6 +506,28 @@ update_with_external_proxy() {
         fi
     fi
 
+    # Port-range consolidation migration. Older installs split host-edge
+    # UDP into two disjoint ranges: udp/50000-60000 (LiveKit media) and
+    # udp/30000-32000 (coturn relay). Operators had to remember both for
+    # the host firewall + cloud security group. New layout: single
+    # contiguous udp/50000-60000, split internally at 54900/55000 between
+    # LiveKit and coturn. Only migrates when ALL four values exactly
+    # match the old defaults — operator customizations survive.
+    if grep -qE '^LIVEKIT_UDP_PORT_RANGE_END=60000$' "$dir/.env" \
+       && grep -qE '^TURN_RELAY_RANGE_START=30000$' "$dir/.env" \
+       && grep -qE '^TURN_RELAY_RANGE_END=32000$' "$dir/.env"; then
+        sed -i.bak \
+            -e 's|^LIVEKIT_UDP_PORT_RANGE_END=60000$|LIVEKIT_UDP_PORT_RANGE_END=54900|' \
+            -e 's|^TURN_RELAY_RANGE_START=30000$|TURN_RELAY_RANGE_START=55000|' \
+            -e 's|^TURN_RELAY_RANGE_END=32000$|TURN_RELAY_RANGE_END=60000|' \
+            "$dir/.env"
+        rm -f "$dir/.env.bak"
+        echo -e "${YELLOW}!${NC} Migrated $dir/.env: consolidated UDP ports to a single contiguous"
+        echo -e "  range (was: 50000-60000 + 30000-32000; now: 50000-54900 + 55000-60000)."
+        echo -e "  ${BOLD}Update your host firewall:${NC} drop the udp/30000-32000 forward."
+        echo -e "  ProxyPilot users: the MEET preset will follow up with a one-line change."
+    fi
+
     # Detect the LXC bridge IP and read public IP from .env — needed by
     # both turnserver.conf (relay-ip, when TURN is on) and livekit.yaml
     # (nat_1_to_1_ips). Always run, regardless of turn_enabled, so even
@@ -516,6 +538,18 @@ update_with_external_proxy() {
                          | cut -d/ -f1 | head -n1)
     detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
     public_ip=$(grep -E '^LIVEKIT_NODE_IP=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+
+    # Port ranges, read from .env so operator customizations are honored.
+    # Defaults match install.sh's freshly-rendered .env (post-migration).
+    local lk_udp_start lk_udp_end turn_relay_start turn_relay_end
+    lk_udp_start=$(grep -E '^LIVEKIT_UDP_PORT_RANGE_START=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+    lk_udp_end=$(  grep -E '^LIVEKIT_UDP_PORT_RANGE_END='   "$dir/.env" | tail -n1 | cut -d= -f2-)
+    turn_relay_start=$(grep -E '^TURN_RELAY_RANGE_START=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+    turn_relay_end=$(  grep -E '^TURN_RELAY_RANGE_END='   "$dir/.env" | tail -n1 | cut -d= -f2-)
+    lk_udp_start=${lk_udp_start:-50000}
+    lk_udp_end=${lk_udp_end:-54900}
+    turn_relay_start=${turn_relay_start:-55000}
+    turn_relay_end=${turn_relay_end:-60000}
 
     # If TURN is enabled, re-render turnserver.conf from the template +
     # current .env. This catches: bridge IP changes, TURN_DOMAIN changes,
@@ -601,8 +635,8 @@ update_with_external_proxy() {
             turn_password=$(grep -E '^TURN_PASSWORD=' "$dir/.env" | tail -n1 | cut -d= -f2-)
             sed -e "s|@TURN_UDP_PORT@|3478|g" \
                 -e "s|@TURN_TLS_PORT@|5349|g" \
-                -e "s|@TURN_RELAY_RANGE_START@|30000|g" \
-                -e "s|@TURN_RELAY_RANGE_END@|32000|g" \
+                -e "s|@TURN_RELAY_RANGE_START@|$turn_relay_start|g" \
+                -e "s|@TURN_RELAY_RANGE_END@|$turn_relay_end|g" \
                 -e "s|@TURN_DOMAIN@|$turn_domain|g" \
                 -e "s|@TURN_USERNAME@|$turn_username|g" \
                 -e "s|@TURN_PASSWORD@|$turn_password|g" \
@@ -611,7 +645,7 @@ update_with_external_proxy() {
                 -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
                 -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
                 "$dir/turnserver.conf.template" > "$dir/turnserver.conf"
-            echo -e "${YELLOW}!${NC} Re-rendered $dir/turnserver.conf from template"
+            echo -e "${YELLOW}!${NC} Re-rendered $dir/turnserver.conf from template (relay udp/$turn_relay_start-$turn_relay_end)"
         fi
     fi
 
@@ -640,6 +674,10 @@ NAT_BLOCK
 )
         fi
 
+        # Render TWO turn_servers entries (TLS + UDP) so LiveKit's
+        # JoinResponse iceServers covers both paths. The browser tries
+        # them in order; cellular survives via TLS, faster networks use
+        # UDP.
         local turn_servers_block=""
         if [ "$turn_enabled" = "true" ]; then
             local turn_domain_lk turn_username_lk turn_password_lk
@@ -654,18 +692,27 @@ NAT_BLOCK
       protocol: tls
       username: $turn_username_lk
       credential: $turn_password_lk
+    - host: $turn_domain_lk
+      port: 3478
+      protocol: udp
+      username: $turn_username_lk
+      credential: $turn_password_lk
 TURN_BLOCK
 )
         fi
         awk -v nat_block="$nat_1_to_1_block" \
-            -v turn_block="$turn_servers_block" '
+            -v turn_block="$turn_servers_block" \
+            -v lk_udp_start="$lk_udp_start" \
+            -v lk_udp_end="$lk_udp_end" '
             {
                 gsub(/@NAT_1_TO_1_IPS@/, nat_block);
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
                 print
             }
         ' "$dir/livekit.yaml.template" > "$dir/livekit.yaml"
-        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
+        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml (media udp/$lk_udp_start-$lk_udp_end)${turn_servers_block:+ (with turn_servers TLS+UDP)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
     fi
 
     (
