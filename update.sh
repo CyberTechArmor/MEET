@@ -350,6 +350,22 @@ configure_turn_in_env() {
             printf '%s=%s\n' "$key" "$val" >> "$file"
         fi
     }
+    # Detect cert ownership so coturn runs with a uid that can read 0600
+    # cert files. If the cert isn't there yet, default to 0:0 (root) —
+    # coturn won't be running anyway until the cert lands. Resolve the
+    # cert path: TURN_CERT_MOUNT can be absolute (e.g. /var/meet-tls) or
+    # relative to the compose dir.
+    local _mount_abs
+    case "$turn_cert_mount" in
+        /*) _mount_abs="$turn_cert_mount" ;;
+        *)  _mount_abs="$dir/${turn_cert_mount#./}" ;;
+    esac
+    local turn_uid="0" turn_gid="0"
+    if [ -f "$_mount_abs/$turn_cert_file" ]; then
+        turn_uid=$(stat -c '%u' "$_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
+        turn_gid=$(stat -c '%g' "$_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
+    fi
+
     write_env_kv TURN_ENABLED       "true"             "$env_file"
     write_env_kv TURN_DOMAIN        "$turn_domain"     "$env_file"
     write_env_kv TURN_USERNAME      "$turn_username"   "$env_file"
@@ -361,13 +377,16 @@ configure_turn_in_env() {
     write_env_kv TURN_CERT_MOUNT    "$turn_cert_mount" "$env_file"
     write_env_kv TURN_CERT_FILE     "$turn_cert_file"  "$env_file"
     write_env_kv TURN_KEY_FILE      "$turn_key_file"   "$env_file"
+    write_env_kv TURN_UID           "$turn_uid"        "$env_file"
+    write_env_kv TURN_GID           "$turn_gid"        "$env_file"
 
     echo -e "  ${GREEN}✓${NC} Wrote TURN config to $env_file"
     echo -e "    ${DIM}TURN_DOMAIN=$turn_domain${NC}"
     echo -e "    ${DIM}TURN_CERT_MOUNT=$turn_cert_mount  (file: $turn_cert_file)${NC}"
 
     # Cert mount status. If missing, instruct the operator clearly.
-    if [ ! -d "$turn_cert_mount" ]; then
+    # _mount_abs was set above; reuse it.
+    if [ ! -d "$_mount_abs" ]; then
         echo -e "  ${YELLOW}!${NC} Cert mount is not in place yet."
         echo -e "  ${BOLD}Run on the Incus host (NOT inside this LXC):${NC}"
         echo -e "    ${YELLOW}sudo bash $(pwd)/$dir/mount-cert.sh${NC}"
@@ -395,10 +414,18 @@ update_with_external_proxy() {
     turn_enabled_now=${turn_enabled_now:-false}
     turn_cert_mount_now=${turn_cert_mount_now:-/var/meet-tls}
 
+    # Resolve the cert mount path same way as configure_turn_in_env: it
+    # may be absolute or relative-to-compose-dir.
+    local _summary_mount_abs
+    case "$turn_cert_mount_now" in
+        /*) _summary_mount_abs="$turn_cert_mount_now" ;;
+        *)  _summary_mount_abs="$dir/${turn_cert_mount_now#./}" ;;
+    esac
+
     if [ "$turn_enabled_now" = "true" ]; then
         echo -e "  TURN:           ${GREEN}enabled${NC}  (coturn will be deployed)"
         echo -e "  TURN_DOMAIN:    ${CYAN}${turn_domain_now:-<unset>}${NC}"
-        if [ -d "$turn_cert_mount_now" ]; then
+        if [ -d "$_summary_mount_abs" ]; then
             echo -e "  Cert mount:     ${GREEN}✓${NC} ${turn_cert_mount_now}  (bind-mount in place)"
         else
             echo -e "  Cert mount:     ${RED}✗${NC} ${turn_cert_mount_now}  (NOT mounted — coturn will fail to start)"
@@ -506,9 +533,38 @@ update_with_external_proxy() {
             echo -e "${YELLOW}!${NC} Migrated $dir/.env: added TURN_KEY_FILE=$turn_key_file"
         fi
 
+        # Detect / refresh TURN_UID / TURN_GID on every update. The cert
+        # owner uid only matters for coturn to read the file, and host
+        # Caddy may be rebuilt with a different uid across upgrades —
+        # cheap to re-stat each run rather than carry a stale value.
+        local cur_turn_uid cur_turn_gid stat_uid stat_gid mig_mount_abs
+        cur_turn_uid=$(grep -E '^TURN_UID=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        cur_turn_gid=$(grep -E '^TURN_GID=' "$dir/.env" | tail -n1 | cut -d= -f2-)
+        stat_uid="0"
+        stat_gid="0"
+        case "$turn_cert_mount" in
+            /*) mig_mount_abs="$turn_cert_mount" ;;
+            *)  mig_mount_abs="$dir/${turn_cert_mount#./}" ;;
+        esac
+        if [ -f "$mig_mount_abs/$turn_cert_file" ]; then
+            stat_uid=$(stat -c '%u' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
+            stat_gid=$(stat -c '%g' "$mig_mount_abs/$turn_cert_file" 2>/dev/null || echo "0")
+        fi
+        if [ "$cur_turn_uid" != "$stat_uid" ] || [ "$cur_turn_gid" != "$stat_gid" ] \
+           || [ -z "$cur_turn_uid" ] || [ -z "$cur_turn_gid" ]; then
+            # Use the same write_env_kv helper that configure_turn_in_env
+            # uses so the .env stays single-source-of-truth.
+            local tmp_env_file="$dir/.env"
+            sed -i.bak '/^TURN_UID=/d;/^TURN_GID=/d' "$tmp_env_file" 2>/dev/null
+            rm -f "$tmp_env_file.bak"
+            printf 'TURN_UID=%s\nTURN_GID=%s\n' "$stat_uid" "$stat_gid" >> "$tmp_env_file"
+            echo -e "${YELLOW}!${NC} Migrated $dir/.env: TURN_UID=$stat_uid TURN_GID=$stat_gid (matches cert owner)"
+        fi
+
         # Warn if the bind-mount path doesn't exist — coturn will fail
-        # to start, but the rest of the stack should be fine.
-        if [ ! -d "$turn_cert_mount" ]; then
+        # to start, but the rest of the stack should be fine. Reuses
+        # mig_mount_abs from the uid detection block above.
+        if [ ! -d "$mig_mount_abs" ]; then
             echo -e "${YELLOW}!${NC} TURN_CERT_MOUNT ($turn_cert_mount) doesn't exist."
             echo -e "  Run on the Incus host: ${YELLOW}sudo bash $dir/mount-cert.sh${NC}"
             echo -e "  Then re-run update.sh."

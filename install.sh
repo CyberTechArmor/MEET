@@ -1590,9 +1590,19 @@ install_with_external_proxy() {
 
         # Validate cert files. Bind-mount path means the files might be
         # there already (host's Caddy is writing them); just check.
-        local cert_path="$turn_cert_mount/$turn_cert_file"
-        local key_path="$turn_cert_mount/$turn_key_file"
-        if [ ! -d "$turn_cert_mount" ]; then
+        # TURN_CERT_MOUNT can be absolute (e.g. /var/meet-tls) or
+        # relative to the compose dir (e.g. ./tls). Resolve to an
+        # absolute-from-here path so stat() works from this cwd.
+        local _mount_abs
+        case "$turn_cert_mount" in
+            /*) _mount_abs="$turn_cert_mount" ;;
+            *)  _mount_abs="$compose_dir/${turn_cert_mount#./}" ;;
+        esac
+        local cert_path="$_mount_abs/$turn_cert_file"
+        local key_path="$_mount_abs/$turn_key_file"
+        local turn_uid="0"
+        local turn_gid="0"
+        if [ ! -d "$_mount_abs" ]; then
             echo ""
             echo -e "  ${YELLOW}!${NC} TURN_CERT_MOUNT (${turn_cert_mount}) doesn't exist in this LXC."
             echo -e "  ${BOLD}Run on the Incus host (NOT inside this LXC):${NC}"
@@ -1610,6 +1620,16 @@ install_with_external_proxy() {
                 | sed "s|^|    ${turn_cert_mount}/|"
         else
             echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
+            # Detect the cert's owner uid/gid. Caddy stores certs as
+            # 0600 owned by its own uid; coturn must run as that uid
+            # inside its container or it can't read the cert and the
+            # TLS listener silently doesn't bind. Falls back to 0:0
+            # (root, can read anything) if stat fails for any reason.
+            turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
+            turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            if [ "$turn_uid" != "0" ] || [ "$turn_gid" != "0" ]; then
+                echo -e "  ${DIM}cert owned by uid:gid ${turn_uid}:${turn_gid} — coturn will run with that user${NC}"
+            fi
         fi
     fi
 
@@ -1657,6 +1677,12 @@ TURN_RELAY_RANGE_END=32000
 TURN_CERT_MOUNT=$turn_cert_mount
 TURN_CERT_FILE=$turn_cert_file
 TURN_KEY_FILE=$turn_key_file
+# uid/gid that owns the cert files. coturn must run as this uid to read
+# them — otherwise the TLS listener on tcp/5349 silently doesn't bind.
+# Set automatically from `stat` at install/update time; default 0:0 is
+# "run as root" which can read anything.
+TURN_UID=$turn_uid
+TURN_GID=$turn_gid
 ENV_FILE
     echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
     if [ "$lk_keys_reused" = "1" ]; then
