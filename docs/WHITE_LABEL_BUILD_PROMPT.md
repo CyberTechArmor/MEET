@@ -1,51 +1,271 @@
-# Build prompt: self-hosted video conferencing platform ({{PRODUCT_NAME}})
+# Port prompt: white-label video conferencing platform ({{PRODUCT_NAME}})
 
-> **How to use this file.** Copy everything below the horizontal rule into a new
-> Claude Code session (or keep it in the new repo as `docs/BUILD_SPEC.md` and
-> say "implement docs/BUILD_SPEC.md, phase 1"). Before you do, find-and-replace
-> the four placeholders:
+> **How to use this file.** Fill in the placeholders below, then paste
+> everything under the horizontal rule into a Claude Code session opened in
+> the **new** repository. Give the source location only in the chat message
+> (or via the placeholders in your private copy); if you commit this file to
+> the new repo as `docs/PORT_SPEC.md`, strip the `{{SOURCE_*}}` and
+> `{{FORBIDDEN_NAMES}}` values first so the new repo never carries them.
 >
 > | Placeholder | Meaning | Example |
 > |---|---|---|
-> | `{{PRODUCT_NAME}}` | Display name shown in the UI, docs, OpenAPI title, WebAuthn RP name | `Acme Connect` |
-> | `{{product_slug}}` | Lowercase, no spaces. Used for storage keys, DB filename, compose service names, package names | `acme-connect` |
+> | `{{SOURCE_REPO_URL}}` | Git URL of the existing codebase to port (or a local path already cloned) | `git@github.com:org/old-repo.git` |
+> | `{{SOURCE_BRANCH}}` | Branch to pull | `main` |
+> | `{{PRODUCT_NAME}}` | New display name (UI, docs, OpenAPI title, WebAuthn RP name) | `Acme Connect` |
+> | `{{product_slug}}` | Lowercase, hyphenated; storage keys, DB filename, compose/service/image names, package names | `acme-connect` |
 > | `{{ENV_PREFIX}}` | Upper-case prefix for product-specific env vars | `ACME` |
-> | `{{KEY_PREFIX}}` | Short prefix on generated API keys | `ac` |
->
-> Nothing in this spec references the original codebase, its author, or any
-> other product. Keep it that way in the generated code: no brand names other
-> than `{{PRODUCT_NAME}}` in source, comments, docs, commit messages, or
-> container names.
+> | `{{KEY_PREFIX}}` | Prefix for generated API keys | `ac` |
+> | `{{NEW_REPO_URL}}` | Public git URL of the new repo (used in README install one-liner and installer clone) | `https://github.com/client/acme-connect.git` |
+> | `{{FORBIDDEN_NAMES}}` | Comma-separated, case-sensitive list of names that must not appear anywhere in the new repo: the old product name, the old org, the client-side names you are hiding, any other vendor | `OldName, OldOrg, HiddenClient` |
+> | `{{ADDITIONAL_CHANGES}}` | Optional bullet list of client-specific functional changes to make during the port (leave empty for a pure white-label) | |
 
 ---
 
-## 0. Role, goal, and hard rules
+# Part A: What to do
 
-You are building **{{PRODUCT_NAME}}**, a self-hosted, white-label video
-conferencing platform for 1-to-1 calls, small group calls, and screen sharing.
-It is deployed with Docker Compose on a single host, embeds into third-party
-web apps via iframe, exposes a REST API with API keys and signed webhooks, and
-ships an admin panel. You are building it **from scratch** in this repository.
+You are porting an existing, working, MIT-licensed self-hosted video
+conferencing platform into this repository as **{{PRODUCT_NAME}}**, a
+white-labeled product for a client. The job is: pull the source, bring it
+into this repo, make the required changes, white-label everything, write a
+`CLAUDE.md` for the new repo, verify, and commit. Part B is the functional
+reference: after the port, everything described there must still work
+exactly as described (with the new names).
 
-Hard rules:
+## Step 0: Rules
 
-1. **Branding.** The only product name that may appear anywhere is
-   `{{PRODUCT_NAME}}` (and `{{product_slug}}` in identifiers). Do not mention
-   any other conferencing product, vendor, company, or prior codebase in code,
-   comments, docs, UI strings, or commits. Generic technology names (LiveKit,
-   coturn, Caddy, nginx, Docker, Incus/LXC) are fine.
-2. **Stack is fixed** (Section 2). Do not swap frameworks.
-3. **Behavioral parity with this spec is the acceptance bar.** Where the spec
-   gives an exact request/response shape, header name, URL parameter, storage
-   key, or timeout, implement it exactly; external integrators depend on them.
-4. **Everything in Section 9 (hard-won behaviors)** must be honored. Each item
-   there is a bug that was found in production and fixed; do not reintroduce.
-5. **Work in phases** (Section 11). Finish a phase, run its checks, commit,
-   then continue. Do not skip the deployment and docs phases.
-6. Ask no questions unless a decision would change the public API surface.
-   Otherwise choose sensible defaults and note them in the commit message.
+1. **Never write the source location into this repository.** No git remote,
+   submodule, subtree, or history from the source; no URL, org, or old product
+   name in code, comments, docs, commit messages, `CLAUDE.md`, compose files,
+   image names, or CI. The source clone lives outside this repo and is deleted
+   at the end.
+2. **Forbidden names:** `{{FORBIDDEN_NAMES}}`. None of them may appear in
+   this repo, case-sensitively, in any file, filename, or commit. A grep gate
+   (Step 4.4) enforces this before every commit.
+3. **Do not change behavior except where Step 3 says so.** This is a port,
+   not a rewrite. Keep file structure, logic, and the public contracts in
+   Part B (URL params, endpoints, response shapes, headers, storage keys
+   modulo renaming, timeouts).
+4. **Fresh git history.** Copy files, not the `.git` directory. The first
+   commit in this repo is the ported, already-white-labeled tree.
+5. Work step by step, run the checks named in each step, and commit at the
+   end of Steps 2, 3, 4, 5, and 6 with messages that name the step. Ask no
+   questions; make sensible choices and note them in the commit message.
+
+## Step 1: Pull the code
+
+```bash
+SRC=$(mktemp -d)/source
+git clone --depth 1 --branch {{SOURCE_BRANCH}} {{SOURCE_REPO_URL}} "$SRC"
+# or, if {{SOURCE_REPO_URL}} is a local path: cp -r {{SOURCE_REPO_URL}} "$SRC"
+rm -rf "$SRC/.git"
+```
+
+Read the whole tree before touching anything. Expected shape (names in the
+source will differ; map them to the layout in Part B §3):
+
+- `api/src/*.ts` (Express 5 API: index, db, store, types, auth, webauthn,
+  reset-admin), `api/Dockerfile`, `api/openapi.yaml`
+- `frontend/src/**` (React 19 + Vite + Tailwind 4: App, components, hooks,
+  stores, lib), `frontend/Dockerfile`, `frontend/nginx.conf`, `index.html`,
+  `public/*.svg`
+- Root compose files (demo, bundled Caddy, host nginx, subdomain/proxy
+  manager), `Caddyfile`, an nginx template, `livekit.yaml`, `.env.example`
+- `deploy/external-proxy/**` (compose, `.env.example`, LiveKit and coturn
+  templates, Caddy/nginx snippets, `info.sh`, `mount-cert.sh`,
+  `reset-admin.sh`)
+- `install.sh`, `update.sh`, `cleanup.sh`, `diagnose.sh`
+- `README.md`, `API.md`, `ARCHITECTURE.md`, `docs/IFRAME_INTEGRATION.md`,
+  `docs/install/external-reverse-proxy.md`
+- `.github/workflows/*.yml`, `.gitignore`
+
+Determine the **old product name** from `frontend/index.html` `<title>`,
+the join-screen heading, and `package.json` names. Record it privately as
+`OLD_NAME` (display form), `old_slug` (lowercase form used in identifiers,
+storage keys, service names), and `OLD_ENV_PREFIX` (prefix on
+`*_ADMIN_USERNAME` / `*_ADMIN_PASSWORD` / `*_DATA_DIR` / `*_DOMAIN`). Also
+note any third-party proxy-manager product name used in a compose filename
+and docs; it is a forbidden name too.
+
+## Step 2: Bring it into this repository
+
+- If this repo is empty: copy the tree to the root, preserving structure.
+- If this repo already contains an application: place the port under a
+  top-level directory (default `video/`) and keep its internal structure;
+  adjust compose build contexts and script paths accordingly, and add a short
+  "Video conferencing" section to the root README pointing at it.
+- Keep `.gitignore` entries (node_modules, dist, .env, tls material,
+  rendered `turnserver.conf`). Do not copy lockfiles from the source only if
+  they embed the old package name; otherwise keep them for reproducible
+  builds and update the `name` fields.
+- Install and build both packages to confirm the untouched port compiles:
+
+```bash
+(cd api && npm ci && npm run build)
+(cd frontend && npm ci && npm run build)
+```
+
+Commit: `port: import source tree`. (This commit may still contain old
+names; Step 4 removes them before anything is pushed. If you prefer, squash
+Steps 2-4 into one commit at the end of Step 4 so no old name ever enters
+history.) **Prefer the squash.**
+
+## Step 3: Make the changes
+
+### 3.1 Rename map (mechanical, apply everywhere: code, configs, scripts, docs, filenames)
+
+| Old (derived in Step 1) | New |
+|---|---|
+| `OLD_NAME` in UI strings, page `<title>`, meta description, README/API/ARCHITECTURE/docs headings, OpenAPI `info.title` and description, startup banner, WebAuthn `RP_NAME`, download filename of the iframe guide, toast/aria text | `{{PRODUCT_NAME}}` |
+| `old_slug` in: localStorage device-id key, sessionStorage session key, admin store persist key, Tailwind theme token names (`--color-old_slug-*` and the generated class names `bg-old_slug-*`, `text-old_slug-*`, …), SQLite filename, compose service names (`old_slug-api`, `old_slug-frontend`), named volume, compose project hints in `info.sh`, image names, container names in scripts and docs, `package.json` names, icon filename, nginx template filename, TLS mount path default (`/var/old_slug-tls`), Incus device name | `{{product_slug}}` |
+| `OLD_ENV_PREFIX_ADMIN_USERNAME`, `_ADMIN_PASSWORD`, `_DATA_DIR`, `_DOMAIN`, `_FRONTEND_PORT`, `_API_PORT`, `_LIVEKIT_*_PORT`, `_SUPER_ADMIN`, plus the `ENV` line in the API Dockerfile and every compose/env/script/doc reference | `{{ENV_PREFIX}}_…` |
+| API key prefix in `generateApiKey()` and in docs/examples | `{{KEY_PREFIX}}_` |
+| Git clone URL in `install.sh` (`setup_repository`), README one-line install and clone commands, external-proxy doc clone command | `{{NEW_REPO_URL}}` |
+| Compose file named after a proxy-manager product, and that product's name in comments, docs, `info.sh`, the admin panel's deployment-type label | `docker-compose.subdomains.yml`; wording "external reverse proxy manager (for example Nginx Proxy Manager or Traefik)" |
+| Any other vendor, client, or application names in docs and UI copy (integration examples that name a specific host app, example domains that contain a real brand) | generic wording and `example.com` domains |
+| Author/contact fields (`package.json`, OpenAPI `contact`, LICENSE copyright line) | the client's details or `{{PRODUCT_NAME}}` |
+
+Renaming Tailwind tokens changes class names across every `.tsx` file;
+do it with a single project-wide replace of the `old_slug-` prefix inside
+class strings and confirm with `npm run build` (unused-token classes fail
+silently, so also grep for any leftover `old_slug-`).
+
+Renaming storage keys, the DB filename, env vars, and volume names is a
+breaking change for existing installs; that is intended (this is a new
+product), so no compatibility shims.
+
+### 3.2 Functional changes required by the port
+
+1. **Host check on end-meeting.** `POST /api/end-meeting` currently deletes
+   the room for anyone who supplies a valid room name. Add a server-side
+   check: track the host identity per room when the host token is minted (in
+   the transient room metadata map) and reject callers whose
+   `participantIdentity` does not match with 403 `{ error: 'Only the host can
+   end the meeting' }`. Keep the request/response shapes otherwise identical
+   and update OpenAPI + API.md.
+2. **Frontend deployment-type detection text** (admin Docs tab) must use the
+   generic wording from 3.1.
+3. **Icon and favicon:** design a new SVG glyph for `{{PRODUCT_NAME}}` on the
+   same `#0a0a0a` rounded square with the accent gradient; do not reuse the
+   old glyph.
+4. **README:** rewrite the header and intro for `{{PRODUCT_NAME}}`; keep the
+   install modes, usage, troubleshooting, and state-persistence sections.
+
+### 3.3 Client-specific changes
+
+{{ADDITIONAL_CHANGES}}
+
+If the list above is empty, make no further functional changes.
+
+## Step 4: White-label sweep
+
+4.1 Search the whole tree (including filenames, `.github/`, `deploy/`,
+lockfiles, SVGs, the OpenAPI YAML, and shell scripts) for: `OLD_NAME`,
+`old_slug`, `OLD_ENV_PREFIX`, the old org, every entry in
+`{{FORBIDDEN_NAMES}}`, the old repo URL, the proxy-manager product name,
+and the old API-key prefix followed by an underscore. Fix every hit.
+Case-insensitive search, then judge each hit (common English words that
+collide with an old name are fine when they are clearly the English word;
+identifiers and brand uses are not).
+
+4.2 Rewrite comments that describe history ("previously", "before the fix
+in this repo", "the old layout") so they describe the current behavior
+without narrating a past codebase. Keep the *technical* rationale (those
+comments encode Part B §9).
+
+4.3 Regenerate anything derived: `api/openapi.yaml` from the in-code spec,
+lockfiles if package names changed, the built frontend.
+
+4.4 Add the grep gate and run it; it must pass before every commit from now
+on. Put it in `scripts/check-branding.sh` and call it from the CI workflow:
+
+```bash
+#!/usr/bin/env bash
+# Fails if any forbidden name appears in the tree (case-sensitive, whole tokens).
+set -e
+names=( "OldName" "OldOrg" "HiddenClient" )   # replace with the {{FORBIDDEN_NAMES}} list, one quoted entry each
+status=0
+for n in "${names[@]}"; do
+  if git grep -nI --untracked -e "$n" -- . ':!scripts/check-branding.sh' ; then
+    echo "forbidden name found: $n"; status=1
+  fi
+  if git ls-files | grep -n "$n"; then echo "forbidden name in a filename: $n"; status=1; fi
+done
+exit $status
+```
+
+Also make sure `git log` contains none of the names (squash if needed).
+
+## Step 5: CLAUDE.md
+
+Do not copy any `CLAUDE.md`, `.claude/`, or agent instructions from the
+source even if present. Write a fresh `CLAUDE.md` at the repo root (or in the
+port directory if this repo already has one at the root, in which case add a
+one-line pointer to the root file). Content:
+
+```markdown
+# {{PRODUCT_NAME}}
+
+Self-hosted video conferencing: React 19 + Vite + Tailwind 4 frontend,
+Express 5 + SQLite API, LiveKit SFU, optional coturn, Docker Compose deploys.
+
+## Layout
+- `api/` Express API (TypeScript). Entry `src/index.ts`; persistence `src/db.ts` + `src/store.ts`; auth `src/auth.ts`, `src/webauthn.ts`; recovery CLI `src/reset-admin.ts`.
+- `frontend/` React app. `src/lib/client.ts` holds URL detection, quality presets, session/join-link helpers, and all API wrappers. State in `src/stores/`. Media in `src/hooks/useLiveKit.ts`.
+- `deploy/external-proxy/` stack for hosts with an existing reverse proxy (LXC/bare-metal), incl. TURN.
+- Root compose files: demo, bundled Caddy, host nginx, subdomains.
+- `install.sh` / `update.sh` / `cleanup.sh` / `diagnose.sh` operator scripts.
+
+## Commands
+- API: `cd api && npm ci && npm run dev` (tsx watch) · `npm run build` · `npm run reset-admin -- --help`
+- Frontend: `cd frontend && npm ci && npm run dev` · `npm run build` (runs `tsc` first; keep it green)
+- Full stack: `docker compose up -d --build` (demo) · `./update.sh` on servers
+- Branding gate: `scripts/check-branding.sh` (must pass before every commit; CI runs it)
+
+## Conventions
+- TypeScript strict in both packages; no `any` in new code.
+- Product name in UI/docs is `{{PRODUCT_NAME}}`; identifiers use `{{product_slug}}`; env vars use `{{ENV_PREFIX}}_`; API keys start with `{{KEY_PREFIX}}_`.
+- Public contracts are frozen: join-link params (`room`, `name`, `autojoin`, `quality`, `hideEndCall`), every `/api/*` path and response shape, `X-API-Key`, `X-Webhook-Signature`/`X-Webhook-Event`/`X-Webhook-Id`, `/ws/admin` messages. Changing any of them needs an explicit decision and a docs update (API.md, openapi.yaml, docs/IFRAME_INTEGRATION.md).
+- Tailwind v4: theme tokens live in `frontend/src/index.css` `@theme`; never add unlayered global resets.
+- SQLite schema changes are new forward-only migrations in `api/src/db.ts`; never edit an existing migration.
+- Operator state (keys, webhooks, settings, admin credentials, sessions, passkeys) lives in the `/data` volume; only `docker compose down -v` wipes it. Say so in any doc that mentions `down -v`.
+
+## Do not regress
+(Copy Part B §9 here verbatim: room singleton, remote audio attach, identity vs name, switch view right after connect, server-chosen quality, TURN via rtcConfig, durable sessions + 401 logout, admin state in the hash, LiveKit host networking, single source of truth for LiveKit keys, strip only /livekit, no buffering + 24h timeouts on signaling, LIVEKIT_NODE_IP + nat_1_to_1_ips, coturn uid/gid, split UDP range, Tailwind layers, CSP not X-Frame-Options, hide screen share without getDisplayMedia, WS→polling fallback, named SQLite volume.)
+
+## Branding rules
+- The only product name allowed anywhere is `{{PRODUCT_NAME}}`. Forbidden names are enumerated in `scripts/check-branding.sh`; never add them to code, docs, comments, commits, or filenames.
+- Third-party technology names (LiveKit, coturn, Caddy, nginx, Docker, Incus) are fine. Other products, vendors, or clients are not.
+- Example domains are `example.com` only.
+```
+
+The `CLAUDE.md` must not mention the source repository, its org, where the
+code came from, or that it was ported.
+
+## Step 6: Verify and commit
+
+1. `npm run build` in both packages; `docker compose config --quiet` for every
+   compose file; `bash -n` on every shell script.
+2. `docker compose up -d --build` (demo) and walk the acceptance checklist in
+   Part B §10. At minimum: two-browser call with audio, video, and screen
+   share; join links with `hideEndCall`; first admin login, restart, session
+   kept; API key creates a room while public access is off; webhook test
+   delivers with a signature; settings persist across `down`/`up`; admin
+   panel Live indicator and hash refresh; Swagger renders; the new
+   end-meeting host check rejects a non-host.
+3. `scripts/check-branding.sh` passes; `git log --all -p | grep -c` for each
+   forbidden name is 0.
+4. Delete the source clone: `rm -rf "$SRC"`.
+5. Final commit(s) with plain messages ("Initial import of {{PRODUCT_NAME}}",
+   "Add CLAUDE.md and branding gate"). Do not push unless asked.
 
 ---
+
+# Part B: Parity reference (what must still work after the port)
+
+Everything below describes the product as it must behave in this repo, using
+the new names. Use it to verify the port and as the source for docs.
+Placeholders: `{{PRODUCT_NAME}}`, `{{product_slug}}`, `{{ENV_PREFIX}}`,
+`{{KEY_PREFIX}}`.
 
 ## 1. Product overview (what the user gets)
 
@@ -376,7 +596,7 @@ device ids `replace(/[^a-zA-Z0-9_-]/g,'').slice(0,30)`.
 | `GET /api/docs` | The OpenAPI 3.0.3 document as JSON (Section 4.8). Also serve the same document at `GET /api/openapi.yaml` as YAML if convenient; the panel uses `/api/docs`. |
 | `GET /api/room-code` | `{ roomCode }` 6 chars from the safe alphabet |
 | `POST /api/token` | Body `{ roomName, participantName, deviceId? }`. If no `X-API-Key` header **and** `publicAccessEnabled` is false → 403 `"Public access is currently disabled. Please use API key authentication."`. Validate (400 `roomName is required` / `participantName is required` / `Invalid room name`). Identity = `${name}_${deviceId}` or `${name}_${Date.now()}`. List rooms via RoomServiceClient; `isNewRoom` = not found; `isHost` = new room **or** existing room has 0 participants; if listing fails, assume host + new. Enforce `maxConcurrentMeetings` for new rooms and `maxParticipantsPerMeeting` for existing ones → 503 `{ error, limit, current }`. Mint a LiveKit `AccessToken` with `identity`, `name`, grant `{ room, roomJoin:true, canPublish:true, canSubscribe:true, canPublishData:true, roomAdmin:isHost }`. Fire webhooks `room.created` (new rooms) and `participant.joined` `{ roomName, participantName, participantIdentity, isHost }`. Respond `{ token, roomName, participantName, participantIdentity, isHost, quality, iceServers? }` where `quality` = room override ?? `defaultVideoQuality`, and `iceServers` is present only when TURN is configured: `[{ urls:[ 'turns:<d>:<tls>?transport=tcp', 'turn:<d>:<udp>?transport=udp', 'turn:<d>:<tls>?transport=tcp' ], username, credential }]`. |
-| `POST /api/end-meeting` | Body `{ roomName, participantIdentity }` → `roomService.deleteRoom`; webhook `room.deleted { roomName, endedBy }`; `{ success:true, message:'Meeting ended for all participants' }`. (No server-side host check today; document this as a known limitation.) |
+| `POST /api/end-meeting` | Body `{ roomName, participantIdentity }` → `roomService.deleteRoom`; webhook `room.deleted { roomName, endedBy }`; `{ success:true, message:'Meeting ended for all participants' }`. Per Part A Step 3.2, callers whose identity is not the recorded host get 403 `{ error:'Only the host can end the meeting' }`. |
 
 **Admin auth**
 
@@ -792,7 +1012,7 @@ on 7880 from `127.0.0.1`, fail if any published port is bound to
    in Node and Python, WebRTC/simulcast tables, error handling, env vars,
    security considerations, "no rate limiting yet" note.
 3. **ARCHITECTURE.md**: components, stacks, key files, endpoint table, and a
-   "Current limitations" list (single SFU, no recording, host = first joiner,
+   "Current limitations" list (single SFU, no recording, host = first joiner and lost on host refresh,
    sessionStorage per tab, basic reconnection, no rate limiting, transient room
    metadata).
 4. **docs/IFRAME_INTEGRATION.md**: deployment-type URL table (path-based vs
@@ -897,25 +1117,3 @@ on 7880 from `127.0.0.1`, fail if any published port is bound to
       `{{PRODUCT_NAME}}`) returns nothing across code, docs, and configs.
 
 ---
-
-## 11. Build order
-
-1. **Scaffold + API core**: repo layout, API with config, SQLite + migrations,
-   health/status/room-code/token/end-meeting, admin login/logout/sessions,
-   CORS + CSP middleware, startup banner, Dockerfile. Verify with curl.
-2. **Admin API**: stats, settings, rooms CRUD, API keys (+rotate), webhooks
-   (+test, dispatcher), WebSocket channel, OpenAPI document, reset-admin CLI.
-3. **Frontend core**: Vite/Tailwind/theme, client library (detection,
-   presets, session, links), stores, `useLiveKit`, JoinForm, VideoRoom and
-   tiles, screen-share layout, PiP, ControlBar + modals, toasts, App flow.
-4. **Admin panel**: login (password + passkey), data loading + WS/polling,
-   the five tabs, hash routing, unauthorized handling. Passkey backend
-   (`webauthn.ts`) lands here too.
-5. **Deployment modes 1-4**: compose files, Caddyfile, nginx template,
-   livekit.yaml, frontend nginx, install/update/cleanup/diagnose scripts.
-6. **Mode 5 + TURN**: external-proxy stack, templates, reference proxy
-   snippets, info/mount-cert/reset-admin scripts, CI workflow.
-7. **Docs**: README, API.md, ARCHITECTURE.md, iframe guide, external-proxy
-   guide. Run the acceptance checklist and the brand-name grep.
-
-Commit at the end of each phase with a message that names the phase.
