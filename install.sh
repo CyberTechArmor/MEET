@@ -750,6 +750,236 @@ EOF
 }
 
 # Reverse proxy mode installation
+# ── Existing-certificate support (Caddy mode) ──────────────────────────
+#
+# Lets the Caddy install use a certificate that is already on this server
+# instead of Let's Encrypt — a Cloudflare Origin certificate (required when
+# the DNS record is proxied / orange-cloud, because the ACME HTTP challenge
+# never reaches the origin), a wildcard, or a corporate CA cert.
+#
+# discover_certificates scans the usual places for PEM material. It goes by
+# CONTENT (-----BEGIN CERTIFICATE----- / -----BEGIN ... PRIVATE KEY-----),
+# not by extension, so files someone renamed to .peb, .txt or no extension
+# at all are still found. Set MEET_CERT_SEARCH_PATHS to override the
+# directories, or TLS_CERT_FILE + TLS_KEY_FILE to skip the picker entirely.
+
+CERT_SEARCH_PATHS_DEFAULT="/etc/ssl /etc/nginx /etc/apache2 /etc/httpd /etc/pki /etc/letsencrypt/live /etc/caddy /etc/cloudflare /etc/certs /etc/tls /etc/lego /etc/acme.sh /opt /srv /var/www /root /home"
+
+# Prints "kind|path" per PEM file found. kind = cert | key | both.
+discover_certificates() {
+    local paths="${MEET_CERT_SEARCH_PATHS:-$CERT_SEARCH_PATHS_DEFAULT $HOME $(pwd)}"
+    local f kind
+    # shellcheck disable=SC2086
+    $SUDO find $paths -xdev -maxdepth 6 -type f -size -256k \
+        \( -iname '*.pem' -o -iname '*.peb' -o -iname '*.crt' -o -iname '*.cer' -o -iname '*.cert' \
+           -o -iname '*.key' -o -iname '*.pub' -o -iname '*.txt' -o -iname '*chain*' -o -iname '*priv*' \
+           -o -iname '*cert*' -o -iname '*key*' -o -iname '*cloudflare*' -o -iname '*origin*' \
+           -o -iname '*ssl*' -o -iname '*tls*' -o -iname '*bundle*' \) \
+        -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.cache/*' \
+        -not -path '*/.npm/*' -not -path '/proc/*' -not -path '/sys/*' -not -name '*.pub' 2>/dev/null \
+    | sort -u | while IFS= read -r f; do
+        kind=""
+        if $SUDO grep -aq -- '-----BEGIN CERTIFICATE-----' "$f" 2>/dev/null; then kind="cert"; fi
+        if $SUDO grep -aqE -- '-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----' "$f" 2>/dev/null; then
+            if [ "$kind" = "cert" ]; then kind="both"; else kind="key"; fi
+        fi
+        [ -n "$kind" ] && echo "$kind|$f"
+    done
+}
+
+# Hostnames a certificate is valid for (SANs + CN), one per line.
+cert_names() {
+    {
+        $SUDO openssl x509 -in "$1" -noout -text 2>/dev/null \
+            | grep -A1 'Subject Alternative Name' | tail -n1 | tr ',' '\n' | sed -n 's/.*DNS:[[:space:]]*//p'
+        $SUDO openssl x509 -in "$1" -noout -subject 2>/dev/null | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'
+    } | sed 's/[[:space:]]//g' | grep . | sort -u
+}
+
+# "example.com, *.example.com · expires Jan 1 2040"
+cert_summary() {
+    local names exp
+    names=$(cert_names "$1" | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    exp=$($SUDO openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2 | awk '{print $1, $2, $4}')
+    echo "${names:-no hostnames} · expires ${exp:-?}"
+}
+
+# 0 if the certificate covers $2 (exact or one-level wildcard).
+cert_covers_domain() {
+    local d="$2" parent="${2#*.}" n
+    while IFS= read -r n; do
+        [ "$n" = "$d" ] && return 0
+        [ "$n" = "*.$parent" ] && return 0
+    done < <(cert_names "$1")
+    return 1
+}
+
+# "RSA 2048" / "EC prime256v1" / "" for a private-key file.
+key_summary() {
+    local txt bits curve
+    txt=$($SUDO openssl pkey -in "$1" -noout -text 2>/dev/null) || return 0
+    bits=$(echo "$txt" | head -n1 | grep -o '[0-9]\+ bit' | head -n1 | cut -d' ' -f1)
+    curve=$(echo "$txt" | sed -n 's/.*NIST CURVE: *//p; s/.*ASN1 OID: *//p' | head -n1)
+    if [ -n "$curve" ]; then echo "EC $curve"; elif [ -n "$bits" ]; then echo "RSA $bits"; fi
+}
+
+# 0 if the key belongs to the certificate (works for RSA and EC).
+cert_key_match() {
+    local a b
+    a=$($SUDO openssl x509 -in "$1" -noout -pubkey 2>/dev/null)
+    b=$($SUDO openssl pkey -in "$2" -pubout 2>/dev/null)
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# Interactive picker. $1 = domain. On success sets TLS_CERT_SRC / TLS_KEY_SRC.
+select_existing_certificate() {
+    local domain="$1"
+    local -a certs=() keys=()
+    local line kind path i choice
+
+    # Non-interactive path: both files given up front.
+    if [ -n "${TLS_CERT_FILE:-}" ] && [ -n "${TLS_KEY_FILE:-}" ]; then
+        TLS_CERT_SRC="$TLS_CERT_FILE"; TLS_KEY_SRC="$TLS_KEY_FILE"
+        if ! validate_certificate_pair "$domain"; then return 1; fi
+        return 0
+    fi
+
+    echo ""
+    echo -e "${DIM}  Scanning this server for certificates and private keys (by content, any extension)...${NC}"
+    while IFS= read -r line; do
+        kind="${line%%|*}"; path="${line#*|}"
+        case "$kind" in
+            cert) certs+=("$path") ;;
+            key)  keys+=("$path") ;;
+            both) certs+=("$path"); keys+=("$path") ;;
+        esac
+    done < <(discover_certificates)
+
+    # ── certificate ──
+    echo ""
+    if [ ${#certs[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}No certificate files found in the usual places.${NC}"
+    else
+        echo -e "  ${BOLD}Certificates found:${NC}"
+        i=0
+        for path in "${certs[@]}"; do
+            i=$((i+1))
+            if cert_covers_domain "$path" "$domain"; then
+                echo -e "    ${CYAN}[$i]${NC} $path  ${GREEN}✓ covers $domain${NC}"
+            else
+                echo -e "    ${CYAN}[$i]${NC} $path"
+            fi
+            echo -e "        ${DIM}$(cert_summary "$path")${NC}"
+        done
+    fi
+    echo ""
+    while true; do
+        read -p "  Certificate to use [number or full path]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#certs[@]} ]; then
+            TLS_CERT_SRC="${certs[$((choice-1))]}"
+        elif [ -n "$choice" ] && $SUDO test -f "$choice"; then
+            TLS_CERT_SRC="$choice"
+        else
+            echo -e "  ${RED}Not a valid choice.${NC}"; continue
+        fi
+        if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout >/dev/null 2>&1; then
+            echo -e "  ${RED}$TLS_CERT_SRC is not a PEM certificate.${NC}"; continue
+        fi
+        break
+    done
+
+    # ── private key ──
+    TLS_KEY_SRC=""
+    if $SUDO grep -aqE -- '-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----' "$TLS_CERT_SRC" 2>/dev/null; then
+        echo -e "  ${DIM}That file also contains a private key.${NC}"
+        read -p "  Use the key from the same file? [Y/n]: " choice
+        if [[ "${choice:-Y}" =~ ^[Yy]$ ]]; then TLS_KEY_SRC="$TLS_CERT_SRC"; fi
+    fi
+    if [ -z "$TLS_KEY_SRC" ]; then
+        echo ""
+        if [ ${#keys[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}No private key files found in the usual places.${NC}"
+        else
+            echo -e "  ${BOLD}Private keys found:${NC}"
+            i=0
+            for path in "${keys[@]}"; do
+                i=$((i+1))
+                if cert_key_match "$TLS_CERT_SRC" "$path" 2>/dev/null; then
+                    echo -e "    ${CYAN}[$i]${NC} $path  ${GREEN}✓ matches the certificate${NC}  ${DIM}$(key_summary "$path")${NC}"
+                else
+                    echo -e "    ${CYAN}[$i]${NC} $path  ${DIM}$(key_summary "$path")${NC}"
+                fi
+            done
+        fi
+        echo ""
+        while true; do
+            read -p "  Private key to use [number or full path]: " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#keys[@]} ]; then
+                TLS_KEY_SRC="${keys[$((choice-1))]}"
+            elif [ -n "$choice" ] && $SUDO test -f "$choice"; then
+                TLS_KEY_SRC="$choice"
+            else
+                echo -e "  ${RED}Not a valid choice.${NC}"; continue
+            fi
+            break
+        done
+    fi
+
+    validate_certificate_pair "$domain"
+}
+
+# Checks TLS_CERT_SRC / TLS_KEY_SRC: parse, key matches cert, cert covers
+# the domain (warn only). $1 = domain.
+validate_certificate_pair() {
+    local domain="$1" choice
+    if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ $TLS_CERT_SRC is not a PEM certificate.${NC}"; return 1
+    fi
+    if ! $SUDO openssl pkey -in "$TLS_KEY_SRC" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ $TLS_KEY_SRC is not a readable, unencrypted PEM private key.${NC}"
+        echo -e "  ${DIM}  Encrypted keys aren't supported by Caddy — decrypt first: openssl pkey -in KEY -out KEY.plain${NC}"
+        return 1
+    fi
+    if ! cert_key_match "$TLS_CERT_SRC" "$TLS_KEY_SRC"; then
+        echo -e "  ${RED}✗ That private key does not belong to that certificate.${NC}"
+        echo -e "  ${DIM}  cert public key: $($SUDO openssl x509 -in "$TLS_CERT_SRC" -noout -pubkey 2>/dev/null | sha256sum | cut -c1-16)…${NC}"
+        echo -e "  ${DIM}  key public key:  $($SUDO openssl pkey -in "$TLS_KEY_SRC" -pubout 2>/dev/null | sha256sum | cut -c1-16)…${NC}"
+        return 1
+    fi
+    if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout -checkend 86400 >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}! This certificate is expired or expires within a day.${NC}"
+    fi
+    if ! cert_covers_domain "$TLS_CERT_SRC" "$domain"; then
+        echo -e "  ${YELLOW}! This certificate is for: $(cert_names "$TLS_CERT_SRC" | tr '\n' ' ')${NC}"
+        echo -e "  ${YELLOW}  It does not list $domain — browsers will warn unless a proxy (e.g. Cloudflare) fronts it.${NC}"
+        if [ -t 0 ]; then
+            read -p "  Use it anyway? [y/N]: " choice
+            [[ "$choice" =~ ^[Yy]$ ]] || return 1
+        fi
+    fi
+    echo -e "  ${GREEN}✓${NC} Certificate and key match  ${DIM}($(cert_summary "$TLS_CERT_SRC"))${NC}"
+    return 0
+}
+
+# Copies the chosen pair into ./tls/<domain>.crt + .key (only the PEM
+# blocks — a combined file is split), which docker-compose.proxy.yml
+# mounts into Caddy at /certs. $1 = domain.
+install_existing_certificate() {
+    local domain="$1"
+    mkdir -p tls
+    # All CERTIFICATE blocks (leaf + chain, in file order).
+    $SUDO awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{p=0}' "$TLS_CERT_SRC" > "tls/$domain.crt"
+    # The first PRIVATE KEY block.
+    $SUDO awk '/-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----/{p=1} p{print} /-----END (RSA |EC |ENCRYPTED )?PRIVATE KEY-----/{if(p){exit}}' "$TLS_KEY_SRC" > "tls/$domain.key"
+    chmod 644 "tls/$domain.crt"
+    chmod 600 "tls/$domain.key"
+    if ! openssl x509 -in "tls/$domain.crt" -noout >/dev/null 2>&1 || ! openssl pkey -in "tls/$domain.key" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ Could not copy the certificate into ./tls (permissions?).${NC}"; return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Installed to tls/$domain.crt and tls/$domain.key ${DIM}(gitignored; mounted into Caddy at /certs)${NC}"
+}
+# ── end existing-certificate support ───────────────────────────────────
+
 install_with_proxy() {
     echo -e "${BOLD}Starting MEET with Reverse Proxy (Caddy)...${NC}"
     echo ""
@@ -766,6 +996,8 @@ install_with_proxy() {
     # Detect if input is an IP address
     tls_mode=""
     acme_email="admin@example.com"
+    tls_cert_dir="./tls"
+    tls_own_cert=""
 
     if [ "$domain" = "localhost" ]; then
         # Localhost - no TLS needed
@@ -778,14 +1010,43 @@ install_with_proxy() {
         echo "  For trusted SSL, use a domain name instead."
         tls_mode="tls internal"
     else
-        # Domain name - use Let's Encrypt
+        # Domain name — Let's Encrypt, or a certificate already on the box.
         echo ""
-        echo "  Enter your email for Let's Encrypt SSL certificate notifications."
+        echo -e "  ${BOLD}TLS certificate for $domain${NC}"
+        echo -e "    ${CYAN}[1]${NC} Let's Encrypt — automatic. The domain must resolve straight to this"
+        echo -e "        server on port 80/443. ${YELLOW}Does not work behind the Cloudflare proxy"
+        echo -e "        (orange cloud)${NC} — the challenge never reaches the origin. Pick 2 there."
+        echo -e "    ${CYAN}[2]${NC} Use a certificate already on this server — Cloudflare Origin cert,"
+        echo -e "        wildcard, corporate CA. The installer finds them and you pick."
         echo ""
-        read -p "  Email: " acme_email
-        if [ -z "$acme_email" ]; then
-            echo -e "${RED}  Email is required for SSL certificates.${NC}"
-            exit 1
+        local tls_choice="1"
+        if [ -n "${TLS_CERT_FILE:-}" ] && [ -n "${TLS_KEY_FILE:-}" ]; then
+            tls_choice="2"
+            echo -e "  ${DIM}TLS_CERT_FILE / TLS_KEY_FILE set — using that certificate.${NC}"
+        else
+            read -p "  Choice [1]: " tls_choice
+            tls_choice=${tls_choice:-1}
+        fi
+        if [ "$tls_choice" = "2" ]; then
+            if ! command -v openssl >/dev/null 2>&1; then
+                echo -e "${RED}  openssl is required to inspect certificates. Install it and re-run.${NC}"
+                exit 1
+            fi
+            if ! select_existing_certificate "$domain" || ! install_existing_certificate "$domain"; then
+                echo -e "${RED}  Could not set up the certificate. Nothing was started.${NC}"
+                exit 1
+            fi
+            tls_mode="tls /certs/$domain.crt /certs/$domain.key"
+            tls_own_cert="1"
+        else
+            echo ""
+            echo "  Enter your email for Let's Encrypt SSL certificate notifications."
+            echo ""
+            read -p "  Email: " acme_email
+            if [ -z "$acme_email" ]; then
+                echo -e "${RED}  Email is required for SSL certificates.${NC}"
+                exit 1
+            fi
         fi
     fi
 
@@ -828,7 +1089,11 @@ install_with_proxy() {
     cat > .env << EOF
 MEET_DOMAIN=$domain
 ACME_EMAIL=$acme_email
+# Caddy tls directive: empty = Let's Encrypt, "tls internal" = self-signed,
+# "tls /certs/<domain>.crt /certs/<domain>.key" = your own certificate
+# (files live in TLS_CERT_DIR on the host, mounted at /certs in Caddy).
 TLS_MODE=$tls_mode
+TLS_CERT_DIR=$tls_cert_dir
 LIVEKIT_NODE_IP=$livekit_ip
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
@@ -873,8 +1138,15 @@ EOF
             echo -e "    → ${CYAN}https://$domain${NC}"
             echo ""
             echo -e "  ${BOLD}SSL/TLS:${NC}"
-            echo "    Caddy will automatically obtain Let's Encrypt certificates"
-            echo "    Ensure your domain points to this server's IP address"
+            if [ -n "$tls_own_cert" ]; then
+                echo "    Using your certificate: tls/$domain.crt + tls/$domain.key"
+                echo "    To rotate it, replace those two files and run:"
+                echo -e "      ${YELLOW}docker compose -f docker-compose.proxy.yml restart caddy${NC}"
+                echo "    Behind Cloudflare: set SSL/TLS mode to 'Full (strict)' (Origin cert) or 'Full'."
+            else
+                echo "    Caddy will automatically obtain Let's Encrypt certificates"
+                echo "    Ensure your domain points to this server's IP address"
+            fi
         fi
         echo ""
         echo -e "  ${BOLD}Quick start:${NC}"
