@@ -205,14 +205,82 @@ const SESSION_KEY = 'meet_session';
 /**
  * Get or generate a unique device ID
  */
+const TAB_ID_KEY = 'meet_tab_id';
+
+function randomId(len = 7): string {
+  return Math.random().toString(36).substring(2, 2 + len);
+}
+
+// In-memory fallbacks for contexts where web storage throws (third-party
+// iframes with storage access blocked, private windows on some browsers).
+let memoryDeviceId: string | null = null;
+let memoryTabId: string | null = null;
+
+/**
+ * Stable per-browser id. Combined with a per-tab id below so that two
+ * windows on the same device — or two users on one shared machine — never
+ * produce the same LiveKit identity. LiveKit evicts the earlier connection
+ * when a second one joins with an identical identity, which showed up as
+ * "the first person gets disconnected when the second joins".
+ */
 export function getDeviceId(): string {
-  let deviceId = localStorage.getItem(DEVICE_ID_KEY);
-  if (!deviceId) {
-    // Generate a random device ID
-    deviceId = `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  try {
+    let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+    if (!deviceId) {
+      deviceId = `${Date.now().toString(36)}${randomId(6)}`;
+      localStorage.setItem(DEVICE_ID_KEY, deviceId);
+    }
+    return deviceId;
+  } catch {
+    if (!memoryDeviceId) memoryDeviceId = `${Date.now().toString(36)}${randomId(6)}`;
+    return memoryDeviceId;
   }
-  return deviceId;
+}
+
+/**
+ * Per-tab id. sessionStorage is scoped to the tab, so a refresh keeps the
+ * same identity (LiveKit then replaces the stale connection immediately)
+ * while a second window gets a new one.
+ */
+export function getTabId(): string {
+  try {
+    let tabId = sessionStorage.getItem(TAB_ID_KEY);
+    if (!tabId) {
+      tabId = randomId(6);
+      sessionStorage.setItem(TAB_ID_KEY, tabId);
+    }
+    return tabId;
+  } catch {
+    if (!memoryTabId) memoryTabId = randomId(6);
+    return memoryTabId;
+  }
+}
+
+/** Sent to /api/token as deviceId: device + tab, unique per open window. */
+export function getParticipantDeviceKey(): string {
+  return `${getDeviceId()}-${getTabId()}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30);
+}
+
+const DISPLAY_NAME_KEY = 'meet_display_name';
+
+/** Last display name this browser joined with (best effort). */
+export function getRememberedDisplayName(): string {
+  try {
+    return localStorage.getItem(DISPLAY_NAME_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function rememberDisplayName(name: string): void {
+  try {
+    if (name.trim()) localStorage.setItem(DISPLAY_NAME_KEY, name.trim());
+  } catch { /* ignore */ }
+}
+
+/** "Guest 4821" — used by embed mode when nobody supplied a name. */
+export function generateGuestName(): string {
+  return `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
 /**
@@ -297,7 +365,7 @@ export interface RoomCodeResponse {
  * Uses deviceId for unique identity while keeping displayName for the visible name
  */
 export async function getToken(roomName: string, participantName: string): Promise<TokenResponse> {
-  const deviceId = getDeviceId();
+  const deviceId = getParticipantDeviceKey();
 
   const response = await fetch(`${API_URL}/api/token`, {
     method: 'POST',
@@ -501,6 +569,8 @@ export interface JoinLinkParams {
   name: string | null;
   /** Whether to auto-join when both room and name are provided */
   autojoin: boolean;
+  /** True when `autojoin` was given explicitly in the URL */
+  autojoinExplicit: boolean;
   /** Video quality preset to use */
   quality: VideoQualityPreset | null;
   /** Whether to hide end call buttons (for iframe embeds) */
@@ -536,8 +606,10 @@ export interface JoinLinkOptions {
  * - `?room=ABCDEF&name=John` - Pre-fill both, prompt to join
  * - `?room=ABCDEF&name=John&autojoin=true` - Auto-join immediately
  * - `?room=ABCDEF&name=John&quality=max` - Join with specific quality
- * - `?room=ABCDEF&embed=1` - Embed mode: no configuration screen, just a
- *   name prompt (implied automatically inside an iframe)
+ * - `?room=ABCDEF&embed=1` - Embed mode: joins automatically with `name`,
+ *   the last name used in this browser, or a generated guest name; add
+ *   `autojoin=false` to show a name prompt instead (implied automatically
+ *   inside an iframe)
  *
  * @returns Parsed join link parameters
  *
@@ -585,6 +657,7 @@ export function parseJoinLink(): JoinLinkParams {
     room: room ? parseRoomCode(room) : null,
     name: name ? name.slice(0, 50) : null,
     autojoin,
+    autojoinExplicit: autojoinParam !== null,
     quality,
     hideEndCall,
     embed,

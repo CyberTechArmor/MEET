@@ -1,5 +1,5 @@
 import { useState, useEffect, FormEvent, useCallback } from 'react';
-import { ConnectionState } from 'livekit-client';
+import { ConnectionState, DisconnectReason } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 import { generateRoomCode, formatRoomCode, parseRoomCode, getJoinLink } from '../lib/livekit';
@@ -8,6 +8,9 @@ function JoinForm() {
   const { displayName, setDisplayName, roomCode, setRoomCode, connectionState } = useRoomStore();
   const embedMode = useRoomStore((state) => state.embedMode);
   const embedRoomCode = useRoomStore((state) => state.embedRoomCode);
+  const embedJoining = useRoomStore((state) => state.embedJoining);
+  const lastDisconnectReason = useRoomStore((state) => state.lastDisconnectReason);
+  const setLastDisconnectReason = useRoomStore((state) => state.setLastDisconnectReason);
   const { connect } = useLiveKit();
 
   const [mode, setMode] = useState<'create' | 'join' | null>(null);
@@ -90,20 +93,48 @@ function JoinForm() {
       setError('Please enter your name');
       return;
     }
+    // A manual (re)join clears the "why we got disconnected" state so the
+    // automatic rejoin logic starts fresh afterwards.
+    setLastDisconnectReason(null);
     try {
       await connect(embedRoomCode, displayName.trim());
     } catch (err) {
       console.error('Connection failed:', err);
     }
-  }, [displayName, embedRoomCode, connect]);
+  }, [displayName, embedRoomCode, connect, setLastDisconnectReason]);
 
   if (embedMode && embedRoomCode) {
+    if (embedJoining || isConnecting) {
+      return (
+        <div className="min-h-full flex flex-col items-center justify-center p-6 gap-4">
+          <div className="animate-spin h-8 w-8 border-4 border-meet-accent border-t-transparent rounded-full"></div>
+          <p className="text-sm text-meet-text-secondary">
+            {lastDisconnectReason === null ? 'Joining meeting…' : 'Reconnecting…'}
+          </p>
+        </div>
+      );
+    }
+
+    let status: string | null = null;
+    switch (lastDisconnectReason) {
+      case null: break;
+      case DisconnectReason.CLIENT_INITIATED: status = 'You left the meeting.'; break;
+      case DisconnectReason.DUPLICATE_IDENTITY: status = 'This meeting was opened in another window.'; break;
+      case DisconnectReason.ROOM_DELETED:
+      case DisconnectReason.ROOM_CLOSED: status = 'The meeting has ended.'; break;
+      case DisconnectReason.PARTICIPANT_REMOVED: status = 'You were removed from the meeting.'; break;
+      default: status = 'Connection lost.'; break;
+    }
+
     return (
       <div className="min-h-full flex flex-col items-center justify-center p-6">
         <form
           onSubmit={handleEmbedSubmit}
           className="glass rounded-2xl p-6 w-full max-w-sm shadow-soft animate-fade-in space-y-4"
         >
+          {status && (
+            <p className="text-sm text-meet-text-secondary">{status}</p>
+          )}
           <div>
             <label
               htmlFor="displayName"
@@ -144,7 +175,7 @@ function JoinForm() {
                 Connecting...
               </>
             ) : (
-              'Join meeting'
+              lastDisconnectReason === null ? 'Join meeting' : 'Rejoin meeting'
             )}
           </button>
         </form>

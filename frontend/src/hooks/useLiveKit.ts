@@ -9,10 +9,11 @@ import {
   LocalTrackPublication,
   TrackPublication,
   Participant,
+  DisconnectReason,
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll, setVideoQualityPreset } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll, setVideoQualityPreset, rememberDisplayName } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
@@ -34,6 +35,7 @@ export function useLiveKit() {
     setRoomCode,
     setView,
     resetKeepingName,
+    setLastDisconnectReason,
     roomCode: storedRoomCode,
     isHost,
     localParticipant,
@@ -176,8 +178,17 @@ export function useLiveKit() {
       }
     });
 
-    room.on(RoomEvent.Disconnected, () => {
+    room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
       setConnectionState(ConnectionState.Disconnected);
+      // Remember why, so embed mode can decide whether to rejoin on its
+      // own (transient network trouble) or show the prompt (user left,
+      // meeting ended, removed, duplicate identity).
+      setLastDisconnectReason(reason ?? DisconnectReason.UNKNOWN_REASON);
+      if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
+        toast.error('This meeting was opened from another window');
+      } else if (reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.ROOM_CLOSED) {
+        toast('The meeting has ended', { icon: '👋' });
+      }
       // Clear session and reset state, keeping the display name
       clearSession();
       sharedRoomInstance = null;
@@ -200,10 +211,13 @@ export function useLiveKit() {
     setCameraEnabled,
     resetKeepingName,
     setView,
+    setLastDisconnectReason,
   ]);
 
-  // Connect to room
-  const connect = useCallback(async (roomCode: string, displayName: string) => {
+  // Connect to room. `silent` suppresses the failure toast — used by the
+  // embed auto-rejoin loop, which shows its own "Reconnecting…" state
+  // instead of stacking one toast per attempt.
+  const connect = useCallback(async (roomCode: string, displayName: string, opts: { silent?: boolean } = {}) => {
     try {
       setConnectionState(ConnectionState.Connecting);
 
@@ -251,8 +265,11 @@ export function useLiveKit() {
       setRemoteParticipants(Array.from(newRoom.remoteParticipants.values()));
       setView('room');
 
-      // Save session for auto-rejoin on refresh
+      // Save session for auto-rejoin on refresh; remember the name so an
+      // embed link without `name` can reuse it next time.
       saveSession(roomCode, displayName, hostStatus);
+      rememberDisplayName(displayName);
+      setLastDisconnectReason(null);
 
       // Fire-and-forget mic + camera. Promise.then/.catch instead of await,
       // so a stuck publish never blocks the UI. The VideoRoom component
@@ -276,6 +293,9 @@ export function useLiveKit() {
       console.error('Failed to connect:', error);
       setConnectionState(ConnectionState.Disconnected);
 
+      if (opts.silent) {
+        throw error;
+      }
       if (error instanceof Error) {
         if (error.message.includes('Permission denied') || error.message.includes('NotAllowedError')) {
           toast.error('Camera/microphone permission denied. Please allow access and try again.');
@@ -299,6 +319,7 @@ export function useLiveKit() {
     setIsHost,
     setRoomCode,
     setView,
+    setLastDisconnectReason,
   ]);
 
   // Disconnect from room

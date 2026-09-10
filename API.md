@@ -133,11 +133,23 @@ iframe) the participant should never see MEET's own "Create a new room / Join
 existing room" configuration screen — the room has already been decided by
 your application. Embed mode does exactly that:
 
-- `?room=ABC123&embed=1` → a single "Your name" prompt, then the room.
-- `?room=ABC123&name=John&embed=1` → joins immediately, no UI before the call.
+- `?room=ABC123&name=John&embed=1` → joins immediately as John, no UI before the call.
+- `?room=ABC123&embed=1` → also joins immediately. The name is, in order: the
+  session saved before a reload of the same room, the last name this browser
+  joined with, or a generated `Guest 1234`. Pass `name` whenever your app
+  knows it.
+- `?room=ABC123&embed=1&autojoin=false` → shows a single "Your name" prompt
+  instead of joining on its own.
 - Inside an iframe, embed mode is on by default even without the parameter.
-- After the participant leaves, the same minimal prompt is shown again
-  (never the full configuration screen), so the host page stays in control.
+- **Survives drops.** If the connection is lost for a reason the participant
+  didn't choose (network, server restart, the host page reloading the
+  iframe), the app reconnects on its own with backoff (immediate, then
+  1.5 s doubling to 15 s, up to 12 attempts). Leaving on purpose, the
+  meeting ending, being removed, or the same identity joining from another
+  window shows a short status and a **Rejoin** button instead.
+- Every open window gets its own participant identity (device id + tab id),
+  so two windows on one machine, or two people with the same name, never
+  evict each other.
 - The admin gear button is hidden in embed mode.
 
 `POST /api/rooms` returns a `joinUrl` that already carries `embed=1` and is
