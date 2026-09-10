@@ -628,3 +628,19 @@ export function deleteAdminSessionsByPrincipalPrefix(prefix: string): number {
     .run(prefix.replace(/[%_\\]/g, (c) => `\\${c}`) + '%');
   return r.changes;
 }
+
+export function countAdminSessionsByPrincipal(principal: string): number {
+  const row = getDb()
+    .prepare('SELECT COUNT(*) AS c FROM admin_sessions WHERE principal = ? AND expires_at > ?')
+    .get(principal, new Date().toISOString()) as { c: number };
+  return row.c;
+}
+
+// Sign out everywhere else: drop every session of this principal except
+// the one making the call.
+export function deleteAdminSessionsByPrincipalExcept(principal: string, keepToken: string): number {
+  const r = getDb()
+    .prepare('DELETE FROM admin_sessions WHERE principal = ? AND token != ?')
+    .run(principal, keepToken);
+  return r.changes;
+}

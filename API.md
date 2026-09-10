@@ -1529,6 +1529,23 @@ docker compose restart meet-api
 
 ---
 
+## Admin Profile
+
+Everything about the signed-in admin lives under **Account & Security** in the
+admin panel: profile, passkeys, email sign-in (SMTP) and the directory (LDAP).
+
+```
+GET  /api/admin/profile                 who is signed in (local / LDAP admin / API key), sign-in method summary, active sessions
+PUT  /api/admin/profile                 { username?, currentPassword, newPassword? } — local account only; current password always required
+POST /api/admin/sessions/revoke-others  sign out every other session of the current admin
+```
+
+`PUT` is refused with `409` when the credentials come from
+`MEET_ADMIN_USERNAME` / `MEET_ADMIN_PASSWORD`, and with `403` for LDAP admins
+(their identity is managed in the directory).
+
+---
+
 ## Directory Integration (LDAP / LDAPS)
 
 Off by default. Configure it under **Settings → Directory (LDAP / LDAPS)** or

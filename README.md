@@ -78,6 +78,8 @@ The installer offers five modes:
 - **Embed Mode**: Meetings created via the API (or loaded in an iframe) skip
   the create/join configuration screen — participants only see a name prompt,
   or nothing at all when the name is in the link
+- **Account & Security tab**: Profile (rename, change password, sign out other
+  sessions), passkeys, email sign-in and LDAP in one place in the admin panel
 - **Admin Passkeys**: Register any number of devices (Touch ID, Windows Hello,
   security keys) for password-less admin sign-in
 - **Email One-Time Codes**: Configure SMTP in the admin panel; once a test code
