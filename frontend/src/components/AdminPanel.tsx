@@ -37,8 +37,9 @@ import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookRespon
 import type { RoomInfo } from '../stores/adminStore';
 import SmtpSettingsSection from './SmtpSettingsSection';
 import LdapSettingsSection from './LdapSettingsSection';
+import ProfileSection from './ProfileSection';
 
-type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
+type TabType = 'dashboard' | 'settings' | 'security' | 'api-keys' | 'webhooks' | 'docs';
 type DocsSubTab = 'api' | 'iframe';
 
 interface AdminPanelProps {
@@ -76,7 +77,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const parseTabFromHash = (): TabType => {
     if (typeof window === 'undefined') return 'dashboard';
     const m = window.location.hash.match(/^#admin\/([\w-]+)$/);
-    const valid: TabType[] = ['dashboard', 'settings', 'api-keys', 'webhooks', 'docs'];
+    const valid: TabType[] = ['dashboard', 'settings', 'security', 'api-keys', 'webhooks', 'docs'];
     if (m && (valid as string[]).includes(m[1])) return m[1] as TabType;
     return 'dashboard';
   };
@@ -615,7 +616,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     if (activeTab === 'settings' && !settings && !settingsLoading) {
       loadSettings();
     }
-    if (activeTab === 'settings' && token) {
+    if (activeTab === 'security' && token) {
       listRegisteredPasskeys(token).then(setPasskeyList).catch(() => {});
     }
   }, [activeTab, settings, settingsLoading, loadSettings]);
@@ -878,7 +879,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
         {/* Tabs */}
         <div className="flex gap-1 mt-4">
-          {(['dashboard', 'settings', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
+          {(['dashboard', 'settings', 'security', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -888,7 +889,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                   : 'text-meet-text-secondary hover:text-meet-text-primary hover:bg-meet-bg-tertiary'
               }`}
             >
-              {tab === 'api-keys' ? 'API Keys' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === 'api-keys' ? 'API Keys' : tab === 'security' ? 'Account & Security' : tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
         </div>
@@ -1314,100 +1315,6 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                       </div>
                     </div>
 
-                    {/* Passkeys */}
-                    <div className="glass rounded-xl p-6">
-                      <h3 className="text-lg font-semibold text-meet-text-primary mb-2">Passkeys</h3>
-                      <p className="text-sm text-meet-text-secondary mb-4">
-                        Sign in without a password using your device's biometrics or security key. Register one passkey per device (laptop, phone, security key) — there is no limit.
-                        {!passkeyStatus.configured && ' Disabled — PUBLIC_BASE_URL not configured.'}
-                        {passkeyStatus.configured && !browserSupportsPasskeys() && ' This browser does not support WebAuthn.'}
-                      </p>
-
-                      {passkeyError && (
-                        <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm mb-3">
-                          {passkeyError}
-                        </div>
-                      )}
-
-                      {passkeyList.length === 0 ? (
-                        <p className="text-sm text-meet-text-tertiary mb-4">No passkeys registered yet.</p>
-                      ) : (
-                        <ul className="space-y-2 mb-4">
-                          {passkeyList.map((pk) => (
-                            <li key={pk.id} className="flex items-center justify-between bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2">
-                              <div className="min-w-0">
-                                <div className="text-sm text-meet-text-primary truncate">{pk.label}</div>
-                                <div className="text-xs text-meet-text-tertiary">
-                                  added {new Date(pk.createdAt).toLocaleDateString()}
-                                  {pk.lastUsedAt ? ` · last used ${new Date(pk.lastUsedAt).toLocaleDateString()}` : ' · never used'}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  if (!token) return;
-                                  setPasskeyError('');
-                                  try {
-                                    await deleteRegisteredPasskey(token, pk.id);
-                                    setPasskeyList((list) => list.filter((p) => p.id !== pk.id));
-                                    const status = await getPasskeyStatus();
-                                    setPasskeyStatus(status);
-                                  } catch (e) {
-                                    setPasskeyError(e instanceof Error ? e.message : 'Failed to delete passkey');
-                                  }
-                                }}
-                                className="text-meet-error hover:underline text-sm"
-                              >
-                                Remove
-                              </button>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-
-                      {passkeyStatus.configured && browserSupportsPasskeys() && (
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={newPasskeyLabel}
-                            onChange={(e) => setNewPasskeyLabel(e.target.value)}
-                            placeholder="Label (e.g. 'Work laptop')"
-                            className="flex-1 bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-2 text-sm text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-                          />
-                          <button
-                            type="button"
-                            disabled={isRegisteringPasskey}
-                            onClick={async () => {
-                              if (!token) return;
-                              setPasskeyError('');
-                              setIsRegisteringPasskey(true);
-                              try {
-                                await registerPasskey(token, newPasskeyLabel || 'Passkey');
-                                setNewPasskeyLabel('');
-                                const list = await listRegisteredPasskeys(token);
-                                setPasskeyList(list);
-                                const status = await getPasskeyStatus();
-                                setPasskeyStatus(status);
-                              } catch (e) {
-                                setPasskeyError(e instanceof Error ? e.message : 'Failed to register passkey');
-                              } finally {
-                                setIsRegisteringPasskey(false);
-                              }
-                            }}
-                            className="bg-meet-accent hover:bg-meet-accent-dark disabled:opacity-50 text-meet-bg font-medium px-4 py-2 rounded-xl transition-smooth text-sm whitespace-nowrap"
-                          >
-                            {isRegisteringPasskey ? 'Registering…' : 'Register passkey'}
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Email sign-in (SMTP) */}
-                    {token && <SmtpSettingsSection token={token} passkeyCount={passkeyList.length} />}
-
-                    {/* Directory (LDAP) */}
-                    {token && <LdapSettingsSection token={token} />}
-
                     {/* Settings Info */}
                     <div className="glass rounded-xl p-6 bg-meet-accent/5 border border-meet-accent/20">
                       <h3 className="text-lg font-semibold text-meet-accent mb-2">About Settings</h3>
@@ -1417,9 +1324,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         <li>• API access is always allowed regardless of Public Access setting</li>
                         <li>• Set to 0 for unlimited (not recommended for production)</li>
                         <li>• Iframe domains control the CSP frame-ancestors header</li>
-                        <li>• Passkeys: register one per device — any of them signs you in</li>
-                        <li>• Email sign-in: password login is disabled only after a test code is confirmed</li>
-                        <li>• LDAP is off by default; an LDAP admin can disable the local account, and only an LDAP admin can re-enable it</li>
+                        <li>• Your account, passkeys, email sign-in (SMTP) and the directory (LDAP) live in the <button type="button" onClick={() => setActiveTab('security')} className="text-meet-accent hover:underline">Account &amp; Security</button> tab</li>
                       </ul>
                     </div>
                   </>
@@ -1428,6 +1333,107 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                     Failed to load settings. <button onClick={loadSettings} className="text-meet-accent hover:underline">Try again</button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Account & Security Tab */}
+            {activeTab === 'security' && (
+              <div className="space-y-6">
+                {token && <ProfileSection token={token} refreshKey={passkeyList.length} />}
+
+                {/* Passkeys */}
+                <div className="glass rounded-xl p-6">
+                  <h3 className="text-lg font-semibold text-meet-text-primary mb-2">Passkeys</h3>
+                  <p className="text-sm text-meet-text-secondary mb-4">
+                    Sign in without a password using your device's biometrics or security key. Register one passkey per device (laptop, phone, security key) — there is no limit.
+                    {!passkeyStatus.configured && ' Disabled — PUBLIC_BASE_URL not configured.'}
+                    {passkeyStatus.configured && !browserSupportsPasskeys() && ' This browser does not support WebAuthn.'}
+                  </p>
+
+                  {passkeyError && (
+                    <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm mb-3">
+                      {passkeyError}
+                    </div>
+                  )}
+
+                  {passkeyList.length === 0 ? (
+                    <p className="text-sm text-meet-text-tertiary mb-4">No passkeys registered yet.</p>
+                  ) : (
+                    <ul className="space-y-2 mb-4">
+                      {passkeyList.map((pk) => (
+                        <li key={pk.id} className="flex items-center justify-between bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2">
+                          <div className="min-w-0">
+                            <div className="text-sm text-meet-text-primary truncate">{pk.label}</div>
+                            <div className="text-xs text-meet-text-tertiary">
+                              added {new Date(pk.createdAt).toLocaleDateString()}
+                              {pk.lastUsedAt ? ` · last used ${new Date(pk.lastUsedAt).toLocaleDateString()}` : ' · never used'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!token) return;
+                              setPasskeyError('');
+                              try {
+                                await deleteRegisteredPasskey(token, pk.id);
+                                setPasskeyList((list) => list.filter((p) => p.id !== pk.id));
+                                const status = await getPasskeyStatus();
+                                setPasskeyStatus(status);
+                              } catch (e) {
+                                setPasskeyError(e instanceof Error ? e.message : 'Failed to delete passkey');
+                              }
+                            }}
+                            className="text-meet-error hover:underline text-sm"
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {passkeyStatus.configured && browserSupportsPasskeys() && (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={newPasskeyLabel}
+                        onChange={(e) => setNewPasskeyLabel(e.target.value)}
+                        placeholder="Label (e.g. 'Work laptop')"
+                        className="flex-1 bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-2 text-sm text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      />
+                      <button
+                        type="button"
+                        disabled={isRegisteringPasskey}
+                        onClick={async () => {
+                          if (!token) return;
+                          setPasskeyError('');
+                          setIsRegisteringPasskey(true);
+                          try {
+                            await registerPasskey(token, newPasskeyLabel || 'Passkey');
+                            setNewPasskeyLabel('');
+                            const list = await listRegisteredPasskeys(token);
+                            setPasskeyList(list);
+                            const status = await getPasskeyStatus();
+                            setPasskeyStatus(status);
+                          } catch (e) {
+                            setPasskeyError(e instanceof Error ? e.message : 'Failed to register passkey');
+                          } finally {
+                            setIsRegisteringPasskey(false);
+                          }
+                        }}
+                        className="bg-meet-accent hover:bg-meet-accent-dark disabled:opacity-50 text-meet-bg font-medium px-4 py-2 rounded-xl transition-smooth text-sm whitespace-nowrap"
+                      >
+                        {isRegisteringPasskey ? 'Registering…' : 'Register passkey'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Email sign-in (SMTP) */}
+                {token && <SmtpSettingsSection token={token} passkeyCount={passkeyList.length} />}
+
+                {/* Directory (LDAP) */}
+                {token && <LdapSettingsSection token={token} />}
               </div>
             )}
 

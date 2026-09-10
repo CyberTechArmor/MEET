@@ -1190,6 +1190,46 @@ Configure webhooks to receive real-time notifications for events like:
         responses: { '200': { description: 'OK' } },
       },
     },
+    '/api/admin/profile': {
+      get: {
+        tags: ['Admin'],
+        summary: 'Current admin profile',
+        description: 'Who is signed in (local account, LDAP admin or API key) plus a summary of sign-in methods and active sessions.',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ principal, kind, username, displayName, email, localAccountEnabled, passwordLoginEnabled, passwordManagedByEnv, passkeyCount, smtpVerified, ldapActive, ldapAdminsActive, ldapAdminCount, activeSessions, … }' } },
+      },
+      put: {
+        tags: ['Admin'],
+        summary: 'Change the local admin username and/or password',
+        description: 'Local account only; the current password is always required. Refused when credentials come from MEET_ADMIN_USERNAME / MEET_ADMIN_PASSWORD.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['currentPassword'],
+                properties: {
+                  username: { type: 'string' },
+                  currentPassword: { type: 'string' },
+                  newPassword: { type: 'string', minLength: 8 },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': { description: 'Updated' }, '401': { description: 'Current password incorrect' }, '403': { description: 'Not the local account' }, '409': { description: 'Managed by environment variables' } },
+      },
+    },
+    '/api/admin/sessions/revoke-others': {
+      post: {
+        tags: ['Admin'],
+        summary: 'Sign out every other session of the current admin',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ revoked }' } },
+      },
+    },
     '/api/admin/ldap': {
       get: {
         tags: ['Directory'],
@@ -2453,6 +2493,115 @@ app.post('/api/admin/otp/verify', (req: Request<object, object, OtpVerifyBody>, 
     username: adminUsername,
     principal: 'local',
   });
+});
+
+// ───────────────────────── profile / account ───────────────────────────
+//
+// Who is signed in and what they can change about their own account.
+// The local account can rename itself and change its password (current
+// password required); directory admins are read-only here — their
+// identity lives in LDAP.
+app.get('/api/admin/profile', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  const principal = req.principal ?? 'local';
+  const kind = principal.startsWith('ldap:') ? 'ldap' : principal.startsWith('apikey:') ? 'apikey' : 'local';
+  const base = {
+    principal,
+    kind,
+    localAccountEnabled: localAccountEnabled(),
+    passwordLoginEnabled: passwordLoginEnabled(),
+    passwordManagedByEnv: !!(ADMIN_USERNAME && ADMIN_PASSWORD),
+    passkeyCount: store.listPasskeys().length,
+    smtpVerified: smtpVerified(),
+    ldapActive: ldapActive(),
+    ldapAdminsActive: ldapAdminsActive(),
+    ldapAdminCount: store.countLdapAdmins(),
+    activeSessions: kind === 'apikey' ? 0 : store.countAdminSessionsByPrincipal(principal),
+  };
+  if (kind === 'ldap') {
+    const dn = principal.slice('ldap:'.length);
+    const admin = store.findLdapAdminByDn(dn);
+    res.json({
+      ...base,
+      username: admin?.username ?? '',
+      displayName: admin?.displayName ?? '',
+      email: admin?.email ?? '',
+      dn,
+      addedBy: admin?.addedBy ?? '',
+      createdAt: admin?.createdAt.toISOString() ?? null,
+      lastLoginAt: admin?.lastLoginAt?.toISOString() ?? null,
+    });
+    return;
+  }
+  if (kind === 'apikey') {
+    res.json({ ...base, username: req.apiKey?.name ?? 'API key', displayName: req.apiKey?.name ?? 'API key', email: '' });
+    return;
+  }
+  const smtp = smtpSettings;
+  res.json({
+    ...base,
+    username: adminUsername,
+    displayName: adminUsername,
+    email: smtp?.adminEmail ?? '',
+  });
+});
+
+interface UpdateProfileRequest {
+  username?: string;
+  currentPassword?: string;
+  newPassword?: string;
+}
+
+app.put('/api/admin/profile', authenticateAdmin, (req: Request<object, object, UpdateProfileRequest>, res: Response) => {
+  const principal = (req as AuthRequest).principal ?? 'local';
+  if (principal !== 'local') {
+    res.status(403).json({ error: 'Only the local admin account can be edited here. Directory admins are managed in LDAP.' });
+    return;
+  }
+  if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+    res.status(409).json({ error: 'The admin username and password are set by MEET_ADMIN_USERNAME / MEET_ADMIN_PASSWORD environment variables. Change them there.' });
+    return;
+  }
+  const { username, currentPassword, newPassword } = req.body ?? {};
+  const wantsUsername = username !== undefined && username !== adminUsername;
+  const wantsPassword = newPassword !== undefined && newPassword !== '';
+  if (!wantsUsername && !wantsPassword) {
+    res.status(400).json({ error: 'Nothing to change' });
+    return;
+  }
+  if (wantsUsername && (typeof username !== 'string' || !username.trim() || username.length > 100)) {
+    res.status(400).json({ error: 'Username must be 1–100 characters' });
+    return;
+  }
+  if (wantsPassword && (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 200)) {
+    res.status(400).json({ error: 'New password must be at least 8 characters' });
+    return;
+  }
+  if (typeof currentPassword !== 'string' || !currentPassword || !verifyPassword(currentPassword, adminPasswordHash)) {
+    res.status(401).json({ error: 'Current password is incorrect' });
+    return;
+  }
+  if (wantsUsername) adminUsername = (username as string).trim();
+  if (wantsPassword) adminPasswordHash = hashPassword(newPassword as string);
+  store.saveAdminCredentials({
+    username: adminUsername,
+    passwordHash: adminPasswordHash,
+    firstLoginDone: true,
+    userHandle: store.loadAdminCredentialsRaw().userHandle,
+  });
+  console.log(`[auth] local admin profile updated (${[wantsUsername && 'username', wantsPassword && 'password'].filter(Boolean).join(', ')})`);
+  res.json({ success: true, username: adminUsername, changed: { username: wantsUsername, password: wantsPassword } });
+});
+
+// Sign out everywhere else.
+app.post('/api/admin/sessions/revoke-others', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  const token = bearerToken(req);
+  const principal = req.principal ?? 'local';
+  if (!token || principal.startsWith('apikey:')) {
+    res.status(400).json({ error: 'Requires a session token' });
+    return;
+  }
+  const revoked = store.deleteAdminSessionsByPrincipalExcept(principal, token);
+  res.json({ success: true, revoked });
 });
 
 // ───────────────────────── directory (LDAP) ────────────────────────────

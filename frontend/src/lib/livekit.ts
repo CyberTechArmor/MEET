@@ -1637,3 +1637,38 @@ export const disableLocalAccount = (token: string) =>
   adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/disable', { method: 'POST' }, 'Failed to disable the local account');
 export const enableLocalAccount = (token: string) =>
   adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/enable', { method: 'POST' }, 'Failed to enable the local account');
+
+// ───────────────────────── profile / account ───────────────────────────
+
+export interface AdminProfile {
+  principal: string;
+  kind: 'local' | 'ldap' | 'apikey';
+  username: string;
+  displayName: string;
+  email: string;
+  localAccountEnabled: boolean;
+  passwordLoginEnabled: boolean;
+  passwordManagedByEnv: boolean;
+  passkeyCount: number;
+  smtpVerified: boolean;
+  ldapActive: boolean;
+  ldapAdminsActive: boolean;
+  ldapAdminCount: number;
+  activeSessions: number;
+  // LDAP admins only
+  dn?: string;
+  addedBy?: string;
+  createdAt?: string | null;
+  lastLoginAt?: string | null;
+}
+
+export const getAdminProfile = (token: string) =>
+  adminJson<AdminProfile>(token, '/api/admin/profile', {}, 'Failed to load profile');
+
+export const updateAdminProfile = (token: string, update: { username?: string; currentPassword: string; newPassword?: string }) =>
+  adminJson<{ success: boolean; username: string; changed: { username: boolean; password: boolean } }>(
+    token, '/api/admin/profile', { method: 'PUT', body: JSON.stringify(update) }, 'Failed to update profile',
+  );
+
+export const revokeOtherAdminSessions = (token: string) =>
+  adminJson<{ success: boolean; revoked: number }>(token, '/api/admin/sessions/revoke-others', { method: 'POST' }, 'Failed to sign out other sessions');
