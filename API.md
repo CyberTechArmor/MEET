@@ -99,6 +99,7 @@ MEET supports URL-based join links that allow you to create shareable meeting in
 | `autojoin` | boolean | No | Auto-join when page loads (default: `true` if name provided) |
 | `quality` | string | No | Video quality preset: `max`, `high`, `auto`, `balanced`, `low` |
 | `hideEndCall` | boolean | No | Hide leave/end call buttons (for iframe embeds where the host page manages call lifecycle) |
+| `embed` | boolean | No | Embed mode: skip the create/join configuration screen. Only a name prompt is shown (none at all when `name` is given). **Implied automatically inside an iframe**; pass `embed=0` to force the full screen. `joinUrl` from `POST /api/rooms` already includes `embed=1`. |
 
 ### URL Examples
 
@@ -120,7 +121,28 @@ https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true&quality=high
 
 # Iframe embed without end call buttons
 https://meet.example.com/?room=ABC123&name=John&hideEndCall=true
+
+# API-created meeting: straight into the room, no configuration screen
+https://meet.example.com/?room=ABC123&embed=1
 ```
+
+### Embed mode
+
+When a meeting is created through the API (or the page is loaded inside an
+iframe) the participant should never see MEET's own "Create a new room / Join
+existing room" configuration screen — the room has already been decided by
+your application. Embed mode does exactly that:
+
+- `?room=ABC123&embed=1` → a single "Your name" prompt, then the room.
+- `?room=ABC123&name=John&embed=1` → joins immediately, no UI before the call.
+- Inside an iframe, embed mode is on by default even without the parameter.
+- After the participant leaves, the same minimal prompt is shown again
+  (never the full configuration screen), so the host page stays in control.
+- The admin gear button is hidden in embed mode.
+
+`POST /api/rooms` returns a `joinUrl` that already carries `embed=1` and is
+built from `PUBLIC_BASE_URL`, so it points at the web app even when the API
+lives on its own subdomain.
 
 ### Generating Join Links
 
@@ -1464,3 +1486,122 @@ Currently, there is no rate limiting implemented. For production deployments, co
 3. **Host Privileges**: First joiner becomes host automatically
 4. **CORS**: Configure `CORS_ORIGIN` for production deployments
 5. **HTTPS**: Use reverse proxy (Caddy) for production with TLS
+
+
+---
+
+## Admin Sign-in Methods
+
+The admin account supports three credentials. Which ones are accepted is
+reported by `GET /api/admin/auth/methods` (public) so the login form can
+render itself:
+
+| Method | Endpoint(s) | Notes |
+|--------|-------------|-------|
+| Passkey (WebAuthn) | `POST /api/admin/webauthn/auth/options` → `POST /api/admin/webauthn/auth/verify` | Register as many devices as you like under **Settings → Passkeys**. Requires `PUBLIC_BASE_URL`. |
+| Emailed one-time code | `POST /api/admin/otp/request` → `POST /api/admin/otp/verify` | Available once SMTP is configured **and verified** (see below). 6 digits, 10-minute validity, 5 attempts, one code per 30 s. |
+| Password | `POST /api/admin/login` | Accepted only while email sign-in is **not** verified. Returns `403 PASSWORD_LOGIN_DISABLED` afterwards. |
+
+### SMTP configuration (email sign-in)
+
+```
+GET    /api/admin/smtp              current settings (password never returned)
+PUT    /api/admin/smtp              { host, port, secure, username, password, fromAddress, adminEmail }
+DELETE /api/admin/smtp              forget settings → password login re-enabled
+POST   /api/admin/smtp/test         email a test code to adminEmail
+POST   /api/admin/smtp/test/verify  { ticket, code } → marks SMTP verified
+```
+
+Password login is switched off **only** at the moment a test code has been
+confirmed, so a mistyped host or wrong credentials can never lock you out.
+Changing any delivery field (host, port, TLS, username, password, from
+address, admin address) resets the verification, and the password works again
+until a new test code is confirmed.
+
+**Recovery.** If the mail server stops delivering and no passkey is
+registered, run this inside the API container to forget the SMTP settings and
+restore password login:
+
+```bash
+docker compose exec meet-api node dist/reset-admin.js --clear-smtp
+docker compose restart meet-api
+```
+
+---
+
+## Directory Integration (LDAP / LDAPS)
+
+Off by default. Configure it under **Settings → Directory (LDAP / LDAPS)** or
+through the API. Works with Active Directory, OpenLDAP, FreeIPA and any other
+LDAP v3 server over `ldap://` (optionally with StartTLS) or `ldaps://`, with an
+optional private-CA certificate.
+
+Once a connection is saved and **Enable LDAP** is on, two independent switches
+decide what it is used for:
+
+| Switch | Effect |
+|--------|--------|
+| **Require directory sign-in to use the meeting frontend** | Participants see an LDAP sign-in screen before the join screen. The web app then sends a 12-hour participant session as `Authorization: Bearer` on `POST /api/token` and `GET /api/room-code`; without it both answer `401 LDAP_LOGIN_REQUIRED`. API-key callers are exempt. |
+| **Allow LDAP admins to sign in to this panel** | Directory users you pick (search the directory, click **Make admin**) can sign in to the admin panel with their directory username or email and password through the normal `POST /api/admin/login`. |
+
+A signed-in **LDAP admin** can **disable the local account**: the built-in
+admin's password, passkeys and emailed codes all stop working and its sessions
+end. Only an LDAP admin can re-enable it. Changes that would leave nobody able
+to sign in (turning LDAP admins off, removing LDAP, or removing the last LDAP
+admin while the local account is disabled) are refused with
+`409 WOULD_LOCK_OUT`.
+
+### Endpoints
+
+```
+GET    /api/admin/auth/methods          now also reports ldap + localAccountEnabled
+GET    /api/admin/ldap                   settings (bind password never returned)
+PUT    /api/admin/ldap                   partial update — see fields below
+DELETE /api/admin/ldap                   forget settings and all LDAP admins
+POST   /api/admin/ldap/test              connect + bind + one search with the saved settings
+GET    /api/admin/ldap/search?q=         directory users (max 25) with isAdmin flag
+GET    /api/admin/ldap/admins            LDAP admins
+POST   /api/admin/ldap/admins            { dn } — grant admin access (DN is verified in the directory)
+DELETE /api/admin/ldap/admins/{id}       revoke
+POST   /api/admin/local-account/disable  LDAP admins only
+POST   /api/admin/local-account/enable   LDAP admins only
+
+POST   /api/auth/ldap/login              participant sign-in → { token, expiresAt, username, displayName }
+GET    /api/auth/me                      validate a participant session
+POST   /api/auth/logout                  end it
+GET    /api/status                       now includes ldapRequired
+```
+
+### Settings fields
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `url` | | `ldap://host:389` or `ldaps://host:636` |
+| `startTls` | `false` | Upgrade an `ldap://` connection with StartTLS before binding |
+| `tlsRejectUnauthorized` | `true` | Verify the server certificate |
+| `caCert` | | PEM bundle for a private CA (LDAPS / StartTLS) |
+| `bindDn` / `bindPassword` | | Service account used to search for users. Blank = anonymous search |
+| `baseDn` | | Where users are searched |
+| `userFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid={{username}})(sAMAccountName={{username}})(mail={{username}})))` | `{{username}}` is replaced with the (escaped) value the user typed |
+| `searchFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid=*{{q}}*)(sAMAccountName=*{{q}}*)(cn=*{{q}}*)(displayName=*{{q}}*)(mail=*{{q}}*)))` | Admin picker; `{{q}}` is the search text |
+| `usernameAttribute` | `uid` | Use `sAMAccountName` for Active Directory |
+| `displayNameAttribute` | `displayName` | Falls back to `cn` |
+| `emailAttribute` | `mail` | |
+| `timeoutMs` | `8000` | Connect and operation timeout |
+| `requireForFrontend` | `false` | Gate the meeting frontend |
+| `adminsEnabled` | `false` | Allow LDAP admins into the admin panel |
+
+Authentication is search-then-bind: the service account finds the user's DN
+with `userFilter`, then a second connection binds as that DN with the supplied
+password. Empty passwords are rejected before reaching the directory. Filter
+values are escaped per RFC 4515.
+
+**Recovery.** From inside the API container:
+
+```bash
+# Re-enable the local admin account after an LDAP admin disabled it
+docker compose exec meet-api node dist/reset-admin.js --enable-local
+# Forget the LDAP settings and every LDAP admin
+docker compose exec meet-api node dist/reset-admin.js --clear-ldap
+docker compose restart meet-api
+```

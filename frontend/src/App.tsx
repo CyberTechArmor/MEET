@@ -8,14 +8,19 @@ import {
   clearJoinLinkParams,
   setVideoQualityPreset,
   getPublicStatus,
+  checkParticipantSession,
+  ldapParticipantLogout,
+  type ParticipantSession,
 } from './lib/livekit';
 import JoinForm from './components/JoinForm';
+import LdapLoginForm from './components/LdapLoginForm';
 import VideoRoom from './components/VideoRoom';
 import AdminPanel from './components/AdminPanel';
 
 function App() {
   const view = useRoomStore((state) => state.view);
-  const { setDisplayName, setRoomCode, setHideEndCall } = useRoomStore();
+  const embedMode = useRoomStore((state) => state.embedMode);
+  const { setDisplayName, setRoomCode, setHideEndCall, setEmbed } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
   // Hash-driven so a refresh while the admin panel is open lands back in
@@ -27,6 +32,10 @@ function App() {
   );
   const [publicAccessEnabled, setPublicAccessEnabled] = useState<boolean | null>(null);
   const [isCheckingStatus, setIsCheckingStatus] = useState(true);
+  // Directory-gated frontend: when the server says ldapRequired, the
+  // participant must sign in against LDAP before the join screen shows.
+  const [ldapRequired, setLdapRequired] = useState(false);
+  const [participant, setParticipant] = useState<ParticipantSession | null>(null);
 
   // Mirror showAdmin into the URL hash, and react to back/forward.
   useEffect(() => {
@@ -49,8 +58,16 @@ function App() {
   // Check public access status on mount
   useEffect(() => {
     getPublicStatus()
-      .then((status) => {
+      .then(async (status) => {
         setPublicAccessEnabled(status.publicAccessEnabled);
+        if (status.ldapRequired) {
+          setLdapRequired(true);
+          const session = await checkParticipantSession();
+          setParticipant(session);
+          if (session && !useRoomStore.getState().displayName) {
+            setDisplayName(session.displayName || session.username);
+          }
+        }
       })
       .catch(() => {
         // If we can't reach the API, assume public access is enabled
@@ -59,7 +76,18 @@ function App() {
       .finally(() => {
         setIsCheckingStatus(false);
       });
-  }, []);
+  }, [setDisplayName]);
+
+  // A 401 from /api/token means the participant session is gone.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      if (ldapRequired && !window.location.hash.startsWith('#admin')) {
+        setParticipant(null);
+      }
+    };
+    window.addEventListener('admin:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('admin:unauthorized', onUnauthorized);
+  }, [ldapRequired]);
 
   // Handle join links and auto-rejoin on page load
   useEffect(() => {
@@ -80,6 +108,14 @@ function App() {
       // Set hideEndCall for iframe embeds
       if (joinParams.hideEndCall) {
         setHideEndCall(true);
+      }
+
+      // Embed mode (API-created meeting / iframe): remember the room so the
+      // SPA never shows the create/join configuration screen — only a name
+      // prompt when no name was supplied, and a "join again" prompt after
+      // leaving.
+      if (joinParams.embed) {
+        setEmbed(true, joinParams.room);
       }
 
       // Pre-fill the form fields
@@ -112,7 +148,7 @@ function App() {
         clearSession();
       });
     }
-  }, [connect, setDisplayName, setRoomCode, setHideEndCall]);
+  }, [connect, setDisplayName, setRoomCode, setHideEndCall, setEmbed]);
 
 
   // Show loading state while checking status
@@ -177,12 +213,53 @@ function App() {
     );
   }
 
+  // Directory sign-in gate (participants only; the admin panel has its own).
+  if (ldapRequired && !participant && view === 'join' && !showAdmin) {
+    return (
+      <div className="h-full w-full bg-meet-bg">
+        <LdapLoginForm
+          onSignedIn={(session) => {
+            setParticipant(session);
+            if (!useRoomStore.getState().displayName) {
+              setDisplayName(session.displayName || session.username);
+            }
+          }}
+        />
+        {!embedMode && (
+          <button
+            onClick={() => setShowAdmin(true)}
+            className="fixed bottom-4 right-4 p-2 text-meet-text-tertiary hover:text-meet-text-secondary transition-smooth opacity-50 hover:opacity-100"
+            title="Admin Panel"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="h-full w-full bg-meet-bg">
       {view === 'join' ? <JoinForm /> : <VideoRoom />}
 
-      {/* Admin Button - only shown on join screen */}
-      {view === 'join' && (
+      {/* Signed-in participant (directory-gated frontend) */}
+      {ldapRequired && participant && view === 'join' && (
+        <div className="fixed bottom-4 left-4 text-xs text-meet-text-tertiary flex items-center gap-2">
+          <span>Signed in as {participant.displayName || participant.username}</span>
+          <button
+            onClick={() => { ldapParticipantLogout(); setParticipant(null); }}
+            className="text-meet-accent hover:text-meet-accent-light"
+          >
+            Sign out
+          </button>
+        </div>
+      )}
+
+      {/* Admin Button - only shown on join screen, never in embed mode */}
+      {view === 'join' && !embedMode && (
         <button
           onClick={() => setShowAdmin(true)}
           className="fixed bottom-4 right-4 p-2 text-meet-text-tertiary hover:text-meet-text-secondary transition-smooth opacity-50 hover:opacity-100"

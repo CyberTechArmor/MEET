@@ -44,12 +44,15 @@ const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_
 // login, so losing them on restart is acceptable. Room metadata is also
 // transient (display names while a room exists).
 
-import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset } from './types.js';
+import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset, SmtpSettings, LdapSettings } from './types.js';
 import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword } from './auth.js';
 import * as webauthn from './webauthn.js';
+import * as mailer from './mailer.js';
+import * as otp from './otp.js';
+import * as ldap from './ldap.js';
 
 // Open the database before anything else can touch it.
 getDb();
@@ -158,6 +161,156 @@ let isFirstLogin: boolean;
 }
 
 const roomMetadata: Map<string, RoomMetadata> = new Map();
+
+// Email (SMTP) settings for one-time sign-in codes. In-memory hot copy of
+// the persisted blob; every mutation writes through to SQLite.
+let smtpSettings: SmtpSettings | null = store.loadSmtpSettings() ?? null;
+
+// Email sign-in is only offered once the admin has proven the SMTP config
+// works by completing a test code round trip (`verified`). This is also
+// the exact condition under which password login is switched off, so an
+// unreachable mail server can never lock the admin out.
+function smtpVerified(): boolean {
+  return !!smtpSettings && smtpSettings.verified && mailer.isSmtpComplete(smtpSettings);
+}
+
+// Directory (LDAP) settings. Off by default; persisted under settings key
+// 'ldap'. Old blobs are merged over the defaults so new fields pick up
+// sane values.
+let ldapSettings: LdapSettings = { ...ldap.LDAP_DEFAULTS, ...(store.loadLdapSettings() ?? {}) };
+
+// The built-in ("local") account can be switched off by a directory
+// admin. Every local credential — password, passkeys, emailed codes —
+// is refused while it is off. Cached here; written through on change.
+let localAccountDisabled = store.loadAdminCredentials().localDisabled;
+
+function localAccountEnabled(): boolean {
+  return !localAccountDisabled;
+}
+
+function ldapActive(): boolean {
+  return ldap.isLdapActive(ldapSettings);
+}
+
+// Directory users listed in ldap_admins may sign in to the admin panel.
+function ldapAdminsActive(): boolean {
+  return ldapActive() && ldapSettings.adminsEnabled;
+}
+
+// Participants must sign in against the directory before /api/token
+// hands out a room token (API-key callers are exempt).
+function ldapRequiredForFrontend(): boolean {
+  return ldapActive() && ldapSettings.requireForFrontend;
+}
+
+function otpLoginAvailable(): boolean {
+  return localAccountEnabled() && smtpVerified();
+}
+
+function passwordLoginEnabled(): boolean {
+  return localAccountEnabled() && !smtpVerified();
+}
+
+function ldapView() {
+  const s = ldapSettings;
+  return {
+    configured: ldap.isLdapConfigured(s),
+    active: ldapActive(),
+    adminsActive: ldapAdminsActive(),
+    requiredForFrontend: ldapRequiredForFrontend(),
+    localAccountEnabled: localAccountEnabled(),
+    ldapAdminCount: store.countLdapAdmins(),
+    settings: {
+      enabled: s.enabled,
+      url: s.url,
+      startTls: s.startTls,
+      tlsRejectUnauthorized: s.tlsRejectUnauthorized,
+      caCert: s.caCert,
+      bindDn: s.bindDn,
+      hasBindPassword: !!s.bindPassword,
+      baseDn: s.baseDn,
+      userFilter: s.userFilter,
+      searchFilter: s.searchFilter,
+      usernameAttribute: s.usernameAttribute,
+      displayNameAttribute: s.displayNameAttribute,
+      emailAttribute: s.emailAttribute,
+      timeoutMs: s.timeoutMs,
+      requireForFrontend: s.requireForFrontend,
+      adminsEnabled: s.adminsEnabled,
+    },
+  };
+}
+
+function sendLdapError(res: Response, e: unknown): void {
+  if (e instanceof ldap.LdapError) {
+    res.status(e.statusCode).json({ error: e.message });
+    return;
+  }
+  console.error('LDAP error:', e);
+  res.status(502).json({ error: 'Directory error' });
+}
+
+function ldapAdminToJson(a: import('./types.js').LdapAdmin) {
+  return {
+    id: a.id,
+    dn: a.dn,
+    username: a.username,
+    displayName: a.displayName,
+    email: a.email,
+    addedBy: a.addedBy,
+    createdAt: a.createdAt.toISOString(),
+    lastLoginAt: a.lastLoginAt ? a.lastLoginAt.toISOString() : null,
+  };
+}
+
+// Frontend (participant) auth when the meeting UI is gated behind the
+// directory: accept a participant session or an admin session as Bearer.
+function bearerToken(req: { headers: Request['headers'] }): string | null {
+  const h = req.headers.authorization;
+  return h?.startsWith('Bearer ') ? h.substring(7) : null;
+}
+
+function participantSessionFromRequest(req: { headers: Request['headers'] }): { username: string; displayName: string } | null {
+  const token = bearerToken(req);
+  if (!token) return null;
+  const us = store.getUserSession(token);
+  if (us && us.expiresAt > new Date()) return { username: us.username, displayName: us.displayName };
+  const as = store.getAdminSession(token);
+  if (as && as.expiresAt > new Date()) return { username: as.displayName || 'admin', displayName: as.displayName || 'admin' };
+  return null;
+}
+
+function smtpView() {
+  const s = smtpSettings;
+  return {
+    configured: mailer.isSmtpComplete(s),
+    verified: !!s?.verified,
+    passwordLoginEnabled: passwordLoginEnabled(),
+    settings: s
+      ? {
+          host: s.host,
+          port: s.port,
+          secure: s.secure,
+          username: s.username,
+          hasPassword: !!s.password,
+          fromAddress: s.fromAddress,
+          adminEmail: s.adminEmail,
+          verified: s.verified,
+          verifiedAt: s.verifiedAt,
+        }
+      : null,
+  };
+}
+
+function sendOtpError(res: Response, e: unknown): void {
+  if (e instanceof otp.OtpError) {
+    if (e.retryAfterSeconds) res.setHeader('Retry-After', String(e.retryAfterSeconds));
+    res.status(e.statusCode).json({ error: e.message });
+    return;
+  }
+  console.error('OTP error:', e);
+  res.status(500).json({ error: 'One-time code error' });
+}
 
 // Server settings
 interface ServerSettings {
@@ -376,6 +529,8 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 interface AuthRequest extends Request {
   isAdmin?: boolean;
   apiKey?: ApiKey;
+  // 'local', 'ldap:<dn>' or 'apikey:<id>' — who is calling.
+  principal?: string;
 }
 
 function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction): void {
@@ -391,6 +546,7 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
       store.saveApiKey(apiKey);
       req.apiKey = apiKey;
       req.isAdmin = apiKey.permissions.includes('admin');
+      req.principal = `apikey:${apiKey.id}`;
       next();
       return;
     }
@@ -406,14 +562,16 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
     const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
+      req.principal = session.principal;
       next();
       return;
     }
 
     // Check if it's the admin password (sent as plaintext Bearer; verified
     // against the scrypt hash with timing-safe equality).
-    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+    if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
+      req.principal = 'local';
       next();
       return;
     }
@@ -447,11 +605,13 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
     const session = store.getAdminSession(token);
     if (session && session.expiresAt > new Date()) {
       req.isAdmin = true;
+      req.principal = session.principal;
       next();
       return;
     }
-    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+    if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
+      req.principal = 'local';
       next();
       return;
     }
@@ -478,8 +638,69 @@ app.get('/api/status', (_req: Request, res: Response) => {
   res.json({
     publicAccessEnabled: serverSettings.publicAccessEnabled,
     defaultVideoQuality: serverSettings.defaultVideoQuality,
+    // When true the web app must obtain a participant session via
+    // POST /api/auth/ldap/login before /api/token will answer.
+    ldapRequired: ldapRequiredForFrontend(),
     version: API_VERSION,
   });
+});
+
+// ───────────────────── participant directory sign-in ───────────────────
+//
+// Only meaningful when the meeting frontend is gated behind LDAP. Issues a
+// 12-hour participant session the SPA sends as Bearer on /api/token and
+// /api/room-code. Admin sessions are accepted there too.
+interface LdapUserLoginBody {
+  username: string;
+  password: string;
+}
+
+app.post('/api/auth/ldap/login', async (req: Request<object, object, LdapUserLoginBody>, res: Response) => {
+  if (!ldapActive()) {
+    res.status(404).json({ error: 'Directory sign-in is not enabled' });
+    return;
+  }
+  const { username, password } = req.body ?? {};
+  if (!username || typeof username !== 'string' || !password || typeof password !== 'string') {
+    res.status(400).json({ error: 'Username and password are required' });
+    return;
+  }
+  let user: ldap.LdapUser;
+  try {
+    user = await ldap.authenticate(ldapSettings, username, password);
+  } catch (e) {
+    sendLdapError(res, e);
+    return;
+  }
+  const token = generateSessionToken();
+  const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000);
+  store.saveUserSession({
+    token, dn: user.dn, username: user.username, displayName: user.displayName,
+    createdAt: new Date(), expiresAt,
+  });
+  store.purgeExpiredUserSessions();
+  res.json({
+    success: true,
+    token,
+    expiresAt: expiresAt.toISOString(),
+    username: user.username,
+    displayName: user.displayName,
+  });
+});
+
+app.get('/api/auth/me', (req: Request, res: Response) => {
+  const who = participantSessionFromRequest(req);
+  if (!who) {
+    res.status(401).json({ error: 'Not signed in' });
+    return;
+  }
+  res.json({ ...who, ldapRequired: ldapRequiredForFrontend() });
+});
+
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  const token = bearerToken(req);
+  if (token) store.deleteUserSession(token);
+  res.json({ success: true });
 });
 
 // OpenAPI Documentation
@@ -520,6 +741,8 @@ Configure webhooks to receive real-time notifications for events like:
   tags: [
     { name: 'Public', description: 'Public endpoints for meeting participants' },
     { name: 'Admin', description: 'Admin authentication and management' },
+    { name: 'Sign-in', description: 'Sign-in methods, email one-time codes and SMTP configuration' },
+    { name: 'Directory', description: 'LDAP / LDAPS integration: settings, LDAP admins, local account switch, participant sign-in' },
     { name: 'Rooms', description: 'Room management' },
     { name: 'API Keys', description: 'API key management' },
     { name: 'Webhooks', description: 'Webhook configuration' },
@@ -723,7 +946,358 @@ Configure webhooks to receive real-time notifications for events like:
             },
           },
           '401': { description: 'Invalid credentials' },
+          '403': { description: 'Password login is disabled (email sign-in verified). Use a passkey or /api/admin/otp/request.' },
         },
+      },
+    },
+    '/api/admin/auth/methods': {
+      get: {
+        tags: ['Sign-in'],
+        summary: 'Available sign-in methods',
+        description: 'Which credentials the admin account currently accepts. Password login is switched off automatically once email sign-in (SMTP) has been verified.',
+        responses: {
+          '200': {
+            description: 'Sign-in methods',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    password: { type: 'boolean' },
+                    passkey: { type: 'boolean', description: 'Passkeys configured and at least one registered' },
+                    otp: { type: 'boolean', description: 'Email one-time codes available' },
+                    firstLogin: { type: 'boolean' },
+                    otpEmail: { type: 'string', description: 'Masked recipient address, only when otp is true' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/otp/request': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Email a one-time sign-in code',
+        description: 'Sends a 6-digit code to the configured admin address. Rate-limited to one code per 30 seconds; a new code invalidates the previous one.',
+        responses: {
+          '200': {
+            description: 'Code sent',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    ticket: { type: 'string', description: 'Pass back to /api/admin/otp/verify' },
+                    expiresAt: { type: 'string', format: 'date-time' },
+                    email: { type: 'string', description: 'Masked recipient address' },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'Email sign-in not set up' },
+          '429': { description: 'Requested too soon' },
+          '502': { description: 'SMTP send failed' },
+        },
+      },
+    },
+    '/api/admin/otp/verify': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Exchange a one-time code for a session',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'code'],
+                properties: {
+                  ticket: { type: 'string' },
+                  code: { type: 'string', description: '6 digits' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Session issued (same shape as /api/admin/login)' },
+          '400': { description: 'Ticket expired or invalid' },
+          '401': { description: 'Incorrect code' },
+          '429': { description: 'Too many attempts' },
+        },
+      },
+    },
+    '/api/admin/smtp': {
+      get: {
+        tags: ['Sign-in'],
+        summary: 'Get SMTP settings',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'SMTP settings (password never returned; hasPassword indicates one is stored)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    configured: { type: 'boolean' },
+                    verified: { type: 'boolean' },
+                    passwordLoginEnabled: { type: 'boolean' },
+                    settings: {
+                      type: 'object',
+                      nullable: true,
+                      properties: {
+                        host: { type: 'string' },
+                        port: { type: 'integer' },
+                        secure: { type: 'boolean', description: 'Implicit TLS (465) vs STARTTLS/plain' },
+                        username: { type: 'string' },
+                        hasPassword: { type: 'boolean' },
+                        fromAddress: { type: 'string' },
+                        adminEmail: { type: 'string' },
+                        verified: { type: 'boolean' },
+                        verifiedAt: { type: 'string', format: 'date-time', nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        tags: ['Sign-in'],
+        summary: 'Update SMTP settings',
+        description: 'Partial update. Changing any delivery field resets `verified`, which re-enables password login until a new test code is confirmed. Omit or send an empty password to keep the stored one.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  host: { type: 'string' },
+                  port: { type: 'integer' },
+                  secure: { type: 'boolean' },
+                  username: { type: 'string' },
+                  password: { type: 'string' },
+                  fromAddress: { type: 'string', format: 'email' },
+                  adminEmail: { type: 'string', format: 'email', description: 'Where sign-in codes are delivered' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Saved' },
+          '400': { description: 'Validation error' },
+        },
+      },
+      delete: {
+        tags: ['Sign-in'],
+        summary: 'Remove SMTP settings',
+        description: 'Forgets the SMTP configuration and re-enables password login.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Removed' },
+        },
+      },
+    },
+    '/api/admin/smtp/test': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Send a test code with the saved SMTP settings',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Test code sent; confirm it via /api/admin/smtp/test/verify' },
+          '400': { description: 'Settings incomplete' },
+          '429': { description: 'Requested too soon' },
+          '502': { description: 'SMTP send failed (message includes the transport error)' },
+        },
+      },
+    },
+    '/api/admin/smtp/test/verify': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Confirm the test code',
+        description: 'Marks the SMTP configuration verified. From this point password login is disabled; only passkeys and emailed codes sign in.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'code'],
+                properties: {
+                  ticket: { type: 'string' },
+                  code: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Verified' },
+          '400': { description: 'Ticket expired or invalid' },
+          '401': { description: 'Incorrect code' },
+        },
+      },
+    },
+    '/api/auth/ldap/login': {
+      post: {
+        tags: ['Directory'],
+        summary: 'Participant directory sign-in',
+        description: 'When the meeting frontend is gated behind LDAP (requireForFrontend), exchanges directory credentials for a 12-hour participant session. Send it as `Authorization: Bearer` on /api/token and /api/room-code.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['username', 'password'],
+                properties: { username: { type: 'string' }, password: { type: 'string' } },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Session issued: { token, expiresAt, username, displayName }' },
+          '401': { description: 'Invalid credentials' },
+          '404': { description: 'LDAP not enabled' },
+          '502': { description: 'Directory unreachable / bind failed' },
+        },
+      },
+    },
+    '/api/auth/me': {
+      get: {
+        tags: ['Directory'],
+        summary: 'Current participant session',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ username, displayName, ldapRequired }' }, '401': { description: 'Not signed in' } },
+      },
+    },
+    '/api/auth/logout': {
+      post: {
+        tags: ['Directory'],
+        summary: 'End participant session',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'OK' } },
+      },
+    },
+    '/api/admin/ldap': {
+      get: {
+        tags: ['Directory'],
+        summary: 'Get LDAP settings',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Settings (bind password never returned; hasBindPassword indicates one is stored), active flags, ldapAdminCount, localAccountEnabled' } },
+      },
+      put: {
+        tags: ['Directory'],
+        summary: 'Update LDAP settings',
+        description: 'Partial update. `enabled` requires url + baseDn + userFilter. Refused (409 WOULD_LOCK_OUT) if it would turn off LDAP admin sign-in while the local account is disabled.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  enabled: { type: 'boolean' },
+                  url: { type: 'string', example: 'ldaps://ldap.example.com:636' },
+                  startTls: { type: 'boolean', description: 'Upgrade ldap:// with StartTLS' },
+                  tlsRejectUnauthorized: { type: 'boolean' },
+                  caCert: { type: 'string', description: 'PEM bundle for a private CA' },
+                  bindDn: { type: 'string' },
+                  bindPassword: { type: 'string' },
+                  baseDn: { type: 'string' },
+                  userFilter: { type: 'string', description: 'RFC 4515 filter with {{username}}' },
+                  searchFilter: { type: 'string', description: 'Admin-picker filter with {{q}}' },
+                  usernameAttribute: { type: 'string' },
+                  displayNameAttribute: { type: 'string' },
+                  emailAttribute: { type: 'string' },
+                  timeoutMs: { type: 'integer' },
+                  requireForFrontend: { type: 'boolean', description: 'Participants must sign in against the directory to join meetings' },
+                  adminsEnabled: { type: 'boolean', description: 'Directory users in ldap_admins may sign in to the admin panel' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': { description: 'Saved' }, '400': { description: 'Validation error' }, '409': { description: 'Would lock out' } },
+      },
+      delete: {
+        tags: ['Directory'],
+        summary: 'Remove LDAP settings and all LDAP admins',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Removed' }, '409': { description: 'Local account disabled — would lock out' } },
+      },
+    },
+    '/api/admin/ldap/test': {
+      post: {
+        tags: ['Directory'],
+        summary: 'Test the saved LDAP settings',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ ok, message, matchedUsers }' }, '502': { description: 'Connection, bind or search failed (message says which)' } },
+      },
+    },
+    '/api/admin/ldap/search': {
+      get: {
+        tags: ['Directory'],
+        summary: 'Search directory users',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'q', in: 'query', schema: { type: 'string' }, description: 'Substring matched against uid / sAMAccountName / cn / displayName / mail' }],
+        responses: { '200': { description: '{ users: [{ dn, username, displayName, email, isAdmin }] } (max 25)' } },
+      },
+    },
+    '/api/admin/ldap/admins': {
+      get: {
+        tags: ['Directory'],
+        summary: 'List LDAP admins',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ admins: [...] }' } },
+      },
+      post: {
+        tags: ['Directory'],
+        summary: 'Grant admin access to a directory user',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { type: 'object', required: ['dn'], properties: { dn: { type: 'string' } } } } },
+        },
+        responses: { '201': { description: 'Granted' }, '404': { description: 'DN not found in directory' }, '409': { description: 'Already an admin' } },
+      },
+    },
+    '/api/admin/ldap/admins/{id}': {
+      delete: {
+        tags: ['Directory'],
+        summary: 'Revoke an LDAP admin',
+        security: [{ bearerAuth: [] }],
+        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: { '200': { description: 'Revoked' }, '409': { description: 'Last LDAP admin while local account is disabled' } },
+      },
+    },
+    '/api/admin/local-account/disable': {
+      post: {
+        tags: ['Directory'],
+        summary: 'Disable the local admin account',
+        description: 'Only a signed-in LDAP admin may call this. Password, passkeys and emailed codes stop working; all local sessions end. Recovery from the server: `reset-admin.js --enable-local`.',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Disabled' }, '403': { description: 'Caller is not an LDAP admin' } },
+      },
+    },
+    '/api/admin/local-account/enable': {
+      post: {
+        tags: ['Directory'],
+        summary: 'Re-enable the local admin account',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Enabled' }, '403': { description: 'Caller is not an LDAP admin' } },
       },
     },
     '/api/admin/logout': {
@@ -942,7 +1516,7 @@ Configure webhooks to receive real-time notifications for events like:
                         createdAt: { type: 'string', format: 'date-time' },
                       },
                     },
-                    joinUrl: { type: 'string', format: 'uri', description: 'URL to join the room' },
+                    joinUrl: { type: 'string', format: 'uri', description: 'URL to join the room. Built from PUBLIC_BASE_URL and includes embed=1 so the web app skips its create/join configuration screen; append &name=... to also skip the name prompt, or use embed=0 to show the full screen.' },
                   },
                 },
               },
@@ -1470,6 +2044,16 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       return;
     }
 
+    // Directory-gated frontend: browser callers need a participant (or
+    // admin) session. API-key callers are exempt.
+    if (!isApiAccess && ldapRequiredForFrontend() && !participantSessionFromRequest(req)) {
+      res.status(401).json({
+        error: 'Sign in with your directory account to join meetings',
+        code: 'LDAP_LOGIN_REQUIRED',
+      });
+      return;
+    }
+
     if (!roomName || typeof roomName !== 'string') {
       res.status(400).json({ error: 'roomName is required' });
       return;
@@ -1589,7 +2173,11 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
 });
 
 // Generate random room code
-app.get('/api/room-code', (_req: Request, res: Response) => {
+app.get('/api/room-code', (req: Request, res: Response) => {
+  if (ldapRequiredForFrontend() && !req.headers['x-api-key'] && !participantSessionFromRequest(req)) {
+    res.status(401).json({ error: 'Sign in with your directory account first', code: 'LDAP_LOGIN_REQUIRED' });
+    return;
+  }
   const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 6; i++) {
@@ -1645,7 +2233,7 @@ interface AdminLoginRequest {
   password: string;
 }
 
-app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, res: Response) => {
+app.post('/api/admin/login', async (req: Request<object, object, AdminLoginRequest>, res: Response) => {
   const { username, password } = req.body;
 
   if (!username || typeof username !== 'string') {
@@ -1655,6 +2243,76 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
 
   if (!password || typeof password !== 'string') {
     res.status(400).json({ error: 'Password is required' });
+    return;
+  }
+
+  // Route the attempt: the local account claims first-login and its own
+  // username; anything else goes to the directory when LDAP admins are
+  // enabled. The two never fall through into each other, so a wrong local
+  // password can't be retried against the directory (or vice versa).
+  const isLocalAttempt = localAccountEnabled() && (isFirstLogin || username === adminUsername);
+  if (!isLocalAttempt) {
+    if (!localAccountEnabled() && username === adminUsername) {
+      res.status(403).json({
+        error: 'The local admin account is disabled. Sign in with a directory (LDAP) admin account.',
+        code: 'LOCAL_ACCOUNT_DISABLED',
+      });
+      return;
+    }
+    if (!ldapAdminsActive()) {
+      if (!localAccountEnabled()) {
+        res.status(403).json({
+          error: 'The local admin account is disabled. Sign in with a directory (LDAP) admin account.',
+          code: 'LOCAL_ACCOUNT_DISABLED',
+        });
+        return;
+      }
+      res.status(401).json({ error: 'Invalid username or password' });
+      return;
+    }
+    let user: ldap.LdapUser;
+    try {
+      user = await ldap.authenticate(ldapSettings, username, password);
+    } catch (e) {
+      sendLdapError(res, e);
+      return;
+    }
+    const admin = store.findLdapAdminByDn(user.dn);
+    if (!admin) {
+      res.status(403).json({ error: 'This directory account is not a MEET admin', code: 'NOT_AN_ADMIN' });
+      return;
+    }
+    admin.lastLoginAt = new Date();
+    if (user.username) admin.username = user.username;
+    if (user.displayName) admin.displayName = user.displayName;
+    if (user.email) admin.email = user.email;
+    store.saveLdapAdmin(admin);
+
+    const principal = `ldap:${user.dn}`;
+    const token = generateSessionToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    store.saveAdminSession({ token, createdAt: new Date(), expiresAt, principal, displayName: user.displayName || user.username });
+    store.purgeExpiredAdminSessions();
+    console.log(`[ldap] admin sign-in: ${user.dn}`);
+    res.json({
+      success: true,
+      token,
+      expiresAt: expiresAt.toISOString(),
+      isFirstLogin: false,
+      username: user.username,
+      displayName: user.displayName,
+      principal,
+    });
+    return;
+  }
+
+  // Once email sign-in is verified the password is no longer an accepted
+  // credential anywhere (here, Bearer-password on admin routes, WS auth).
+  if (!passwordLoginEnabled()) {
+    res.status(403).json({
+      error: 'Password login is disabled. Sign in with a passkey or an emailed one-time code.',
+      code: 'PASSWORD_LOGIN_DISABLED',
+    });
     return;
   }
 
@@ -1683,7 +2341,7 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
   // Create session token (persisted across restarts in admin_sessions).
   const token = generateSessionToken();
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
-  store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+  store.saveAdminSession({ token, createdAt: new Date(), expiresAt, principal: 'local', displayName: adminUsername });
   store.purgeExpiredAdminSessions();
 
   res.json({
@@ -1692,6 +2350,7 @@ app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, r
     expiresAt: expiresAt.toISOString(),
     isFirstLogin: wasFirstLogin,
     username: adminUsername,
+    principal: 'local',
   });
 });
 
@@ -1703,6 +2362,497 @@ app.post('/api/admin/logout', authenticateAdmin, (req: AuthRequest, res: Respons
     store.deleteAdminSession(token);
   }
   res.json({ success: true });
+});
+
+// ───────────────────── sign-in methods / email OTP ─────────────────────
+//
+// Which ways the admin can currently sign in. Public so the login form
+// can render the right controls without a credential.
+app.get('/api/admin/auth/methods', (_req: Request, res: Response) => {
+  const otpAvailable = otpLoginAvailable();
+  res.json({
+    password: passwordLoginEnabled(),
+    passkey: localAccountEnabled() && webauthn.isWebAuthnConfigured() && store.listPasskeys().length > 0,
+    otp: otpAvailable,
+    ldap: ldapAdminsActive(),
+    localAccountEnabled: localAccountEnabled(),
+    firstLogin: isFirstLogin,
+    ...(otpAvailable && smtpSettings ? { otpEmail: mailer.maskEmail(smtpSettings.adminEmail) } : {}),
+  });
+});
+
+// Step 1 of email sign-in: mail a 6-digit code to the admin address.
+// Unauthenticated by design (this IS the auth); rate-limited in otp.ts.
+app.post('/api/admin/otp/request', async (_req: Request, res: Response) => {
+  if (!localAccountEnabled()) {
+    res.status(403).json({ error: 'The local admin account is disabled', code: 'LOCAL_ACCOUNT_DISABLED' });
+    return;
+  }
+  if (!otpLoginAvailable() || !smtpSettings) {
+    res.status(404).json({ error: 'Email sign-in is not set up on this server' });
+    return;
+  }
+  let issued: otp.IssuedOtp;
+  try {
+    issued = otp.issue('login');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  try {
+    await mailer.sendOtpEmail(smtpSettings, issued.code, 'login', otp.OTP_TTL_MINUTES);
+  } catch (e) {
+    otp.discard(issued.ticket, 'login');
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[otp] failed to send sign-in code:', msg);
+    res.status(502).json({ error: 'Could not send the sign-in email. Check the SMTP settings or use a passkey.' });
+    return;
+  }
+  console.log(`[otp] sign-in code sent to ${mailer.maskEmail(smtpSettings.adminEmail)}`);
+  res.json({
+    success: true,
+    ticket: issued.ticket,
+    expiresAt: issued.expiresAt.toISOString(),
+    email: mailer.maskEmail(smtpSettings.adminEmail),
+  });
+});
+
+interface OtpVerifyBody {
+  ticket: string;
+  code: string;
+}
+
+// Step 2: exchange ticket + code for a session token.
+app.post('/api/admin/otp/verify', (req: Request<object, object, OtpVerifyBody>, res: Response) => {
+  if (!localAccountEnabled()) {
+    res.status(403).json({ error: 'The local admin account is disabled', code: 'LOCAL_ACCOUNT_DISABLED' });
+    return;
+  }
+  const { ticket, code } = req.body;
+  if (!ticket || typeof ticket !== 'string' || code === undefined || code === null) {
+    res.status(400).json({ error: 'ticket and code are required' });
+    return;
+  }
+  try {
+    otp.consume(ticket, String(code), 'login');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+
+  const token = generateSessionToken();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  store.saveAdminSession({ token, createdAt: new Date(), expiresAt, principal: 'local', displayName: adminUsername });
+  store.purgeExpiredAdminSessions();
+
+  res.json({
+    success: true,
+    token,
+    expiresAt: expiresAt.toISOString(),
+    isFirstLogin: false,
+    username: adminUsername,
+    principal: 'local',
+  });
+});
+
+// ───────────────────────── directory (LDAP) ────────────────────────────
+
+app.get('/api/admin/ldap', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json(ldapView());
+});
+
+interface UpdateLdapRequest {
+  enabled?: boolean;
+  url?: string;
+  startTls?: boolean;
+  tlsRejectUnauthorized?: boolean;
+  caCert?: string;
+  bindDn?: string;
+  // Omit or '' keeps the stored password.
+  bindPassword?: string;
+  baseDn?: string;
+  userFilter?: string;
+  searchFilter?: string;
+  usernameAttribute?: string;
+  displayNameAttribute?: string;
+  emailAttribute?: string;
+  timeoutMs?: number | string;
+  requireForFrontend?: boolean;
+  adminsEnabled?: boolean;
+}
+
+app.put('/api/admin/ldap', authenticateAdmin, (req: Request<object, object, UpdateLdapRequest>, res: Response) => {
+  const body = req.body ?? {};
+  const next: LdapSettings = { ...ldapSettings };
+
+  const str = (k: keyof UpdateLdapRequest, target: keyof LdapSettings, opts: { allowEmpty?: boolean; max?: number } = {}) => {
+    const v = body[k];
+    if (v === undefined) return true;
+    if (typeof v !== 'string' || (!opts.allowEmpty && !v.trim()) || v.length > (opts.max ?? 2000)) {
+      res.status(400).json({ error: `${k} must be a non-empty string` });
+      return false;
+    }
+    (next as unknown as Record<string, unknown>)[target] = v.trim();
+    return true;
+  };
+
+  if (body.url !== undefined) {
+    if (typeof body.url !== 'string' || !ldap.isValidLdapUrl(body.url.trim())) {
+      res.status(400).json({ error: 'url must look like ldap://host:389 or ldaps://host:636' });
+      return;
+    }
+    next.url = body.url.trim();
+  }
+  if (!str('bindDn', 'bindDn', { allowEmpty: true })) return;
+  if (typeof body.bindPassword === 'string' && body.bindPassword.length > 0) next.bindPassword = body.bindPassword;
+  if (!str('baseDn', 'baseDn', { allowEmpty: true })) return;
+  if (!str('caCert', 'caCert', { allowEmpty: true, max: 20000 })) return;
+  if (body.userFilter !== undefined) {
+    if (typeof body.userFilter !== 'string' || !body.userFilter.includes('{{username}}')) {
+      res.status(400).json({ error: 'userFilter must contain the {{username}} placeholder' });
+      return;
+    }
+    next.userFilter = body.userFilter.trim();
+  }
+  if (body.searchFilter !== undefined) {
+    if (typeof body.searchFilter !== 'string' || !body.searchFilter.includes('{{q}}')) {
+      res.status(400).json({ error: 'searchFilter must contain the {{q}} placeholder' });
+      return;
+    }
+    next.searchFilter = body.searchFilter.trim();
+  }
+  for (const k of ['usernameAttribute', 'displayNameAttribute', 'emailAttribute'] as const) {
+    const v = body[k];
+    if (v === undefined) continue;
+    if (typeof v !== 'string' || !/^[A-Za-z][A-Za-z0-9-]*$/.test(v.trim())) {
+      res.status(400).json({ error: `${k} must be an attribute name` });
+      return;
+    }
+    next[k] = v.trim();
+  }
+  if (body.timeoutMs !== undefined) {
+    const t = Number(body.timeoutMs);
+    if (!Number.isInteger(t) || t < 1000 || t > 60000) {
+      res.status(400).json({ error: 'timeoutMs must be between 1000 and 60000' });
+      return;
+    }
+    next.timeoutMs = t;
+  }
+  for (const k of ['startTls', 'tlsRejectUnauthorized', 'requireForFrontend', 'adminsEnabled', 'enabled'] as const) {
+    if (body[k] !== undefined) next[k] = body[k] === true;
+  }
+  if (next.startTls && next.url.toLowerCase().startsWith('ldaps://')) next.startTls = false;
+
+  if (next.enabled && !ldap.isLdapConfigured(next)) {
+    res.status(400).json({ error: 'Set url, baseDn and userFilter before enabling LDAP' });
+    return;
+  }
+  // Never let a change strand a deployment whose local account is off:
+  // the directory admins are then the only way in.
+  if (localAccountDisabled && !(next.enabled && next.adminsEnabled)) {
+    res.status(409).json({
+      error: 'The local account is disabled, so LDAP admin sign-in must stay enabled. Re-enable the local account first.',
+      code: 'WOULD_LOCK_OUT',
+    });
+    return;
+  }
+
+  ldapSettings = next;
+  store.saveLdapSettings(next);
+  if (!ldapRequiredForFrontend()) store.deleteAllUserSessions();
+  console.log(`[ldap] settings saved (enabled=${next.enabled} url=${next.url} admins=${next.adminsEnabled} frontend=${next.requireForFrontend})`);
+  res.json({ success: true, ...ldapView() });
+});
+
+app.delete('/api/admin/ldap', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  if (localAccountDisabled) {
+    res.status(409).json({
+      error: 'The local account is disabled; removing LDAP would lock everyone out. Re-enable the local account first.',
+      code: 'WOULD_LOCK_OUT',
+    });
+    return;
+  }
+  ldapSettings = { ...ldap.LDAP_DEFAULTS };
+  store.deleteLdapSettings();
+  const removed = store.deleteAllLdapAdmins();
+  store.deleteAllUserSessions();
+  store.deleteAdminSessionsByPrincipalPrefix('ldap:');
+  console.log(`[ldap] settings removed (${removed} LDAP admin(s) dropped)`);
+  res.json({ success: true, ...ldapView() });
+});
+
+// Connect + bind + one search with the SAVED settings.
+app.post('/api/admin/ldap/test', authenticateAdmin, async (_req: AuthRequest, res: Response) => {
+  if (!ldap.isLdapConfigured(ldapSettings)) {
+    res.status(400).json({ error: 'Save url, baseDn and userFilter first' });
+    return;
+  }
+  try {
+    res.json(await ldap.testConnection(ldapSettings));
+  } catch (e) {
+    sendLdapError(res, e);
+  }
+});
+
+// Directory user picker for granting admin access.
+app.get('/api/admin/ldap/search', authenticateAdmin, async (req: Request<object, object, object, { q?: string }>, res: Response) => {
+  if (!ldapActive()) {
+    res.status(400).json({ error: 'LDAP is not enabled' });
+    return;
+  }
+  const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 100) : '';
+  try {
+    const users = await ldap.searchUsers(ldapSettings, q, 25);
+    res.json({
+      users: users.map((u) => ({ ...u, isAdmin: !!store.findLdapAdminByDn(u.dn) })),
+    });
+  } catch (e) {
+    sendLdapError(res, e);
+  }
+});
+
+app.get('/api/admin/ldap/admins', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json({ admins: store.listLdapAdmins().map(ldapAdminToJson) });
+});
+
+interface AddLdapAdminRequest {
+  dn: string;
+}
+
+app.post('/api/admin/ldap/admins', authenticateAdmin, async (req: AuthRequest, res: Response) => {
+  if (!ldapActive()) {
+    res.status(400).json({ error: 'LDAP is not enabled' });
+    return;
+  }
+  const { dn } = (req.body ?? {}) as AddLdapAdminRequest;
+  if (!dn || typeof dn !== 'string' || dn.length > 1000) {
+    res.status(400).json({ error: 'dn is required' });
+    return;
+  }
+  if (store.findLdapAdminByDn(dn)) {
+    res.status(409).json({ error: 'That directory user is already an admin' });
+    return;
+  }
+  let user: ldap.LdapUser | null;
+  try {
+    user = await ldap.lookupDn(ldapSettings, dn);
+  } catch (e) {
+    sendLdapError(res, e);
+    return;
+  }
+  if (!user) {
+    res.status(404).json({ error: 'No directory entry with that DN' });
+    return;
+  }
+  const admin = {
+    id: generateId(),
+    dn: user.dn,
+    username: user.username,
+    displayName: user.displayName,
+    email: user.email,
+    addedBy: req.principal ?? 'local',
+    createdAt: new Date(),
+    lastLoginAt: null,
+  };
+  store.saveLdapAdmin(admin);
+  console.log(`[ldap] admin granted: ${user.dn} (by ${admin.addedBy})`);
+  res.status(201).json({ success: true, admin: ldapAdminToJson(admin) });
+});
+
+app.delete('/api/admin/ldap/admins/:id', authenticateAdmin, (req: Request<{ id: string }>, res: Response) => {
+  const admin = store.getLdapAdmin(req.params.id);
+  if (!admin) {
+    res.status(404).json({ error: 'LDAP admin not found' });
+    return;
+  }
+  if (localAccountDisabled && store.countLdapAdmins() <= 1) {
+    res.status(409).json({
+      error: 'This is the last LDAP admin and the local account is disabled. Re-enable the local account first.',
+      code: 'WOULD_LOCK_OUT',
+    });
+    return;
+  }
+  store.deleteLdapAdmin(admin.id);
+  store.deleteAdminSessionsByPrincipal(`ldap:${admin.dn}`);
+  console.log(`[ldap] admin revoked: ${admin.dn}`);
+  res.json({ success: true });
+});
+
+// ───────────────────── local (built-in) account switch ─────────────────
+//
+// Only a signed-in directory admin may disable the local account — which
+// guarantees at least one working admin remains. Every local session is
+// dropped immediately.
+app.post('/api/admin/local-account/disable', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  if (!req.principal?.startsWith('ldap:')) {
+    res.status(403).json({ error: 'Only a directory (LDAP) admin can disable the local account' });
+    return;
+  }
+  if (!ldapAdminsActive() || store.countLdapAdmins() === 0) {
+    res.status(409).json({ error: 'Enable LDAP admin sign-in and add at least one LDAP admin first' });
+    return;
+  }
+  localAccountDisabled = true;
+  store.setLocalAccountDisabled(true);
+  const kicked = store.deleteAdminSessionsByPrincipal('local');
+  console.log(`[auth] local admin account disabled by ${req.principal} (${kicked} local session(s) ended)`);
+  res.json({ success: true, localAccountEnabled: false });
+});
+
+app.post('/api/admin/local-account/enable', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  if (!req.principal?.startsWith('ldap:')) {
+    res.status(403).json({ error: 'Only a directory (LDAP) admin can re-enable the local account' });
+    return;
+  }
+  localAccountDisabled = false;
+  store.setLocalAccountDisabled(false);
+  console.log(`[auth] local admin account re-enabled by ${req.principal}`);
+  res.json({ success: true, localAccountEnabled: true });
+});
+
+// ───────────────────────── SMTP configuration ──────────────────────────
+
+app.get('/api/admin/smtp', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json(smtpView());
+});
+
+interface UpdateSmtpRequest {
+  host?: string;
+  port?: number | string;
+  secure?: boolean;
+  username?: string;
+  // Omit or send '' to keep the stored password.
+  password?: string;
+  fromAddress?: string;
+  adminEmail?: string;
+}
+
+app.put('/api/admin/smtp', authenticateAdmin, (req: Request<object, object, UpdateSmtpRequest>, res: Response) => {
+  const body = req.body ?? {};
+  const current: SmtpSettings = smtpSettings ?? {
+    host: '', port: 587, secure: false, username: '', password: '',
+    fromAddress: '', adminEmail: '', verified: false, verifiedAt: null,
+  };
+  const next: SmtpSettings = { ...current };
+
+  if (body.host !== undefined) {
+    if (typeof body.host !== 'string' || !body.host.trim() || /[\s/]/.test(body.host.trim())) {
+      res.status(400).json({ error: 'host must be a hostname or IP address' });
+      return;
+    }
+    next.host = body.host.trim();
+  }
+  if (body.port !== undefined) {
+    const port = Number(body.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      res.status(400).json({ error: 'port must be an integer between 1 and 65535' });
+      return;
+    }
+    next.port = port;
+  }
+  if (body.secure !== undefined) {
+    next.secure = body.secure === true;
+  }
+  if (body.username !== undefined) {
+    if (typeof body.username !== 'string') {
+      res.status(400).json({ error: 'username must be a string' });
+      return;
+    }
+    next.username = body.username.trim();
+  }
+  if (typeof body.password === 'string' && body.password.length > 0) {
+    next.password = body.password;
+  }
+  if (body.fromAddress !== undefined) {
+    if (typeof body.fromAddress !== 'string' || !mailer.isValidEmail(body.fromAddress.trim())) {
+      res.status(400).json({ error: 'fromAddress must be a valid email address' });
+      return;
+    }
+    next.fromAddress = body.fromAddress.trim();
+  }
+  if (body.adminEmail !== undefined) {
+    if (typeof body.adminEmail !== 'string' || !mailer.isValidEmail(body.adminEmail.trim())) {
+      res.status(400).json({ error: 'adminEmail must be a valid email address' });
+      return;
+    }
+    next.adminEmail = body.adminEmail.trim();
+  }
+
+  // Any change to how (or where) mail is delivered invalidates the earlier
+  // proof that it works; password login comes back until re-verified.
+  const transportChanged = (['host', 'port', 'secure', 'username', 'password', 'fromAddress', 'adminEmail'] as const)
+    .some((k) => next[k] !== current[k]);
+  if (transportChanged) {
+    next.verified = false;
+    next.verifiedAt = null;
+  }
+
+  smtpSettings = next;
+  store.saveSmtpSettings(next);
+  console.log(`[smtp] settings saved (host=${next.host}:${next.port} verified=${next.verified})`);
+  res.json({ success: true, ...smtpView() });
+});
+
+// Forget the SMTP config entirely. Password login is re-enabled.
+app.delete('/api/admin/smtp', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  smtpSettings = null;
+  store.deleteSmtpSettings();
+  otp.clearAll();
+  console.log('[smtp] settings removed — password login re-enabled');
+  res.json({ success: true, ...smtpView() });
+});
+
+// Send a test code with the saved settings. Confirming it (below) marks
+// the config verified and turns password login off.
+app.post('/api/admin/smtp/test', authenticateAdmin, async (_req: AuthRequest, res: Response) => {
+  if (!mailer.isSmtpComplete(smtpSettings)) {
+    res.status(400).json({ error: 'Save the SMTP host, port, from address and admin email first' });
+    return;
+  }
+  let issued: otp.IssuedOtp;
+  try {
+    issued = otp.issue('verify');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  try {
+    await mailer.sendOtpEmail(smtpSettings, issued.code, 'verify', otp.OTP_TTL_MINUTES);
+  } catch (e) {
+    otp.discard(issued.ticket, 'verify');
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[smtp] test send failed:', msg);
+    res.status(502).json({ error: `Could not send test email: ${msg}` });
+    return;
+  }
+  res.json({
+    success: true,
+    ticket: issued.ticket,
+    expiresAt: issued.expiresAt.toISOString(),
+    email: mailer.maskEmail(smtpSettings.adminEmail),
+  });
+});
+
+app.post('/api/admin/smtp/test/verify', authenticateAdmin, (req: Request<object, object, OtpVerifyBody>, res: Response) => {
+  const { ticket, code } = req.body;
+  if (!ticket || typeof ticket !== 'string' || code === undefined || code === null) {
+    res.status(400).json({ error: 'ticket and code are required' });
+    return;
+  }
+  if (!mailer.isSmtpComplete(smtpSettings)) {
+    res.status(400).json({ error: 'SMTP settings are incomplete' });
+    return;
+  }
+  try {
+    otp.consume(ticket, String(code), 'verify');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  smtpSettings = { ...smtpSettings, verified: true, verifiedAt: new Date().toISOString() };
+  store.saveSmtpSettings(smtpSettings);
+  console.log('[smtp] verified — password login disabled; passkey + email code only');
+  res.json({ success: true, ...smtpView() });
 });
 
 // ─────────────────────── WebAuthn / passkey ────────────────────────────
@@ -1755,6 +2905,10 @@ app.post('/api/admin/webauthn/register/verify', authenticateAdmin, async (req: R
 // Step 1 of signing in with a passkey. NOT authenticated — this IS the
 // auth.
 app.post('/api/admin/webauthn/auth/options', async (_req: Request, res: Response) => {
+  if (!localAccountEnabled()) {
+    res.status(403).json({ error: 'The local admin account is disabled', code: 'LOCAL_ACCOUNT_DISABLED' });
+    return;
+  }
   try {
     const result = await webauthn.buildAuthOptions();
     res.json(result);
@@ -1770,6 +2924,10 @@ interface PasskeyAuthVerifyBody {
 }
 
 app.post('/api/admin/webauthn/auth/verify', async (req: Request<object, object, PasskeyAuthVerifyBody>, res: Response) => {
+  if (!localAccountEnabled()) {
+    res.status(403).json({ error: 'The local admin account is disabled', code: 'LOCAL_ACCOUNT_DISABLED' });
+    return;
+  }
   try {
     const { ticket, response } = req.body;
     if (!ticket || !response) {
@@ -1781,7 +2939,7 @@ app.post('/api/admin/webauthn/auth/verify', async (req: Request<object, object, 
     // Issue a session token (same shape as password login).
     const token = generateSessionToken();
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+    store.saveAdminSession({ token, createdAt: new Date(), expiresAt, principal: 'local', displayName: adminUsername });
     store.purgeExpiredAdminSessions();
 
     res.json({
@@ -1790,6 +2948,7 @@ app.post('/api/admin/webauthn/auth/verify', async (req: Request<object, object, 
       expiresAt: expiresAt.toISOString(),
       isFirstLogin: false,
       username: adminUsername,
+      principal: 'local',
     });
   } catch (e) {
     const status = (e as { statusCode?: number })?.statusCode ?? 401;
@@ -2014,8 +3173,12 @@ app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, ob
     // Trigger webhook
     triggerWebhooks('room.created', { roomName: sanitizedRoomName, displayName });
 
-    // Generate join URL
-    const joinUrl = `${req.protocol}://${req.get('host')}/?room=${sanitizedRoomName}`;
+    // Generate join URL. Prefer the configured public URL: behind a reverse
+    // proxy req.get('host') may be the API's own (sub)domain, not the SPA's.
+    // embed=1 tells the SPA to skip the create/join configuration screen and
+    // go straight into the room, prompting only for a name if none is given.
+    const publicBase = (PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    const joinUrl = `${publicBase}/?room=${sanitizedRoomName}&embed=1`;
 
     res.status(201).json({
       success: true,
@@ -2565,7 +3728,7 @@ wss.on('connection', (ws: WebSocket) => {
           // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-        } else if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+        } else if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
           client.isAuthenticated = true;
           client.token = token;
           authenticatedClients.add(client);

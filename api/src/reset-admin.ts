@@ -11,11 +11,16 @@
 //                                 works in non-tty pipes)
 //   --clear-passkeys              remove every registered passkey
 //   --clear-sessions              invalidate every active admin session
+//   --clear-smtp                  forget the SMTP / email sign-in config;
+//                                 this re-enables password login
+//   --enable-local                re-enable the local account after a
+//                                 directory (LDAP) admin disabled it
+//   --clear-ldap                  forget the LDAP settings + LDAP admins
 //   --bootstrap                   reset first_login_done to 0 so the next
 //                                 caller of /api/admin/login claims the
 //                                 account (only safe over loopback / a
 //                                 trusted reverse proxy)
-//   --reset-all                   shorthand for the four above except
+//   --reset-all                   shorthand for all of the above except
 //                                 --set-password is interactive (or you
 //                                 piped one in)
 //
@@ -32,6 +37,9 @@ interface Args {
   setPassword?: string | true;   // string = supplied; true = read stdin
   clearPasskeys?: boolean;
   clearSessions?: boolean;
+  clearSmtp?: boolean;
+  enableLocal?: boolean;
+  clearLdap?: boolean;
   bootstrap?: boolean;
   resetAll?: boolean;
   help?: boolean;
@@ -52,6 +60,9 @@ function parseArgs(argv: string[]): Args {
       }
     } else if (a === '--clear-passkeys') out.clearPasskeys = true;
     else if (a === '--clear-sessions') out.clearSessions = true;
+    else if (a === '--clear-smtp') out.clearSmtp = true;
+    else if (a === '--enable-local') out.enableLocal = true;
+    else if (a === '--clear-ldap') out.clearLdap = true;
     else if (a === '--bootstrap') out.bootstrap = true;
     else if (a === '--reset-all') out.resetAll = true;
     else {
@@ -68,6 +79,9 @@ function printHelp(): void {
       '  --set-password [PASSWORD]   set a new admin password (prompts/stdin if no arg)\n' +
       '  --clear-passkeys            remove all registered passkeys\n' +
       '  --clear-sessions            invalidate all active admin sessions\n' +
+      '  --clear-smtp                forget SMTP / email sign-in config (re-enables password login)\n' +
+      '  --enable-local              re-enable the local account after an LDAP admin disabled it\n' +
+      '  --clear-ldap                forget LDAP settings and LDAP admins\n' +
       '  --bootstrap                 reset first_login_done so the next /api/admin/login\n' +
       '                              claims the account (use over a trusted network only)\n' +
       '  --reset-all                 do all of the above (interactive password)\n' +
@@ -137,6 +151,9 @@ async function main(): Promise<void> {
   const wantPassword = args.setPassword !== undefined || args.resetAll;
   const wantClearPasskeys = args.clearPasskeys || args.resetAll;
   const wantClearSessions = args.clearSessions || args.resetAll;
+  const wantClearSmtp = args.clearSmtp || args.resetAll;
+  const wantEnableLocal = args.enableLocal || args.resetAll;
+  const wantClearLdap = args.clearLdap || args.resetAll;
   const wantBootstrap = args.bootstrap || args.resetAll;
 
   if (wantPassword) {
@@ -174,6 +191,27 @@ async function main(): Promise<void> {
     const before = db.prepare('SELECT COUNT(*) AS c FROM admin_sessions').get() as { c: number };
     db.prepare('DELETE FROM admin_sessions').run();
     did.push(`invalidated ${before.c} active session(s)`);
+  }
+
+  if (wantClearSmtp) {
+    const had = store.deleteSmtpSettings();
+    did.push(had
+      ? 'cleared SMTP / email sign-in config (password login re-enabled; restart meet-api to apply)'
+      : 'no SMTP config was stored');
+  }
+
+  if (wantEnableLocal) {
+    store.setLocalAccountDisabled(false);
+    did.push('local account enabled (restart meet-api to apply)');
+  }
+
+  if (wantClearLdap) {
+    const had = store.deleteLdapSettings();
+    const admins = store.deleteAllLdapAdmins();
+    store.deleteAllUserSessions();
+    did.push(had || admins
+      ? `cleared LDAP settings and ${admins} LDAP admin(s) (restart meet-api to apply)`
+      : 'no LDAP config was stored');
   }
 
   if (wantBootstrap) {

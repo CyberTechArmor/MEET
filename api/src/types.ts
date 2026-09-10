@@ -28,6 +28,11 @@ export interface AdminSession {
   token: string;
   createdAt: Date;
   expiresAt: Date;
+  // 'local' for the built-in account (password / passkey / email code),
+  // 'ldap:<dn>' for a directory admin. Decides who may disable the local
+  // account.
+  principal: string;
+  displayName: string;
 }
 
 // Mirrors the frontend VideoQualityPreset union. The backend doesn't
@@ -64,6 +69,9 @@ export interface AdminCredentials {
   // first read if missing — never changes after that, otherwise registered
   // passkeys would be invalidated.
   userHandle: Buffer;
+  // Set by a directory (LDAP) admin: every local credential — password,
+  // passkeys, emailed codes — stops working until re-enabled.
+  localDisabled: boolean;
 }
 
 // A registered WebAuthn (passkey) credential. credentialId is the binary
@@ -80,4 +88,76 @@ export interface Passkey {
   label: string;
   createdAt: Date;
   lastUsedAt: Date | null;
+}
+
+// Outbound email (SMTP) configuration used for one-time sign-in codes.
+//
+// `verified` flips to true only after the admin completes a test round
+// trip (a code is emailed to adminEmail and typed back in). Password login
+// is disabled from that moment on: an unverified SMTP config never locks
+// anyone out. Editing any transport field resets `verified` to false.
+export interface SmtpSettings {
+  host: string;
+  port: number;
+  // true = implicit TLS (usually port 465); false = plain/STARTTLS (587/25)
+  secure: boolean;
+  username: string;
+  password: string;
+  fromAddress: string;
+  // Where sign-in codes are delivered. Single admin account → single address.
+  adminEmail: string;
+  verified: boolean;
+  verifiedAt: string | null;
+}
+
+// Directory (LDAP / LDAPS) integration. Off by default. Two independent
+// uses: gate the meeting frontend behind a directory sign-in
+// (requireForFrontend), and let selected directory users into the admin
+// panel (adminsEnabled + rows in ldap_admins).
+export interface LdapSettings {
+  enabled: boolean;
+  // ldap://host:389 or ldaps://host:636
+  url: string;
+  // Upgrade an ldap:// connection with StartTLS before binding.
+  startTls: boolean;
+  tlsRejectUnauthorized: boolean;
+  // Optional PEM bundle for a private CA.
+  caCert: string;
+  // Service account used to search for users. Empty = anonymous.
+  bindDn: string;
+  bindPassword: string;
+  baseDn: string;
+  // RFC 4515 filter with {{username}} placeholder (value is escaped).
+  userFilter: string;
+  // Filter for the admin picker with {{q}} placeholder (value is escaped).
+  searchFilter: string;
+  usernameAttribute: string;
+  displayNameAttribute: string;
+  emailAttribute: string;
+  timeoutMs: number;
+  requireForFrontend: boolean;
+  adminsEnabled: boolean;
+}
+
+// A directory user granted access to the admin panel.
+export interface LdapAdmin {
+  id: string;
+  dn: string;
+  username: string;
+  displayName: string;
+  email: string;
+  addedBy: string;
+  createdAt: Date;
+  lastLoginAt: Date | null;
+}
+
+// Frontend (participant) session issued after a directory sign-in when
+// requireForFrontend is on.
+export interface UserSession {
+  token: string;
+  dn: string;
+  username: string;
+  displayName: string;
+  createdAt: Date;
+  expiresAt: Date;
 }

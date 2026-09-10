@@ -75,6 +75,18 @@ The installer offers five modes:
 - **Auto-hide Controls**: Clean, distraction-free video experience
 - **Connection Status**: Real-time connection state indicators
 - **Participant Notifications**: Toast notifications when people join/leave
+- **Embed Mode**: Meetings created via the API (or loaded in an iframe) skip
+  the create/join configuration screen — participants only see a name prompt,
+  or nothing at all when the name is in the link
+- **Admin Passkeys**: Register any number of devices (Touch ID, Windows Hello,
+  security keys) for password-less admin sign-in
+- **Email One-Time Codes**: Configure SMTP in the admin panel; once a test code
+  is confirmed, password login is disabled and the admin signs in with a
+  passkey or an emailed code only
+- **LDAP / LDAPS (off by default)**: Connect a directory and choose what it
+  gates — require a directory sign-in to use the meeting frontend, and/or let
+  hand-picked directory users into the admin panel. An LDAP admin can disable
+  the local account; lock-out-prone changes are refused
 
 ### Coming Soon (Production Mode)
 
