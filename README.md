@@ -83,9 +83,9 @@ The installer offers five modes:
 - **Auto-hide Controls**: Clean, distraction-free video experience
 - **Connection Status**: Real-time connection state indicators
 - **Participant Notifications**: Toast notifications when people join/leave
-- **Embed Mode**: Meetings created via the API (or loaded in an iframe) skip
-  the create/join configuration screen — participants only see a name prompt,
-  or nothing at all when the name is in the link
+- **Embed Mode**: Meetings created via the API (or loaded in an iframe) join
+  automatically, reconnect on their own, adapt to small windows, and talk to
+  the host page over a postMessage API (events + commands) — see API.md
 - **Account & Security tab**: Profile (rename, change password, sign out other
   sessions), passkeys, email sign-in and LDAP in one place in the admin panel
 - **Admin Passkeys**: Register any number of devices (Touch ID, Windows Hello,

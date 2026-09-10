@@ -815,7 +815,7 @@ Configure webhooks to receive real-time notifications for events like:
                 properties: {
                   roomName: { type: 'string', description: 'Room code/name', example: 'ABC123' },
                   participantName: { type: 'string', description: 'Display name', example: 'John Doe' },
-                  deviceId: { type: 'string', description: 'Optional device identifier' },
+                  deviceId: { type: 'string', description: 'Stable per-device-and-window identifier. The participant identity is derived from it (never from the name), so the same person can join from several devices and two people can share a name. Omit it and the server mints a random one.' },
                 },
               },
             },
@@ -2112,10 +2112,17 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       return;
     }
 
-    const sanitizedDeviceId = deviceId ? deviceId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30) : '';
+    // Identity is per DEVICE + WINDOW, never derived from the display
+    // name: the same person may join from a laptop and a phone, and two
+    // people may share a name. LiveKit evicts the previous connection when
+    // an identical identity joins, so the identity must only repeat for a
+    // genuine reload of the same window (which is exactly when replacing
+    // the stale connection is what we want). The name travels separately
+    // as the participant's display name.
+    const sanitizedDeviceId = deviceId ? deviceId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) : '';
     const participantIdentity = sanitizedDeviceId
-      ? `${sanitizedParticipantName}_${sanitizedDeviceId}`
-      : `${sanitizedParticipantName}_${Date.now()}`;
+      ? `p_${sanitizedDeviceId}`
+      : `p_${crypto.randomBytes(8).toString('hex')}`;
 
     let isHost = false;
     let isNewRoom = false;

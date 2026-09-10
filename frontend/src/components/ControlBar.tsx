@@ -2,6 +2,7 @@ import { useCallback, useState, useMemo } from 'react';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 import ConfirmModal from './ConfirmModal';
+import { useDocumentPip } from '../hooks/useDocumentPip';
 
 interface ControlBarProps {
   /** Small-window layout: tight bar, small icons, no divider/pin. */
@@ -14,6 +15,7 @@ function ControlBar({ compact = false }: ControlBarProps) {
   const btn = compact ? 'p-2 rounded-lg' : 'p-4 rounded-xl';
   const icon = compact ? 'w-4 h-4' : 'w-6 h-6';
   const { toggleMic, toggleCamera, toggleScreenShare, disconnect, endMeeting } = useLiveKit();
+  const pip = useDocumentPip();
 
   const [isLeaving, setIsLeaving] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
@@ -153,6 +155,24 @@ function ControlBar({ compact = false }: ControlBarProps) {
             {isScreenSharing && (
               <div className="absolute -top-1 -right-1 w-3 h-3 bg-meet-success rounded-full animate-pulse" />
             )}
+          </button>
+        )}
+
+        {/* Picture-in-picture (MEET-native, keeps the call + screen share alive) */}
+        {pip.supported && (
+          <button
+            onClick={() => { pip.toggle().catch((e) => console.warn('PiP failed:', e)); }}
+            className={`relative ${btn} transition-smooth ${
+              pip.isOpen
+                ? 'bg-meet-accent hover:bg-meet-accent-dark text-meet-bg'
+                : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
+            }`}
+            title={pip.isOpen ? 'Close picture-in-picture' : 'Picture-in-picture'}
+          >
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h12a2 2 0 012 2v6M4 6v10a2 2 0 002 2h5" />
+              <rect x="13" y="13" width="8" height="6" rx="1.5" strokeWidth={2} />
+            </svg>
           </button>
         )}
 

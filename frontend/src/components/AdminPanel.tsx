@@ -2293,6 +2293,18 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
 }`}</code></pre>
                       </div>
 
+                      {/* Embed messaging + lifecycle */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Embed messaging API &amp; keeping the call alive</h3>
+                      <p className="text-meet-text-secondary text-sm mb-3">
+                        Inside an iframe MEET posts events to your page (<code className="text-meet-accent">source: "meet"</code>) and accepts commands via <code className="text-meet-accent">iframe.contentWindow.postMessage</code>. Full reference in API.md.
+                      </p>
+                      <ul className="list-disc list-inside space-y-1 text-meet-text-secondary text-sm mb-4">
+                        <li><strong className="text-meet-text-primary">Events:</strong> <code className="text-meet-accent">meet:ready</code>, <code className="text-meet-accent">meet:joined</code> (with <code className="text-meet-accent">joinedAt</code> for your timer), <code className="text-meet-accent">meet:left</code> (<code className="text-meet-accent">reason</code>, <code className="text-meet-accent">willRejoin</code>), <code className="text-meet-accent">meet:participants</code>, <code className="text-meet-accent">meet:screenshare</code>, <code className="text-meet-accent">meet:media</code>, <code className="text-meet-accent">meet:layout</code>, <code className="text-meet-accent">meet:state</code></li>
+                        <li><strong className="text-meet-text-primary">Commands:</strong> <code className="text-meet-accent">meet:leave</code>, <code className="text-meet-accent">meet:end</code>, <code className="text-meet-accent">meet:mute</code>, <code className="text-meet-accent">meet:screenshare</code>, <code className="text-meet-accent">meet:compact</code>, <code className="text-meet-accent">meet:hideEndCall</code>, <code className="text-meet-accent">meet:pip</code>, <code className="text-meet-accent">meet:fullscreen</code>, <code className="text-meet-accent">meet:get-state</code></li>
+                        <li><strong className="text-meet-text-primary">Never move or re-mount the iframe</strong> (PiP wrappers, fullscreen containers, re-renders): that reloads it and ends the screen share. Use <code className="text-meet-accent">iframe.requestFullscreen()</code>, restyle the wrapper with CSS, and send <code className="text-meet-accent">meet:compact</code> for your PiP form.</li>
+                        <li><strong className="text-meet-text-primary">Invite links</strong> carry only <code className="text-meet-accent">room</code> — never the inviter's <code className="text-meet-accent">name</code>. Identities are per device, so one person can join from several devices.</li>
+                      </ul>
+
                       {/* Troubleshooting */}
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Troubleshooting</h3>
                       <ul className="list-disc list-inside space-y-2 text-meet-text-secondary">
