@@ -24,13 +24,18 @@ import {
   listRegisteredPasskeys,
   deleteRegisteredPasskey,
   browserSupportsPasskeys,
+  getAuthMethods,
+  requestOtp,
+  verifyOtp,
   type PasskeyCredentialInfo,
+  type AuthMethods,
   getServerSettings,
   updateServerSettings,
   WEBHOOK_EVENTS,
 } from '../lib/livekit';
 import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, ServerSettings } from '../lib/livekit';
 import type { RoomInfo } from '../stores/adminStore';
+import SmtpSettingsSection from './SmtpSettingsSection';
 
 type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
 type DocsSubTab = 'api' | 'iframe';
@@ -115,6 +120,57 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     registeredCount: 0,
   });
   const [isPasskeyAuthing, setIsPasskeyAuthing] = useState(false);
+
+  // Which credentials the server accepts right now. Password login goes
+  // away once email sign-in (SMTP) has been verified; the form re-fetches
+  // this every time it is shown so a change made in Settings is reflected
+  // at the next sign-in without a reload.
+  const [authMethods, setAuthMethods] = useState<AuthMethods>({
+    password: true, passkey: false, otp: false, firstLogin: false,
+  });
+  const [otpTicket, setOtpTicket] = useState<string | null>(null);
+  const [otpEmail, setOtpEmail] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [isOtpBusy, setIsOtpBusy] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated) return;
+    let cancelled = false;
+    getAuthMethods().then((m) => { if (!cancelled) setAuthMethods(m); });
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
+
+  const handleOtpRequest = useCallback(async () => {
+    setLoginError('');
+    setIsOtpBusy(true);
+    try {
+      const r = await requestOtp();
+      setOtpTicket(r.ticket);
+      setOtpEmail(r.email);
+      setOtpCode('');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Could not send a sign-in code');
+    } finally {
+      setIsOtpBusy(false);
+    }
+  }, []);
+
+  const handleOtpVerify = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otpTicket) return;
+    setLoginError('');
+    setIsOtpBusy(true);
+    try {
+      const response = await verifyOtp(otpTicket, otpCode);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setOtpTicket(null);
+      setOtpCode('');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Sign-in failed');
+    } finally {
+      setIsOtpBusy(false);
+    }
+  }, [otpTicket, otpCode, setAuth]);
 
   // Passkey management (Settings tab).
   const [passkeyList, setPasskeyList] = useState<PasskeyCredentialInfo[]>([]);
@@ -600,60 +656,148 @@ function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
 
           <p className="text-meet-text-secondary mb-6 text-sm">
-            Enter your admin credentials to access the admin panel. If this is your first login, the credentials you enter will be set as the admin account.
+            {authMethods.password
+              ? 'Enter your admin credentials to access the admin panel. If this is your first login, the credentials you enter will be set as the admin account.'
+              : 'Password login is turned off for this account. Sign in with a passkey or a one-time code sent to your email.'}
           </p>
 
-          <form onSubmit={handleLogin} className="space-y-4">
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Username"
-              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-              autoFocus
-            />
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Password"
-              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-            />
-
-            {loginError && (
-              <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm">
-                {loginError}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth"
-            >
-              Login
-            </button>
-
-            {passkeyStatus.configured && passkeyStatus.registeredCount > 0 && browserSupportsPasskeys() && (
-              <>
+          {(() => {
+            const showPasskey = authMethods.passkey && browserSupportsPasskeys();
+            const showOtp = authMethods.otp;
+            const nothing = !authMethods.password && !showPasskey && !showOtp;
+            let sections = 0;
+            const divider = () => {
+              sections += 1;
+              if (sections === 1) return null;
+              return (
                 <div className="flex items-center gap-3 text-meet-text-tertiary text-xs">
                   <div className="flex-1 h-px bg-meet-border" />
                   <span>or</span>
                   <div className="flex-1 h-px bg-meet-border" />
                 </div>
-                <button
-                  type="button"
-                  onClick={handlePasskeyLogin}
-                  disabled={isPasskeyAuthing}
-                  className="w-full bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary font-medium py-3 px-6 rounded-xl border border-meet-border transition-smooth flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                  </svg>
-                  {isPasskeyAuthing ? 'Authenticating…' : 'Sign in with passkey'}
-                </button>
-              </>
-            )}
-          </form>
+              );
+            };
+            return (
+              <div className="space-y-4">
+                {authMethods.password && (
+                  <>
+                    {divider()}
+                    <form onSubmit={handleLogin} className="space-y-4">
+                      <input
+                        type="text"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder="Username"
+                        className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                        autoFocus
+                      />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Password"
+                        className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      />
+                      <button
+                        type="submit"
+                        className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth"
+                      >
+                        Login
+                      </button>
+                    </form>
+                  </>
+                )}
+
+                {showPasskey && (
+                  <>
+                    {divider()}
+                    <button
+                      type="button"
+                      onClick={handlePasskeyLogin}
+                      disabled={isPasskeyAuthing}
+                      className={`w-full font-medium py-3 px-6 rounded-xl transition-smooth flex items-center justify-center gap-2 disabled:opacity-50 ${
+                        authMethods.password
+                          ? 'bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary border border-meet-border'
+                          : 'bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold'
+                      }`}
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                      </svg>
+                      {isPasskeyAuthing ? 'Authenticating…' : 'Sign in with passkey'}
+                    </button>
+                  </>
+                )}
+
+                {showOtp && (
+                  <>
+                    {divider()}
+                    {otpTicket ? (
+                      <form onSubmit={handleOtpVerify} className="space-y-3">
+                        <p className="text-sm text-meet-text-secondary">
+                          Enter the 6-digit code sent to <span className="text-meet-text-primary">{otpEmail}</span>.
+                        </p>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          pattern="[0-9]{6}"
+                          maxLength={6}
+                          value={otpCode}
+                          onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="123456"
+                          className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none text-center text-2xl font-mono tracking-widest"
+                          autoFocus
+                        />
+                        <button
+                          type="submit"
+                          disabled={isOtpBusy || otpCode.length !== 6}
+                          className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth disabled:opacity-50"
+                        >
+                          {isOtpBusy ? 'Checking…' : 'Verify code'}
+                        </button>
+                        <div className="flex justify-between text-xs">
+                          <button type="button" onClick={() => { setOtpTicket(null); setOtpCode(''); setLoginError(''); }}
+                            className="text-meet-text-tertiary hover:text-meet-text-secondary">
+                            Back
+                          </button>
+                          <button type="button" onClick={handleOtpRequest} disabled={isOtpBusy}
+                            className="text-meet-accent hover:text-meet-accent-light disabled:opacity-50">
+                            Send a new code
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleOtpRequest}
+                        disabled={isOtpBusy}
+                        className="w-full bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary font-medium py-3 px-6 rounded-xl border border-meet-border transition-smooth flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                        </svg>
+                        {isOtpBusy ? 'Sending…' : `Email me a sign-in code${authMethods.otpEmail ? ` (${authMethods.otpEmail})` : ''}`}
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {nothing && (
+                  <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-3 text-meet-error text-sm">
+                    No sign-in method is available in this browser. Passkeys need a WebAuthn-capable browser over HTTPS.
+                    To restore password login run <code>reset-admin.js --clear-smtp</code> on the server.
+                  </div>
+                )}
+
+                {loginError && (
+                  <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm">
+                    {loginError}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
     );
@@ -1157,7 +1301,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                     <div className="glass rounded-xl p-6">
                       <h3 className="text-lg font-semibold text-meet-text-primary mb-2">Passkeys</h3>
                       <p className="text-sm text-meet-text-secondary mb-4">
-                        Sign in without a password using your device's biometrics or security key.
+                        Sign in without a password using your device's biometrics or security key. Register one passkey per device (laptop, phone, security key) — there is no limit.
                         {!passkeyStatus.configured && ' Disabled — PUBLIC_BASE_URL not configured.'}
                         {passkeyStatus.configured && !browserSupportsPasskeys() && ' This browser does not support WebAuthn.'}
                       </p>
@@ -1241,6 +1385,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                       )}
                     </div>
 
+                    {/* Email sign-in (SMTP) */}
+                    {token && <SmtpSettingsSection token={token} passkeyCount={passkeyList.length} />}
+
                     {/* Settings Info */}
                     <div className="glass rounded-xl p-6 bg-meet-accent/5 border border-meet-accent/20">
                       <h3 className="text-lg font-semibold text-meet-accent mb-2">About Settings</h3>
@@ -1250,6 +1397,8 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         <li>• API access is always allowed regardless of Public Access setting</li>
                         <li>• Set to 0 for unlimited (not recommended for production)</li>
                         <li>• Iframe domains control the CSP frame-ancestors header</li>
+                        <li>• Passkeys: register one per device — any of them signs you in</li>
+                        <li>• Email sign-in: password login is disabled only after a test code is confirmed</li>
                       </ul>
                     </div>
                   </>
@@ -1786,9 +1935,9 @@ class MeetIntegration {
     return response.json();
   }
 
-  // Generate join URL (uses frontend URL for iframe)
+  // Generate join URL (frontend URL; embed=1 skips MEET's create/join screen)
   getJoinUrl(roomName, participantName) {
-    const params = new URLSearchParams({ room: roomName });
+    const params = new URLSearchParams({ room: roomName, embed: '1' });
     if (participantName) params.set('name', participantName);
     return \\\`\\\${this.serverUrl}/?\\\${params.toString()}\\\`;
   }
@@ -1818,7 +1967,7 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');
 \`\`\`jsx
 function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \\\`${frontendUrl}/?room=\\\${roomId}\\\${
+  const meetUrl = \\\`${frontendUrl}/?room=\\\${roomId}&embed=1\\\${
     participantName ? \\\`&name=\\\${encodeURIComponent(participantName)}\\\` : ''
   }\\\`;
 
@@ -2066,9 +2215,9 @@ ${isSubdomainDeployment ? `
     return response.json();
   }
 
-  // Generate join URL (uses frontend URL for iframe)
+  // Generate join URL (frontend URL; embed=1 skips MEET's create/join screen)
   getJoinUrl(roomName, participantName) {
-    const params = new URLSearchParams({ room: roomName });
+    const params = new URLSearchParams({ room: roomName, embed: '1' });
     if (participantName) params.set('name', participantName);
     return \`\${this.serverUrl}/?\${params.toString()}\`;
   }
@@ -2098,7 +2247,7 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
                       <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
                         <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \`${frontendUrl}/?room=\${roomId}\${
+  const meetUrl = \`${frontendUrl}/?room=\${roomId}&embed=1\${
     participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
   }\`;
 

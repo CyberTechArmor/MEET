@@ -44,12 +44,14 @@ const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_
 // login, so losing them on restart is acceptable. Room metadata is also
 // transient (display names while a room exists).
 
-import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset } from './types.js';
+import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset, SmtpSettings } from './types.js';
 import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword } from './auth.js';
 import * as webauthn from './webauthn.js';
+import * as mailer from './mailer.js';
+import * as otp from './otp.js';
 
 // Open the database before anything else can touch it.
 getDb();
@@ -158,6 +160,54 @@ let isFirstLogin: boolean;
 }
 
 const roomMetadata: Map<string, RoomMetadata> = new Map();
+
+// Email (SMTP) settings for one-time sign-in codes. In-memory hot copy of
+// the persisted blob; every mutation writes through to SQLite.
+let smtpSettings: SmtpSettings | null = store.loadSmtpSettings() ?? null;
+
+// Email sign-in is only offered once the admin has proven the SMTP config
+// works by completing a test code round trip (`verified`). This is also
+// the exact condition under which password login is switched off, so an
+// unreachable mail server can never lock the admin out.
+function otpLoginAvailable(): boolean {
+  return !!smtpSettings && smtpSettings.verified && mailer.isSmtpComplete(smtpSettings);
+}
+
+function passwordLoginEnabled(): boolean {
+  return !otpLoginAvailable();
+}
+
+function smtpView() {
+  const s = smtpSettings;
+  return {
+    configured: mailer.isSmtpComplete(s),
+    verified: !!s?.verified,
+    passwordLoginEnabled: passwordLoginEnabled(),
+    settings: s
+      ? {
+          host: s.host,
+          port: s.port,
+          secure: s.secure,
+          username: s.username,
+          hasPassword: !!s.password,
+          fromAddress: s.fromAddress,
+          adminEmail: s.adminEmail,
+          verified: s.verified,
+          verifiedAt: s.verifiedAt,
+        }
+      : null,
+  };
+}
+
+function sendOtpError(res: Response, e: unknown): void {
+  if (e instanceof otp.OtpError) {
+    if (e.retryAfterSeconds) res.setHeader('Retry-After', String(e.retryAfterSeconds));
+    res.status(e.statusCode).json({ error: e.message });
+    return;
+  }
+  console.error('OTP error:', e);
+  res.status(500).json({ error: 'One-time code error' });
+}
 
 // Server settings
 interface ServerSettings {
@@ -412,7 +462,7 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
 
     // Check if it's the admin password (sent as plaintext Bearer; verified
     // against the scrypt hash with timing-safe equality).
-    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+    if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -450,7 +500,7 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
       next();
       return;
     }
-    if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+    if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
       req.isAdmin = true;
       next();
       return;
@@ -520,6 +570,7 @@ Configure webhooks to receive real-time notifications for events like:
   tags: [
     { name: 'Public', description: 'Public endpoints for meeting participants' },
     { name: 'Admin', description: 'Admin authentication and management' },
+    { name: 'Sign-in', description: 'Sign-in methods, email one-time codes and SMTP configuration' },
     { name: 'Rooms', description: 'Room management' },
     { name: 'API Keys', description: 'API key management' },
     { name: 'Webhooks', description: 'Webhook configuration' },
@@ -723,6 +774,206 @@ Configure webhooks to receive real-time notifications for events like:
             },
           },
           '401': { description: 'Invalid credentials' },
+          '403': { description: 'Password login is disabled (email sign-in verified). Use a passkey or /api/admin/otp/request.' },
+        },
+      },
+    },
+    '/api/admin/auth/methods': {
+      get: {
+        tags: ['Sign-in'],
+        summary: 'Available sign-in methods',
+        description: 'Which credentials the admin account currently accepts. Password login is switched off automatically once email sign-in (SMTP) has been verified.',
+        responses: {
+          '200': {
+            description: 'Sign-in methods',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    password: { type: 'boolean' },
+                    passkey: { type: 'boolean', description: 'Passkeys configured and at least one registered' },
+                    otp: { type: 'boolean', description: 'Email one-time codes available' },
+                    firstLogin: { type: 'boolean' },
+                    otpEmail: { type: 'string', description: 'Masked recipient address, only when otp is true' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    '/api/admin/otp/request': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Email a one-time sign-in code',
+        description: 'Sends a 6-digit code to the configured admin address. Rate-limited to one code per 30 seconds; a new code invalidates the previous one.',
+        responses: {
+          '200': {
+            description: 'Code sent',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    success: { type: 'boolean' },
+                    ticket: { type: 'string', description: 'Pass back to /api/admin/otp/verify' },
+                    expiresAt: { type: 'string', format: 'date-time' },
+                    email: { type: 'string', description: 'Masked recipient address' },
+                  },
+                },
+              },
+            },
+          },
+          '404': { description: 'Email sign-in not set up' },
+          '429': { description: 'Requested too soon' },
+          '502': { description: 'SMTP send failed' },
+        },
+      },
+    },
+    '/api/admin/otp/verify': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Exchange a one-time code for a session',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'code'],
+                properties: {
+                  ticket: { type: 'string' },
+                  code: { type: 'string', description: '6 digits' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Session issued (same shape as /api/admin/login)' },
+          '400': { description: 'Ticket expired or invalid' },
+          '401': { description: 'Incorrect code' },
+          '429': { description: 'Too many attempts' },
+        },
+      },
+    },
+    '/api/admin/smtp': {
+      get: {
+        tags: ['Sign-in'],
+        summary: 'Get SMTP settings',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': {
+            description: 'SMTP settings (password never returned; hasPassword indicates one is stored)',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    configured: { type: 'boolean' },
+                    verified: { type: 'boolean' },
+                    passwordLoginEnabled: { type: 'boolean' },
+                    settings: {
+                      type: 'object',
+                      nullable: true,
+                      properties: {
+                        host: { type: 'string' },
+                        port: { type: 'integer' },
+                        secure: { type: 'boolean', description: 'Implicit TLS (465) vs STARTTLS/plain' },
+                        username: { type: 'string' },
+                        hasPassword: { type: 'boolean' },
+                        fromAddress: { type: 'string' },
+                        adminEmail: { type: 'string' },
+                        verified: { type: 'boolean' },
+                        verifiedAt: { type: 'string', format: 'date-time', nullable: true },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      put: {
+        tags: ['Sign-in'],
+        summary: 'Update SMTP settings',
+        description: 'Partial update. Changing any delivery field resets `verified`, which re-enables password login until a new test code is confirmed. Omit or send an empty password to keep the stored one.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  host: { type: 'string' },
+                  port: { type: 'integer' },
+                  secure: { type: 'boolean' },
+                  username: { type: 'string' },
+                  password: { type: 'string' },
+                  fromAddress: { type: 'string', format: 'email' },
+                  adminEmail: { type: 'string', format: 'email', description: 'Where sign-in codes are delivered' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Saved' },
+          '400': { description: 'Validation error' },
+        },
+      },
+      delete: {
+        tags: ['Sign-in'],
+        summary: 'Remove SMTP settings',
+        description: 'Forgets the SMTP configuration and re-enables password login.',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Removed' },
+        },
+      },
+    },
+    '/api/admin/smtp/test': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Send a test code with the saved SMTP settings',
+        security: [{ bearerAuth: [] }],
+        responses: {
+          '200': { description: 'Test code sent; confirm it via /api/admin/smtp/test/verify' },
+          '400': { description: 'Settings incomplete' },
+          '429': { description: 'Requested too soon' },
+          '502': { description: 'SMTP send failed (message includes the transport error)' },
+        },
+      },
+    },
+    '/api/admin/smtp/test/verify': {
+      post: {
+        tags: ['Sign-in'],
+        summary: 'Confirm the test code',
+        description: 'Marks the SMTP configuration verified. From this point password login is disabled; only passkeys and emailed codes sign in.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['ticket', 'code'],
+                properties: {
+                  ticket: { type: 'string' },
+                  code: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Verified' },
+          '400': { description: 'Ticket expired or invalid' },
+          '401': { description: 'Incorrect code' },
         },
       },
     },
@@ -942,7 +1193,7 @@ Configure webhooks to receive real-time notifications for events like:
                         createdAt: { type: 'string', format: 'date-time' },
                       },
                     },
-                    joinUrl: { type: 'string', format: 'uri', description: 'URL to join the room' },
+                    joinUrl: { type: 'string', format: 'uri', description: 'URL to join the room. Built from PUBLIC_BASE_URL and includes embed=1 so the web app skips its create/join configuration screen; append &name=... to also skip the name prompt, or use embed=0 to show the full screen.' },
                   },
                 },
               },
@@ -1648,6 +1899,16 @@ interface AdminLoginRequest {
 app.post('/api/admin/login', (req: Request<object, object, AdminLoginRequest>, res: Response) => {
   const { username, password } = req.body;
 
+  // Once email sign-in is verified the password is no longer an accepted
+  // credential anywhere (here, Bearer-password on admin routes, WS auth).
+  if (!passwordLoginEnabled()) {
+    res.status(403).json({
+      error: 'Password login is disabled. Sign in with a passkey or an emailed one-time code.',
+      code: 'PASSWORD_LOGIN_DISABLED',
+    });
+    return;
+  }
+
   if (!username || typeof username !== 'string') {
     res.status(400).json({ error: 'Username is required' });
     return;
@@ -1703,6 +1964,231 @@ app.post('/api/admin/logout', authenticateAdmin, (req: AuthRequest, res: Respons
     store.deleteAdminSession(token);
   }
   res.json({ success: true });
+});
+
+// ───────────────────── sign-in methods / email OTP ─────────────────────
+//
+// Which ways the admin can currently sign in. Public so the login form
+// can render the right controls without a credential.
+app.get('/api/admin/auth/methods', (_req: Request, res: Response) => {
+  const otpAvailable = otpLoginAvailable();
+  res.json({
+    password: passwordLoginEnabled(),
+    passkey: webauthn.isWebAuthnConfigured() && store.listPasskeys().length > 0,
+    otp: otpAvailable,
+    firstLogin: isFirstLogin,
+    ...(otpAvailable && smtpSettings ? { otpEmail: mailer.maskEmail(smtpSettings.adminEmail) } : {}),
+  });
+});
+
+// Step 1 of email sign-in: mail a 6-digit code to the admin address.
+// Unauthenticated by design (this IS the auth); rate-limited in otp.ts.
+app.post('/api/admin/otp/request', async (_req: Request, res: Response) => {
+  if (!otpLoginAvailable() || !smtpSettings) {
+    res.status(404).json({ error: 'Email sign-in is not set up on this server' });
+    return;
+  }
+  let issued: otp.IssuedOtp;
+  try {
+    issued = otp.issue('login');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  try {
+    await mailer.sendOtpEmail(smtpSettings, issued.code, 'login', otp.OTP_TTL_MINUTES);
+  } catch (e) {
+    otp.discard(issued.ticket, 'login');
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[otp] failed to send sign-in code:', msg);
+    res.status(502).json({ error: 'Could not send the sign-in email. Check the SMTP settings or use a passkey.' });
+    return;
+  }
+  console.log(`[otp] sign-in code sent to ${mailer.maskEmail(smtpSettings.adminEmail)}`);
+  res.json({
+    success: true,
+    ticket: issued.ticket,
+    expiresAt: issued.expiresAt.toISOString(),
+    email: mailer.maskEmail(smtpSettings.adminEmail),
+  });
+});
+
+interface OtpVerifyBody {
+  ticket: string;
+  code: string;
+}
+
+// Step 2: exchange ticket + code for a session token.
+app.post('/api/admin/otp/verify', (req: Request<object, object, OtpVerifyBody>, res: Response) => {
+  const { ticket, code } = req.body;
+  if (!ticket || typeof ticket !== 'string' || code === undefined || code === null) {
+    res.status(400).json({ error: 'ticket and code are required' });
+    return;
+  }
+  try {
+    otp.consume(ticket, String(code), 'login');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+
+  const token = generateSessionToken();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  store.saveAdminSession({ token, createdAt: new Date(), expiresAt });
+  store.purgeExpiredAdminSessions();
+
+  res.json({
+    success: true,
+    token,
+    expiresAt: expiresAt.toISOString(),
+    isFirstLogin: false,
+    username: adminUsername,
+  });
+});
+
+// ───────────────────────── SMTP configuration ──────────────────────────
+
+app.get('/api/admin/smtp', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json(smtpView());
+});
+
+interface UpdateSmtpRequest {
+  host?: string;
+  port?: number | string;
+  secure?: boolean;
+  username?: string;
+  // Omit or send '' to keep the stored password.
+  password?: string;
+  fromAddress?: string;
+  adminEmail?: string;
+}
+
+app.put('/api/admin/smtp', authenticateAdmin, (req: Request<object, object, UpdateSmtpRequest>, res: Response) => {
+  const body = req.body ?? {};
+  const current: SmtpSettings = smtpSettings ?? {
+    host: '', port: 587, secure: false, username: '', password: '',
+    fromAddress: '', adminEmail: '', verified: false, verifiedAt: null,
+  };
+  const next: SmtpSettings = { ...current };
+
+  if (body.host !== undefined) {
+    if (typeof body.host !== 'string' || !body.host.trim() || /[\s/]/.test(body.host.trim())) {
+      res.status(400).json({ error: 'host must be a hostname or IP address' });
+      return;
+    }
+    next.host = body.host.trim();
+  }
+  if (body.port !== undefined) {
+    const port = Number(body.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      res.status(400).json({ error: 'port must be an integer between 1 and 65535' });
+      return;
+    }
+    next.port = port;
+  }
+  if (body.secure !== undefined) {
+    next.secure = body.secure === true;
+  }
+  if (body.username !== undefined) {
+    if (typeof body.username !== 'string') {
+      res.status(400).json({ error: 'username must be a string' });
+      return;
+    }
+    next.username = body.username.trim();
+  }
+  if (typeof body.password === 'string' && body.password.length > 0) {
+    next.password = body.password;
+  }
+  if (body.fromAddress !== undefined) {
+    if (typeof body.fromAddress !== 'string' || !mailer.isValidEmail(body.fromAddress.trim())) {
+      res.status(400).json({ error: 'fromAddress must be a valid email address' });
+      return;
+    }
+    next.fromAddress = body.fromAddress.trim();
+  }
+  if (body.adminEmail !== undefined) {
+    if (typeof body.adminEmail !== 'string' || !mailer.isValidEmail(body.adminEmail.trim())) {
+      res.status(400).json({ error: 'adminEmail must be a valid email address' });
+      return;
+    }
+    next.adminEmail = body.adminEmail.trim();
+  }
+
+  // Any change to how (or where) mail is delivered invalidates the earlier
+  // proof that it works; password login comes back until re-verified.
+  const transportChanged = (['host', 'port', 'secure', 'username', 'password', 'fromAddress', 'adminEmail'] as const)
+    .some((k) => next[k] !== current[k]);
+  if (transportChanged) {
+    next.verified = false;
+    next.verifiedAt = null;
+  }
+
+  smtpSettings = next;
+  store.saveSmtpSettings(next);
+  console.log(`[smtp] settings saved (host=${next.host}:${next.port} verified=${next.verified})`);
+  res.json({ success: true, ...smtpView() });
+});
+
+// Forget the SMTP config entirely. Password login is re-enabled.
+app.delete('/api/admin/smtp', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  smtpSettings = null;
+  store.deleteSmtpSettings();
+  otp.clearAll();
+  console.log('[smtp] settings removed — password login re-enabled');
+  res.json({ success: true, ...smtpView() });
+});
+
+// Send a test code with the saved settings. Confirming it (below) marks
+// the config verified and turns password login off.
+app.post('/api/admin/smtp/test', authenticateAdmin, async (_req: AuthRequest, res: Response) => {
+  if (!mailer.isSmtpComplete(smtpSettings)) {
+    res.status(400).json({ error: 'Save the SMTP host, port, from address and admin email first' });
+    return;
+  }
+  let issued: otp.IssuedOtp;
+  try {
+    issued = otp.issue('verify');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  try {
+    await mailer.sendOtpEmail(smtpSettings, issued.code, 'verify', otp.OTP_TTL_MINUTES);
+  } catch (e) {
+    otp.discard(issued.ticket, 'verify');
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[smtp] test send failed:', msg);
+    res.status(502).json({ error: `Could not send test email: ${msg}` });
+    return;
+  }
+  res.json({
+    success: true,
+    ticket: issued.ticket,
+    expiresAt: issued.expiresAt.toISOString(),
+    email: mailer.maskEmail(smtpSettings.adminEmail),
+  });
+});
+
+app.post('/api/admin/smtp/test/verify', authenticateAdmin, (req: Request<object, object, OtpVerifyBody>, res: Response) => {
+  const { ticket, code } = req.body;
+  if (!ticket || typeof ticket !== 'string' || code === undefined || code === null) {
+    res.status(400).json({ error: 'ticket and code are required' });
+    return;
+  }
+  if (!mailer.isSmtpComplete(smtpSettings)) {
+    res.status(400).json({ error: 'SMTP settings are incomplete' });
+    return;
+  }
+  try {
+    otp.consume(ticket, String(code), 'verify');
+  } catch (e) {
+    sendOtpError(res, e);
+    return;
+  }
+  smtpSettings = { ...smtpSettings, verified: true, verifiedAt: new Date().toISOString() };
+  store.saveSmtpSettings(smtpSettings);
+  console.log('[smtp] verified — password login disabled; passkey + email code only');
+  res.json({ success: true, ...smtpView() });
 });
 
 // ─────────────────────── WebAuthn / passkey ────────────────────────────
@@ -2014,8 +2500,12 @@ app.post('/api/rooms', authenticateApiKeyOrAdmin, async (req: Request<object, ob
     // Trigger webhook
     triggerWebhooks('room.created', { roomName: sanitizedRoomName, displayName });
 
-    // Generate join URL
-    const joinUrl = `${req.protocol}://${req.get('host')}/?room=${sanitizedRoomName}`;
+    // Generate join URL. Prefer the configured public URL: behind a reverse
+    // proxy req.get('host') may be the API's own (sub)domain, not the SPA's.
+    // embed=1 tells the SPA to skip the create/join configuration screen and
+    // go straight into the room, prompting only for a name if none is given.
+    const publicBase = (PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    const joinUrl = `${publicBase}/?room=${sanitizedRoomName}&embed=1`;
 
     res.status(201).json({
       success: true,
@@ -2565,7 +3055,7 @@ wss.on('connection', (ws: WebSocket) => {
           // Send initial data acknowledgment
           const data = await getAdminData();
           ws.send(JSON.stringify({ type: 'init', data, timestamp: new Date().toISOString() }));
-        } else if (adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
+        } else if (passwordLoginEnabled() && adminPasswordHash && verifyPassword(token, adminPasswordHash)) {
           client.isAuthenticated = true;
           client.token = token;
           authenticatedClients.add(client);

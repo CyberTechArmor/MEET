@@ -53,6 +53,13 @@ interface RoomState {
   // Embed mode
   hideEndCall: boolean;
   setHideEndCall: (hide: boolean) => void;
+  // Set once from the join link (`embed=1` or iframe). Deliberately NOT
+  // part of initialState so reset() after leaving a call keeps the SPA in
+  // embed mode with the same room, instead of dropping the host page into
+  // the full create/join configuration screen.
+  embedMode: boolean;
+  embedRoomCode: string;
+  setEmbed: (embedMode: boolean, embedRoomCode: string) => void;
 
   // Reset state
   reset: () => void;
@@ -111,6 +118,10 @@ export const useRoomStore = create<RoomState>((set) => ({
   setControlsPinned: (controlsPinned) => set({ controlsPinned }),
 
   setHideEndCall: (hideEndCall) => set({ hideEndCall }),
+
+  embedMode: false,
+  embedRoomCode: '',
+  setEmbed: (embedMode, embedRoomCode) => set({ embedMode, embedRoomCode }),
 
   reset: () => set(initialState),
   resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),

@@ -504,6 +504,13 @@ export interface JoinLinkParams {
   quality: VideoQualityPreset | null;
   /** Whether to hide end call buttons (for iframe embeds) */
   hideEndCall: boolean;
+  /**
+   * Embed mode: skip the create/join configuration screen and go straight
+   * into the room (prompting only for a name if none was supplied).
+   * True when `embed=1` is in the URL, or when the page is inside an
+   * iframe and `embed` is not explicitly `0`/`false`.
+   */
+  embed: boolean;
 }
 
 /**
@@ -528,6 +535,8 @@ export interface JoinLinkOptions {
  * - `?room=ABCDEF&name=John` - Pre-fill both, prompt to join
  * - `?room=ABCDEF&name=John&autojoin=true` - Auto-join immediately
  * - `?room=ABCDEF&name=John&quality=max` - Join with specific quality
+ * - `?room=ABCDEF&embed=1` - Embed mode: no configuration screen, just a
+ *   name prompt (implied automatically inside an iframe)
  *
  * @returns Parsed join link parameters
  *
@@ -548,6 +557,7 @@ export function parseJoinLink(): JoinLinkParams {
   const autojoinParam = urlParams.get('autojoin');
   const qualityParam = urlParams.get('quality');
   const hideEndCallParam = urlParams.get('hideEndCall');
+  const embedParam = urlParams.get('embed');
 
   // Parse autojoin - defaults to true if name is provided
   let autojoin = name !== null;
@@ -564,13 +574,33 @@ export function parseJoinLink(): JoinLinkParams {
   // Parse hideEndCall - for iframe embeds that manage their own call lifecycle
   const hideEndCall = hideEndCallParam === 'true' || hideEndCallParam === '1';
 
+  // Embed mode: explicit param wins; otherwise being framed implies it.
+  let embed = isFramed();
+  if (embedParam !== null) {
+    embed = embedParam === 'true' || embedParam === '1';
+  }
+
   return {
     room: room ? parseRoomCode(room) : null,
     name: name ? name.slice(0, 50) : null,
     autojoin,
     quality,
     hideEndCall,
+    embed,
   };
+}
+
+/**
+ * True when the SPA is running inside an iframe. Cross-origin parents
+ * throw on `window.top` access; treat that as framed too.
+ */
+export function isFramed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -1287,3 +1317,148 @@ export async function updateServerSettings(
   return response.json();
 }
 
+
+// ───────────────────── sign-in methods / email OTP ─────────────────────
+
+export interface AuthMethods {
+  password: boolean;
+  passkey: boolean;
+  otp: boolean;
+  firstLogin: boolean;
+  /** Masked recipient address, present only when otp is true */
+  otpEmail?: string;
+}
+
+/**
+ * Which credentials the admin account currently accepts. Falls back to
+ * password-only if the API is unreachable so the login form still renders.
+ */
+export async function getAuthMethods(): Promise<AuthMethods> {
+  try {
+    const response = await fetch(`${API_URL}/api/admin/auth/methods`);
+    if (!response.ok) throw new Error('bad status');
+    return response.json();
+  } catch {
+    return { password: true, passkey: false, otp: false, firstLogin: false };
+  }
+}
+
+export interface OtpRequestResponse {
+  success: boolean;
+  ticket: string;
+  expiresAt: string;
+  email: string;
+}
+
+async function readError(response: Response, fallback: string): Promise<string> {
+  const body = await response.json().catch(() => ({}));
+  return (body && typeof body.error === 'string' && body.error) || fallback;
+}
+
+/** Ask the server to email a one-time sign-in code to the admin. */
+export async function requestOtp(): Promise<OtpRequestResponse> {
+  const response = await fetch(`${API_URL}/api/admin/otp/request`, { method: 'POST' });
+  if (!response.ok) throw new Error(await readError(response, 'Could not send a sign-in code'));
+  return response.json();
+}
+
+/** Exchange ticket + code for an admin session. */
+export async function verifyOtp(ticket: string, code: string): Promise<AdminLoginResponse> {
+  const response = await fetch(`${API_URL}/api/admin/otp/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, code }),
+  });
+  if (!response.ok) throw new Error(await readError(response, 'Sign-in failed'));
+  return response.json();
+}
+
+// ───────────────────────── SMTP configuration ──────────────────────────
+
+export interface SmtpSettingsView {
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  hasPassword: boolean;
+  fromAddress: string;
+  adminEmail: string;
+  verified: boolean;
+  verifiedAt: string | null;
+}
+
+export interface SmtpStatus {
+  configured: boolean;
+  verified: boolean;
+  passwordLoginEnabled: boolean;
+  settings: SmtpSettingsView | null;
+}
+
+export interface SmtpUpdate {
+  host?: string;
+  port?: number;
+  secure?: boolean;
+  username?: string;
+  /** Omit or '' keeps the stored password */
+  password?: string;
+  fromAddress?: string;
+  adminEmail?: string;
+}
+
+function authHeaders(token: string, json = false): Record<string, string> {
+  return {
+    'Authorization': `Bearer ${token}`,
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
+  };
+}
+
+export async function getSmtpSettings(token: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, { headers: authHeaders(token) });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to load SMTP settings'));
+  return response.json();
+}
+
+export async function updateSmtpSettings(token: string, update: SmtpUpdate): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, {
+    method: 'PUT',
+    headers: authHeaders(token, true),
+    body: JSON.stringify(update),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to save SMTP settings'));
+  return response.json();
+}
+
+export async function deleteSmtpSettings(token: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, {
+    method: 'DELETE',
+    headers: authHeaders(token),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to remove SMTP settings'));
+  return response.json();
+}
+
+/** Send a test code using the saved settings. */
+export async function sendSmtpTest(token: string): Promise<OtpRequestResponse> {
+  const response = await fetch(`${API_URL}/api/admin/smtp/test`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Could not send test email'));
+  return response.json();
+}
+
+/** Confirm the test code — marks SMTP verified and disables password login. */
+export async function verifySmtpTest(token: string, ticket: string, code: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp/test/verify`, {
+    method: 'POST',
+    headers: authHeaders(token, true),
+    body: JSON.stringify({ ticket, code }),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Incorrect code'));
+  return response.json();
+}

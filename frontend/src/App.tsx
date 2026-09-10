@@ -15,7 +15,8 @@ import AdminPanel from './components/AdminPanel';
 
 function App() {
   const view = useRoomStore((state) => state.view);
-  const { setDisplayName, setRoomCode, setHideEndCall } = useRoomStore();
+  const embedMode = useRoomStore((state) => state.embedMode);
+  const { setDisplayName, setRoomCode, setHideEndCall, setEmbed } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
   // Hash-driven so a refresh while the admin panel is open lands back in
@@ -82,6 +83,14 @@ function App() {
         setHideEndCall(true);
       }
 
+      // Embed mode (API-created meeting / iframe): remember the room so the
+      // SPA never shows the create/join configuration screen — only a name
+      // prompt when no name was supplied, and a "join again" prompt after
+      // leaving.
+      if (joinParams.embed) {
+        setEmbed(true, joinParams.room);
+      }
+
       // Pre-fill the form fields
       setRoomCode(joinParams.room);
       if (joinParams.name) {
@@ -112,7 +121,7 @@ function App() {
         clearSession();
       });
     }
-  }, [connect, setDisplayName, setRoomCode, setHideEndCall]);
+  }, [connect, setDisplayName, setRoomCode, setHideEndCall, setEmbed]);
 
 
   // Show loading state while checking status
@@ -181,8 +190,8 @@ function App() {
     <div className="h-full w-full bg-meet-bg">
       {view === 'join' ? <JoinForm /> : <VideoRoom />}
 
-      {/* Admin Button - only shown on join screen */}
-      {view === 'join' && (
+      {/* Admin Button - only shown on join screen, never in embed mode */}
+      {view === 'join' && !embedMode && (
         <button
           onClick={() => setShowAdmin(true)}
           className="fixed bottom-4 right-4 p-2 text-meet-text-tertiary hover:text-meet-text-secondary transition-smooth opacity-50 hover:opacity-100"

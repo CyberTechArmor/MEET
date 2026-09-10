@@ -12,6 +12,7 @@ import type {
   PersistedSettings,
   AdminCredentials,
   Passkey,
+  SmtpSettings,
 } from './types.js';
 
 // ─────────────────────────────── api_keys ──────────────────────────────
@@ -391,4 +392,46 @@ export function purgeExpiredAdminSessions(): number {
     .prepare('DELETE FROM admin_sessions WHERE expires_at < ?')
     .run(new Date().toISOString());
   return r.changes;
+}
+
+// ─────────────────────────── smtp settings ─────────────────────────────
+//
+// Stored as a JSON blob under its own key in the settings table so the
+// server-settings blob (key 'server') and the SMTP blob can evolve
+// independently. The password is stored as-is — the same trust level as
+// webhook secrets and API keys already in this database.
+
+const SMTP_KEY = 'smtp';
+
+export function loadSmtpSettings(): SmtpSettings | undefined {
+  const row = getDb()
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .get(SMTP_KEY) as { value: string } | undefined;
+  if (!row) return undefined;
+  const parsed = JSON.parse(row.value) as Partial<SmtpSettings>;
+  return {
+    host: parsed.host ?? '',
+    port: parsed.port ?? 587,
+    secure: parsed.secure ?? false,
+    username: parsed.username ?? '',
+    password: parsed.password ?? '',
+    fromAddress: parsed.fromAddress ?? '',
+    adminEmail: parsed.adminEmail ?? '',
+    verified: parsed.verified ?? false,
+    verifiedAt: parsed.verifiedAt ?? null,
+  };
+}
+
+export function saveSmtpSettings(s: SmtpSettings): void {
+  getDb()
+    .prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    )
+    .run(SMTP_KEY, JSON.stringify(s));
+}
+
+export function deleteSmtpSettings(): boolean {
+  const r = getDb().prepare('DELETE FROM settings WHERE key = ?').run(SMTP_KEY);
+  return r.changes > 0;
 }

@@ -81,3 +81,23 @@ export interface Passkey {
   createdAt: Date;
   lastUsedAt: Date | null;
 }
+
+// Outbound email (SMTP) configuration used for one-time sign-in codes.
+//
+// `verified` flips to true only after the admin completes a test round
+// trip (a code is emailed to adminEmail and typed back in). Password login
+// is disabled from that moment on: an unverified SMTP config never locks
+// anyone out. Editing any transport field resets `verified` to false.
+export interface SmtpSettings {
+  host: string;
+  port: number;
+  // true = implicit TLS (usually port 465); false = plain/STARTTLS (587/25)
+  secure: boolean;
+  username: string;
+  password: string;
+  fromAddress: string;
+  // Where sign-in codes are delivered. Single admin account → single address.
+  adminEmail: string;
+  verified: boolean;
+  verifiedAt: string | null;
+}
