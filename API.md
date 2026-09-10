@@ -1526,3 +1526,82 @@ restore password login:
 docker compose exec meet-api node dist/reset-admin.js --clear-smtp
 docker compose restart meet-api
 ```
+
+---
+
+## Directory Integration (LDAP / LDAPS)
+
+Off by default. Configure it under **Settings → Directory (LDAP / LDAPS)** or
+through the API. Works with Active Directory, OpenLDAP, FreeIPA and any other
+LDAP v3 server over `ldap://` (optionally with StartTLS) or `ldaps://`, with an
+optional private-CA certificate.
+
+Once a connection is saved and **Enable LDAP** is on, two independent switches
+decide what it is used for:
+
+| Switch | Effect |
+|--------|--------|
+| **Require directory sign-in to use the meeting frontend** | Participants see an LDAP sign-in screen before the join screen. The web app then sends a 12-hour participant session as `Authorization: Bearer` on `POST /api/token` and `GET /api/room-code`; without it both answer `401 LDAP_LOGIN_REQUIRED`. API-key callers are exempt. |
+| **Allow LDAP admins to sign in to this panel** | Directory users you pick (search the directory, click **Make admin**) can sign in to the admin panel with their directory username or email and password through the normal `POST /api/admin/login`. |
+
+A signed-in **LDAP admin** can **disable the local account**: the built-in
+admin's password, passkeys and emailed codes all stop working and its sessions
+end. Only an LDAP admin can re-enable it. Changes that would leave nobody able
+to sign in (turning LDAP admins off, removing LDAP, or removing the last LDAP
+admin while the local account is disabled) are refused with
+`409 WOULD_LOCK_OUT`.
+
+### Endpoints
+
+```
+GET    /api/admin/auth/methods          now also reports ldap + localAccountEnabled
+GET    /api/admin/ldap                   settings (bind password never returned)
+PUT    /api/admin/ldap                   partial update — see fields below
+DELETE /api/admin/ldap                   forget settings and all LDAP admins
+POST   /api/admin/ldap/test              connect + bind + one search with the saved settings
+GET    /api/admin/ldap/search?q=         directory users (max 25) with isAdmin flag
+GET    /api/admin/ldap/admins            LDAP admins
+POST   /api/admin/ldap/admins            { dn } — grant admin access (DN is verified in the directory)
+DELETE /api/admin/ldap/admins/{id}       revoke
+POST   /api/admin/local-account/disable  LDAP admins only
+POST   /api/admin/local-account/enable   LDAP admins only
+
+POST   /api/auth/ldap/login              participant sign-in → { token, expiresAt, username, displayName }
+GET    /api/auth/me                      validate a participant session
+POST   /api/auth/logout                  end it
+GET    /api/status                       now includes ldapRequired
+```
+
+### Settings fields
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `url` | | `ldap://host:389` or `ldaps://host:636` |
+| `startTls` | `false` | Upgrade an `ldap://` connection with StartTLS before binding |
+| `tlsRejectUnauthorized` | `true` | Verify the server certificate |
+| `caCert` | | PEM bundle for a private CA (LDAPS / StartTLS) |
+| `bindDn` / `bindPassword` | | Service account used to search for users. Blank = anonymous search |
+| `baseDn` | | Where users are searched |
+| `userFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid={{username}})(sAMAccountName={{username}})(mail={{username}})))` | `{{username}}` is replaced with the (escaped) value the user typed |
+| `searchFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid=*{{q}}*)(sAMAccountName=*{{q}}*)(cn=*{{q}}*)(displayName=*{{q}}*)(mail=*{{q}}*)))` | Admin picker; `{{q}}` is the search text |
+| `usernameAttribute` | `uid` | Use `sAMAccountName` for Active Directory |
+| `displayNameAttribute` | `displayName` | Falls back to `cn` |
+| `emailAttribute` | `mail` | |
+| `timeoutMs` | `8000` | Connect and operation timeout |
+| `requireForFrontend` | `false` | Gate the meeting frontend |
+| `adminsEnabled` | `false` | Allow LDAP admins into the admin panel |
+
+Authentication is search-then-bind: the service account finds the user's DN
+with `userFilter`, then a second connection binds as that DN with the supplied
+password. Empty passwords are rejected before reaching the directory. Filter
+values are escaped per RFC 4515.
+
+**Recovery.** From inside the API container:
+
+```bash
+# Re-enable the local admin account after an LDAP admin disabled it
+docker compose exec meet-api node dist/reset-admin.js --enable-local
+# Forget the LDAP settings and every LDAP admin
+docker compose exec meet-api node dist/reset-admin.js --clear-ldap
+docker compose restart meet-api
+```

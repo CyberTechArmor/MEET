@@ -303,6 +303,7 @@ export async function getToken(roomName: string, participantName: string): Promi
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...participantAuthHeader(),
     },
     body: JSON.stringify({
       roomName,
@@ -324,7 +325,7 @@ export async function getToken(roomName: string, participantName: string): Promi
  * Generate a random room code
  */
 export async function generateRoomCode(): Promise<string> {
-  const response = await fetch(`${API_URL}/api/room-code`);
+  const response = await fetch(`${API_URL}/api/room-code`, { headers: participantAuthHeader() });
 
   notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
@@ -696,6 +697,8 @@ export function hasJoinLinkParams(): boolean {
  */
 export interface PublicStatusResponse {
   publicAccessEnabled: boolean;
+  /** Participants must sign in with a directory (LDAP) account first */
+  ldapRequired?: boolean;
   version: string;
 }
 
@@ -781,6 +784,10 @@ export interface AdminLoginResponse {
   expiresAt: string;
   isFirstLogin?: boolean;
   username?: string;
+  /** Directory display name (LDAP admins) */
+  displayName?: string;
+  /** 'local' or 'ldap:<dn>' */
+  principal?: string;
 }
 
 /**
@@ -1324,6 +1331,10 @@ export interface AuthMethods {
   password: boolean;
   passkey: boolean;
   otp: boolean;
+  /** Directory (LDAP) admins may sign in with username + password */
+  ldap?: boolean;
+  /** False when a directory admin has switched the local account off */
+  localAccountEnabled?: boolean;
   firstLogin: boolean;
   /** Masked recipient address, present only when otp is true */
   otpEmail?: string;
@@ -1462,3 +1473,167 @@ export async function verifySmtpTest(token: string, ticket: string, code: string
   if (!response.ok) throw new Error(await readError(response, 'Incorrect code'));
   return response.json();
 }
+
+
+// ───────────────────── participant directory sign-in ───────────────────
+//
+// Used only when the server reports ldapRequired: the participant signs
+// in against the directory, we keep the session in localStorage and send
+// it as Bearer on /api/token and /api/room-code.
+
+const PARTICIPANT_SESSION_KEY = 'meet-participant-session';
+
+export interface ParticipantSession {
+  token: string;
+  expiresAt: string;
+  username: string;
+  displayName: string;
+}
+
+export function getParticipantSession(): ParticipantSession | null {
+  try {
+    const raw = localStorage.getItem(PARTICIPANT_SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as ParticipantSession;
+    if (!s.token || !s.expiresAt || new Date(s.expiresAt) <= new Date()) {
+      localStorage.removeItem(PARTICIPANT_SESSION_KEY);
+      return null;
+    }
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+export function clearParticipantSession(): void {
+  try { localStorage.removeItem(PARTICIPANT_SESSION_KEY); } catch { /* ignore */ }
+}
+
+function participantAuthHeader(): Record<string, string> {
+  const s = getParticipantSession();
+  return s ? { 'Authorization': `Bearer ${s.token}` } : {};
+}
+
+export async function ldapParticipantLogin(username: string, password: string): Promise<ParticipantSession> {
+  const response = await fetch(`${API_URL}/api/auth/ldap/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) throw new Error(await readError(response, 'Sign-in failed'));
+  const body = await response.json();
+  const session: ParticipantSession = {
+    token: body.token, expiresAt: body.expiresAt, username: body.username, displayName: body.displayName,
+  };
+  try { localStorage.setItem(PARTICIPANT_SESSION_KEY, JSON.stringify(session)); } catch { /* ignore */ }
+  return session;
+}
+
+/** Validate the stored participant session against the server. */
+export async function checkParticipantSession(): Promise<ParticipantSession | null> {
+  const s = getParticipantSession();
+  if (!s) return null;
+  try {
+    const response = await fetch(`${API_URL}/api/auth/me`, { headers: { 'Authorization': `Bearer ${s.token}` } });
+    if (response.status === 401) {
+      clearParticipantSession();
+      return null;
+    }
+    return s;
+  } catch {
+    // Network trouble: keep the session and let /api/token decide.
+    return s;
+  }
+}
+
+export async function ldapParticipantLogout(): Promise<void> {
+  const s = getParticipantSession();
+  clearParticipantSession();
+  if (!s) return;
+  try {
+    await fetch(`${API_URL}/api/auth/logout`, { method: 'POST', headers: { 'Authorization': `Bearer ${s.token}` } });
+  } catch { /* ignore */ }
+}
+
+// ───────────────────────── directory (LDAP) admin ──────────────────────
+
+export interface LdapSettingsView {
+  enabled: boolean;
+  url: string;
+  startTls: boolean;
+  tlsRejectUnauthorized: boolean;
+  caCert: string;
+  bindDn: string;
+  hasBindPassword: boolean;
+  baseDn: string;
+  userFilter: string;
+  searchFilter: string;
+  usernameAttribute: string;
+  displayNameAttribute: string;
+  emailAttribute: string;
+  timeoutMs: number;
+  requireForFrontend: boolean;
+  adminsEnabled: boolean;
+}
+
+export interface LdapStatus {
+  configured: boolean;
+  active: boolean;
+  adminsActive: boolean;
+  requiredForFrontend: boolean;
+  localAccountEnabled: boolean;
+  ldapAdminCount: number;
+  settings: LdapSettingsView;
+}
+
+export type LdapUpdate = Partial<Omit<LdapSettingsView, 'hasBindPassword'>> & { bindPassword?: string };
+
+export interface LdapUserResult {
+  dn: string;
+  username: string;
+  displayName: string;
+  email: string;
+  isAdmin: boolean;
+}
+
+export interface LdapAdminInfo {
+  id: string;
+  dn: string;
+  username: string;
+  displayName: string;
+  email: string;
+  addedBy: string;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+async function adminJson<T>(token: string, path: string, init: RequestInit = {}, fallback = 'Request failed'): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: { ...authHeaders(token, !!init.body), ...(init.headers || {}) },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, fallback));
+  return response.json();
+}
+
+export const getLdapSettings = (token: string) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', {}, 'Failed to load LDAP settings');
+export const updateLdapSettings = (token: string, update: LdapUpdate) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', { method: 'PUT', body: JSON.stringify(update) }, 'Failed to save LDAP settings');
+export const deleteLdapSettings = (token: string) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', { method: 'DELETE' }, 'Failed to remove LDAP settings');
+export const testLdap = (token: string) =>
+  adminJson<{ ok: boolean; message: string; matchedUsers: number }>(token, '/api/admin/ldap/test', { method: 'POST' }, 'LDAP test failed');
+export const searchLdapUsers = (token: string, q: string) =>
+  adminJson<{ users: LdapUserResult[] }>(token, `/api/admin/ldap/search?q=${encodeURIComponent(q)}`, {}, 'Directory search failed').then((r) => r.users);
+export const listLdapAdmins = (token: string) =>
+  adminJson<{ admins: LdapAdminInfo[] }>(token, '/api/admin/ldap/admins', {}, 'Failed to list LDAP admins').then((r) => r.admins);
+export const addLdapAdmin = (token: string, dn: string) =>
+  adminJson<{ admin: LdapAdminInfo }>(token, '/api/admin/ldap/admins', { method: 'POST', body: JSON.stringify({ dn }) }, 'Failed to add LDAP admin').then((r) => r.admin);
+export const removeLdapAdmin = (token: string, id: string) =>
+  adminJson<{ success: boolean }>(token, `/api/admin/ldap/admins/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Failed to remove LDAP admin');
+export const disableLocalAccount = (token: string) =>
+  adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/disable', { method: 'POST' }, 'Failed to disable the local account');
+export const enableLocalAccount = (token: string) =>
+  adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/enable', { method: 'POST' }, 'Failed to enable the local account');

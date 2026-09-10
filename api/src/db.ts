@@ -138,6 +138,49 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
         ON webauthn_credentials(credential_id);
     `);
   },
+
+  // v4 — directory (LDAP) integration.
+  //
+  // admin_credentials.local_disabled: a directory admin can switch the
+  // built-in account off; every local credential is then refused.
+  // admin_sessions.principal / display_name: who a session belongs to
+  // ('local' or 'ldap:<dn>') so the API can tell a directory admin from
+  // the local account when deciding who may disable what.
+  // ldap_admins: directory users allowed into the admin panel.
+  // user_sessions: participant sessions issued after a directory sign-in
+  // when the frontend is gated behind LDAP.
+  (db) => {
+    db.exec(`
+      ALTER TABLE admin_credentials
+        ADD COLUMN local_disabled INTEGER NOT NULL DEFAULT 0;
+
+      ALTER TABLE admin_sessions
+        ADD COLUMN principal TEXT NOT NULL DEFAULT 'local';
+      ALTER TABLE admin_sessions
+        ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+
+      CREATE TABLE ldap_admins (
+        id             TEXT PRIMARY KEY,
+        dn             TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        username       TEXT NOT NULL DEFAULT '',
+        display_name   TEXT NOT NULL DEFAULT '',
+        email          TEXT NOT NULL DEFAULT '',
+        added_by       TEXT NOT NULL DEFAULT '',
+        created_at     TEXT NOT NULL,
+        last_login_at  TEXT
+      );
+
+      CREATE TABLE user_sessions (
+        token         TEXT PRIMARY KEY,
+        dn            TEXT NOT NULL,
+        username      TEXT NOT NULL DEFAULT '',
+        display_name  TEXT NOT NULL DEFAULT '',
+        created_at    TEXT NOT NULL,
+        expires_at    TEXT NOT NULL
+      );
+      CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
+    `);
+  },
 ];
 
 function currentSchemaVersion(db: Database.Database): number {

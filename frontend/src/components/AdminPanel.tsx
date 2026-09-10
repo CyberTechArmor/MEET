@@ -36,6 +36,7 @@ import {
 import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, ServerSettings } from '../lib/livekit';
 import type { RoomInfo } from '../stores/adminStore';
 import SmtpSettingsSection from './SmtpSettingsSection';
+import LdapSettingsSection from './LdapSettingsSection';
 
 type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
 type DocsSubTab = 'api' | 'iframe';
@@ -51,6 +52,8 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const {
     isAuthenticated,
     token,
+    principal,
+    displayName: adminDisplayName,
     isSessionValid,
     setAuth,
     logout,
@@ -162,7 +165,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setIsOtpBusy(true);
     try {
       const response = await verifyOtp(otpTicket, otpCode);
-      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
       setOtpTicket(null);
       setOtpCode('');
     } catch (err) {
@@ -187,7 +190,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setIsPasskeyAuthing(true);
     try {
       const response = await signInWithPasskey();
-      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
     } catch (err) {
       setLoginError(err instanceof Error ? err.message : 'Passkey sign-in failed');
     } finally {
@@ -434,7 +437,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       const response = await adminLogin(username, password);
-      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
       setUsername('');
       setPassword('');
     } catch (err) {
@@ -656,15 +659,24 @@ function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
 
           <p className="text-meet-text-secondary mb-6 text-sm">
-            {authMethods.password
-              ? 'Enter your admin credentials to access the admin panel. If this is your first login, the credentials you enter will be set as the admin account.'
-              : 'Password login is turned off for this account. Sign in with a passkey or a one-time code sent to your email.'}
+            {authMethods.password && authMethods.firstLogin
+              ? 'This is the first login. The credentials you enter will be set as the admin account.'
+              : authMethods.password && authMethods.ldap
+                ? 'Sign in with the local admin password or with a directory (LDAP) admin account.'
+                : authMethods.password
+                  ? 'Enter your admin credentials to access the admin panel.'
+                  : authMethods.ldap && authMethods.localAccountEnabled === false
+                    ? 'The local admin account is disabled. Sign in with a directory (LDAP) admin account.'
+                    : authMethods.ldap
+                      ? 'Password login for the local account is turned off. Sign in with a directory (LDAP) admin account, a passkey, or an emailed code.'
+                      : 'Password login is turned off for this account. Sign in with a passkey or a one-time code sent to your email.'}
           </p>
 
           {(() => {
             const showPasskey = authMethods.passkey && browserSupportsPasskeys();
             const showOtp = authMethods.otp;
-            const nothing = !authMethods.password && !showPasskey && !showOtp;
+            const showPasswordForm = authMethods.password || !!authMethods.ldap;
+            const nothing = !showPasswordForm && !showPasskey && !showOtp;
             let sections = 0;
             const divider = () => {
               sections += 1;
@@ -679,7 +691,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             };
             return (
               <div className="space-y-4">
-                {authMethods.password && (
+                {showPasswordForm && (
                   <>
                     {divider()}
                     <form onSubmit={handleLogin} className="space-y-4">
@@ -687,7 +699,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         type="text"
                         value={username}
                         onChange={(e) => setUsername(e.target.value)}
-                        placeholder="Username"
+                        placeholder={authMethods.ldap && !authMethods.password ? 'Directory username' : 'Username'}
                         className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
                         autoFocus
                       />
@@ -813,6 +825,11 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             <h1 className="text-xl font-bold text-meet-text-primary">Admin Panel</h1>
             {stats && (
               <span className="text-xs text-meet-text-tertiary">v{stats.version}</span>
+            )}
+            {adminDisplayName && (
+              <span className="text-xs text-meet-text-tertiary hidden sm:inline" title={principal}>
+                {principal.startsWith('ldap:') ? 'LDAP admin: ' : ''}{adminDisplayName}
+              </span>
             )}
             <span className={`text-xs flex items-center gap-1 ${
               wsState === 'connected' ? 'text-meet-success' :
@@ -1388,6 +1405,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                     {/* Email sign-in (SMTP) */}
                     {token && <SmtpSettingsSection token={token} passkeyCount={passkeyList.length} />}
 
+                    {/* Directory (LDAP) */}
+                    {token && <LdapSettingsSection token={token} />}
+
                     {/* Settings Info */}
                     <div className="glass rounded-xl p-6 bg-meet-accent/5 border border-meet-accent/20">
                       <h3 className="text-lg font-semibold text-meet-accent mb-2">About Settings</h3>
@@ -1399,6 +1419,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         <li>• Iframe domains control the CSP frame-ancestors header</li>
                         <li>• Passkeys: register one per device — any of them signs you in</li>
                         <li>• Email sign-in: password login is disabled only after a test code is confirmed</li>
+                        <li>• LDAP is off by default; an LDAP admin can disable the local account, and only an LDAP admin can re-enable it</li>
                       </ul>
                     </div>
                   </>

@@ -11,7 +11,7 @@
   "dependencies": {
     "@simplewebauthn/browser": "^13.3.0",
     "@tailwindcss/vite": "4.2.2",
-    "livekit-client": "^2.17.3",
+    "livekit-client": "^2.22.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hot-toast": "^2.6.0",
