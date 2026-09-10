@@ -3,8 +3,16 @@ import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 import ConfirmModal from './ConfirmModal';
 
-function ControlBar() {
+interface ControlBarProps {
+  /** Small-window layout: tight bar, small icons, no divider/pin. */
+  compact?: boolean;
+}
+
+function ControlBar({ compact = false }: ControlBarProps) {
   const { isMicEnabled, isCameraEnabled, isScreenSharing, isHost, controlsPinned, setControlsPinned, hideEndCall } = useRoomStore();
+  // Size tokens so every button in the bar follows the layout mode.
+  const btn = compact ? 'p-2 rounded-lg' : 'p-4 rounded-xl';
+  const icon = compact ? 'w-4 h-4' : 'w-6 h-6';
   const { toggleMic, toggleCamera, toggleScreenShare, disconnect, endMeeting } = useLiveKit();
 
   const [isLeaving, setIsLeaving] = useState(false);
@@ -42,12 +50,12 @@ function ControlBar() {
   }, [endMeeting]);
 
   return (
-    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30">
-      <div className="glass rounded-2xl px-4 py-3 flex items-center gap-2 shadow-soft">
+    <div className={`absolute left-1/2 -translate-x-1/2 z-30 ${compact ? 'bottom-2' : 'bottom-6'}`}>
+      <div className={`glass flex items-center shadow-soft ${compact ? 'rounded-xl px-2 py-1.5 gap-1' : 'rounded-2xl px-4 py-3 gap-2'}`}>
         {/* Microphone Toggle */}
         <button
           onClick={toggleMic}
-          className={`relative p-4 rounded-xl transition-smooth ${
+          className={`relative ${btn} transition-smooth ${
             isMicEnabled
               ? 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
               : 'bg-meet-error hover:bg-meet-error/80 text-white'
@@ -55,7 +63,7 @@ function ControlBar() {
           title={isMicEnabled ? 'Mute microphone' : 'Unmute microphone'}
         >
           {isMicEnabled ? (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -64,7 +72,7 @@ function ControlBar() {
               />
             </svg>
           ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -84,7 +92,7 @@ function ControlBar() {
         {/* Camera Toggle */}
         <button
           onClick={toggleCamera}
-          className={`relative p-4 rounded-xl transition-smooth ${
+          className={`relative ${btn} transition-smooth ${
             isCameraEnabled
               ? 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
               : 'bg-meet-error hover:bg-meet-error/80 text-white'
@@ -92,7 +100,7 @@ function ControlBar() {
           title={isCameraEnabled ? 'Turn off camera' : 'Turn on camera'}
         >
           {isCameraEnabled ? (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -101,7 +109,7 @@ function ControlBar() {
               />
             </svg>
           ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -116,7 +124,7 @@ function ControlBar() {
         {isScreenShareSupported && (
           <button
             onClick={toggleScreenShare}
-            className={`relative p-4 rounded-xl transition-smooth ${
+            className={`relative ${btn} transition-smooth ${
               isScreenSharing
                 ? 'bg-meet-success hover:bg-meet-success/80 text-white'
                 : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
@@ -124,7 +132,7 @@ function ControlBar() {
             title={isScreenSharing ? 'Stop sharing' : 'Share screen'}
           >
             {isScreenSharing ? (
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -133,7 +141,7 @@ function ControlBar() {
                 />
               </svg>
             ) : (
-              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path
                   strokeLinecap="round"
                   strokeLinejoin="round"
@@ -148,42 +156,45 @@ function ControlBar() {
           </button>
         )}
 
-        {/* Pin Controls Toggle */}
+        {/* Pin Controls Toggle (not in compact windows) */}
+        {!compact && (
         <button
           onClick={() => setControlsPinned(!controlsPinned)}
-          className={`relative p-4 rounded-xl transition-smooth ${
+          className={`relative ${btn} transition-smooth ${
             controlsPinned
               ? 'bg-meet-accent hover:bg-meet-accent-dark text-meet-bg'
               : 'bg-meet-bg-tertiary hover:bg-meet-bg-elevated text-meet-text-primary'
           }`}
           title={controlsPinned ? 'Unpin controls' : 'Pin controls'}
         >
+          {/* pin icon */}
           {controlsPinned ? (
-            <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="currentColor" viewBox="0 0 24 24">
               <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
             </svg>
           ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
             </svg>
           )}
         </button>
+        )}
 
         {/* End call controls - hidden in embed mode with hideEndCall */}
         {!hideEndCall && (
           <>
             {/* Divider */}
-            <div className="w-px h-8 bg-meet-border mx-2" />
+            {!compact && <div className="w-px h-8 bg-meet-border mx-2" />}
 
             {/* Leave Call */}
             <button
               onClick={handleLeaveClick}
               disabled={isLeaving}
-              className="p-4 rounded-xl bg-meet-error hover:bg-meet-error/80 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
+              className={`${btn} bg-meet-error hover:bg-meet-error/80 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed`}
               title="Leave call"
             >
               {isLeaving ? (
-                <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
+                <svg className={`${icon} animate-spin`} viewBox="0 0 24 24">
                   <circle
                     className="opacity-25"
                     cx="12"
@@ -200,7 +211,7 @@ function ControlBar() {
                   />
                 </svg>
               ) : (
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
@@ -216,11 +227,11 @@ function ControlBar() {
               <button
                 onClick={handleEndClick}
                 disabled={isEnding}
-                className="p-4 rounded-xl bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed"
+                className={`${btn} bg-orange-600 hover:bg-orange-500 text-white transition-smooth disabled:opacity-50 disabled:cursor-not-allowed`}
                 title="End meeting for all"
               >
                 {isEnding ? (
-                  <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24">
+                  <svg className={`${icon} animate-spin`} viewBox="0 0 24 24">
                     <circle
                       className="opacity-25"
                       cx="12"
@@ -237,7 +248,7 @@ function ControlBar() {
                     />
                   </svg>
                 ) : (
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className={icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"

@@ -53,7 +53,15 @@ That's it! The installer will automatically install missing dependencies.
 The installer offers five modes:
 
 1. **Demo Mode** - Quick local development (http://localhost:3000)
-2. **Deploy with Caddy** - Bundled Caddy reverse proxy with automatic Let's Encrypt
+2. **Deploy with Caddy** - Bundled Caddy reverse proxy with automatic Let's Encrypt,
+   or a certificate already on the server (Cloudflare Origin cert, wildcard,
+   corporate CA). The installer scans the usual locations by file *content*,
+   so keys renamed to odd extensions are still found, lists what it finds,
+   checks that the key matches the certificate and that it covers your
+   domain, and copies the pair into `tls/`. Non-interactive:
+   `TLS_CERT_FILE=/path/cert.pem TLS_KEY_FILE=/path/key.pem ./install.sh`.
+   Use this when the DNS record is proxied through Cloudflare (orange cloud);
+   Let's Encrypt's HTTP challenge cannot reach the origin there.
 3. **Deploy with host Nginx + Certbot** - Uses host-installed Nginx for SSL
 4. **Deploy with ProxyPilot / NPM** - Each component on its own subdomain
 5. **Behind external reverse proxy (LXC / bare-metal)** - Host already runs

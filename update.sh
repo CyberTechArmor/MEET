@@ -242,6 +242,22 @@ update_with_proxy() {
         echo -e "${YELLOW}!${NC} .env not found — Caddy needs MEET_DOMAIN. Run install.sh option 2 first."
         exit 1
     fi
+    # Own-certificate installs: make sure the files Caddy will load are
+    # still there before rebuilding, otherwise Caddy fails to start.
+    local tls_mode tls_dir
+    tls_mode=$(grep -E '^TLS_MODE=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+    tls_dir=$(grep -E '^TLS_CERT_DIR=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)
+    if [[ "$tls_mode" == tls\ /certs/* ]]; then
+        local crt key
+        crt=$(echo "$tls_mode" | awk '{print $2}' | sed 's|^/certs/||')
+        key=$(echo "$tls_mode" | awk '{print $3}' | sed 's|^/certs/||')
+        if [ ! -f "${tls_dir:-./tls}/$crt" ] || [ ! -f "${tls_dir:-./tls}/$key" ]; then
+            echo -e "${RED}✗ TLS_MODE points at ${tls_dir:-./tls}/$crt + $key but the files are missing.${NC}"
+            echo -e "  Put them back, or re-run ${YELLOW}./install.sh${NC} (option 2) to pick a certificate again."
+            exit 1
+        fi
+        echo -e "${DIM}Own certificate: ${tls_dir:-./tls}/$crt ($(openssl x509 -in "${tls_dir:-./tls}/$crt" -noout -enddate 2>/dev/null | cut -d= -f2))${NC}"
+    fi
     rebuild_and_up "Caddy stack" -f docker-compose.proxy.yml
     local domain
     domain=$(grep -E '^MEET_DOMAIN=' .env 2>/dev/null | tail -n1 | cut -d= -f2-)

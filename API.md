@@ -133,12 +133,55 @@ iframe) the participant should never see MEET's own "Create a new room / Join
 existing room" configuration screen — the room has already been decided by
 your application. Embed mode does exactly that:
 
-- `?room=ABC123&embed=1` → a single "Your name" prompt, then the room.
-- `?room=ABC123&name=John&embed=1` → joins immediately, no UI before the call.
+- `?room=ABC123&name=John&embed=1` → joins immediately as John, no UI before the call.
+- `?room=ABC123&embed=1` → also joins immediately. The name is, in order: the
+  session saved before a reload of the same room, the last name this browser
+  joined with, or a generated `Guest 1234`. Pass `name` whenever your app
+  knows it.
+- `?room=ABC123&embed=1&autojoin=false` → shows a single "Your name" prompt
+  instead of joining on its own.
 - Inside an iframe, embed mode is on by default even without the parameter.
-- After the participant leaves, the same minimal prompt is shown again
-  (never the full configuration screen), so the host page stays in control.
+- **Survives drops.** If the connection is lost for a reason the participant
+  didn't choose (network, server restart, the host page reloading the
+  iframe), the app reconnects on its own with backoff (immediate, then
+  1.5 s doubling to 15 s, up to 12 attempts). Leaving on purpose, the
+  meeting ending, being removed, or the same identity joining from another
+  window shows a short status and a **Rejoin** button instead.
+- Every open window gets its own participant identity (device id + tab id),
+  so two windows on one machine, or two people with the same name, never
+  evict each other.
 - The admin gear button is hidden in embed mode.
+- **Small windows.** Below 640×480 the room switches to a compact layout:
+  only the other person (or the shared screen) is shown, the self view and
+  room badge are hidden, and the controls shrink to small icons. Nothing to
+  configure; it follows the iframe's size.
+
+### Keeping the call alive while your UI changes (PiP, minimize, tabs)
+
+The call lives inside the iframe's page. Anything that reloads that page
+ends the media session: the screen share stops (browsers require a click to
+start one, so it cannot be restored automatically) and MEET rejoins the room
+as a fresh participant a moment later. Two things reload an iframe even
+though they look harmless:
+
+- **Moving the iframe in the DOM** (`appendChild` into another container,
+  re-parenting it under a "picture-in-picture" wrapper, React re-mounting it
+  because its parent component or `key` changed).
+- **Unmounting it while "minimized"** and mounting it again on restore.
+
+Keep the same iframe element mounted for the whole call and change only its
+CSS (`position`, `width`, `height`, `transform`, `visibility`, or move the
+*wrapper* with CSS rather than the iframe with DOM operations). A hidden or
+tiny iframe keeps publishing camera, microphone and screen share; MEET's
+compact layout takes over as soon as it is small.
+
+```html
+<iframe
+  src="https://meet.example.com/?room=ABC123&name=John&embed=1&hideEndCall=true"
+  allow="camera; microphone; display-capture; autoplay; picture-in-picture"
+  allowfullscreen
+  style="border:0;width:100%;height:100%"></iframe>
+```
 
 `POST /api/rooms` returns a `joinUrl` that already carries `embed=1` and is
 built from `PUBLIC_BASE_URL`, so it points at the web app even when the API

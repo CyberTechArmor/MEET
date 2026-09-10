@@ -60,6 +60,18 @@ interface RoomState {
   embedMode: boolean;
   embedRoomCode: string;
   setEmbed: (embedMode: boolean, embedRoomCode: string) => void;
+  // Embed mode joins on its own unless the link says autojoin=false.
+  embedAutoJoin: boolean;
+  setEmbedAutoJoin: (v: boolean) => void;
+  // True while App.tsx is (re)connecting automatically — JoinForm shows a
+  // spinner instead of the name prompt.
+  embedJoining: boolean;
+  setEmbedJoining: (v: boolean) => void;
+  // Why the last room connection ended (livekit DisconnectReason numeric
+  // value), or null if never / cleared. Not part of initialState so it
+  // survives reset() and App.tsx can decide whether to rejoin.
+  lastDisconnectReason: number | null;
+  setLastDisconnectReason: (r: number | null) => void;
 
   // Reset state
   reset: () => void;
@@ -122,6 +134,12 @@ export const useRoomStore = create<RoomState>((set) => ({
   embedMode: false,
   embedRoomCode: '',
   setEmbed: (embedMode, embedRoomCode) => set({ embedMode, embedRoomCode }),
+  embedAutoJoin: true,
+  setEmbedAutoJoin: (embedAutoJoin) => set({ embedAutoJoin }),
+  embedJoining: false,
+  setEmbedJoining: (embedJoining) => set({ embedJoining }),
+  lastDisconnectReason: null,
+  setLastDisconnectReason: (lastDisconnectReason) => set({ lastDisconnectReason }),
 
   reset: () => set(initialState),
   resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),

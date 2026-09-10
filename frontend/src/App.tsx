@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { ConnectionState, DisconnectReason } from 'livekit-client';
 import { useRoomStore } from './stores/roomStore';
 import { useLiveKit } from './hooks/useLiveKit';
 import {
@@ -10,6 +11,8 @@ import {
   getPublicStatus,
   checkParticipantSession,
   ldapParticipantLogout,
+  getRememberedDisplayName,
+  generateGuestName,
   type ParticipantSession,
 } from './lib/livekit';
 import JoinForm from './components/JoinForm';
@@ -17,10 +20,33 @@ import LdapLoginForm from './components/LdapLoginForm';
 import VideoRoom from './components/VideoRoom';
 import AdminPanel from './components/AdminPanel';
 
+const MAX_AUTO_REJOIN_ATTEMPTS = 12;
+
+// Disconnect reasons worth retrying without asking. Everything else means
+// the user, the host, or the server ended it on purpose.
+function isTransientDisconnect(reason: number): boolean {
+  switch (reason) {
+    case DisconnectReason.CLIENT_INITIATED:
+    case DisconnectReason.DUPLICATE_IDENTITY:
+    case DisconnectReason.PARTICIPANT_REMOVED:
+    case DisconnectReason.ROOM_DELETED:
+    case DisconnectReason.ROOM_CLOSED:
+    case DisconnectReason.USER_REJECTED:
+    case DisconnectReason.USER_UNAVAILABLE:
+      return false;
+    default:
+      return true;
+  }
+}
+
 function App() {
   const view = useRoomStore((state) => state.view);
   const embedMode = useRoomStore((state) => state.embedMode);
-  const { setDisplayName, setRoomCode, setHideEndCall, setEmbed } = useRoomStore();
+  const embedRoomCode = useRoomStore((state) => state.embedRoomCode);
+  const embedAutoJoin = useRoomStore((state) => state.embedAutoJoin);
+  const connectionState = useRoomStore((state) => state.connectionState);
+  const lastDisconnectReason = useRoomStore((state) => state.lastDisconnectReason);
+  const { setDisplayName, setRoomCode, setHideEndCall, setEmbed, setEmbedAutoJoin, setEmbedJoining } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
   // Hash-driven so a refresh while the admin panel is open lands back in
@@ -110,18 +136,28 @@ function App() {
         setHideEndCall(true);
       }
 
-      // Embed mode (API-created meeting / iframe): remember the room so the
-      // SPA never shows the create/join configuration screen — only a name
-      // prompt when no name was supplied, and a "join again" prompt after
-      // leaving.
-      if (joinParams.embed) {
-        setEmbed(true, joinParams.room);
-      }
-
       // Pre-fill the form fields
       setRoomCode(joinParams.room);
       if (joinParams.name) {
         setDisplayName(joinParams.name);
+      }
+
+      // Embed mode (API-created meeting / iframe): remember the room so the
+      // SPA never shows the create/join configuration screen. Joining is
+      // handled by the auto-join effect below (name from the link, the
+      // session saved before a reload, the last name used in this browser,
+      // or a guest name) unless the link says autojoin=false.
+      if (joinParams.embed) {
+        setEmbed(true, joinParams.room);
+        setEmbedAutoJoin(joinParams.autojoinExplicit ? joinParams.autojoin : true);
+        if (!joinParams.name) {
+          const saved = getSavedSession();
+          if (saved && saved.roomCode === joinParams.room && saved.displayName) {
+            setDisplayName(saved.displayName);
+          }
+        }
+        clearJoinLinkParams();
+        return;
       }
 
       // Auto-join if both room and name are provided and autojoin is true
@@ -148,7 +184,52 @@ function App() {
         clearSession();
       });
     }
-  }, [connect, setDisplayName, setRoomCode, setHideEndCall, setEmbed]);
+  }, [connect, setDisplayName, setRoomCode, setHideEndCall, setEmbed, setEmbedAutoJoin]);
+
+  // Embed mode: connect on our own, and reconnect after a disconnect the
+  // user didn't ask for. LiveKit already retries transient signal drops
+  // internally; this covers the cases where it gives up (or the host page
+  // reloaded the iframe) so the call comes back without anyone clicking.
+  // Backoff: immediate, then 1.5s, 3s, 6s, 12s, 15s … up to MAX attempts.
+  // Non-transient reasons (user left, meeting ended, removed, opened in
+  // another window) fall through to the prompt in JoinForm.
+  const rejoinAttempts = useRef(0);
+  useEffect(() => {
+    if (!embedMode || !embedRoomCode || !embedAutoJoin) return;
+    if (view !== 'join') {
+      rejoinAttempts.current = 0;
+      return;
+    }
+    if (connectionState === ConnectionState.Connecting) return;
+    if (ldapRequired && !participant) {
+      setEmbedJoining(false);
+      return;
+    }
+    const reason = lastDisconnectReason;
+    if (reason !== null && !isTransientDisconnect(reason)) {
+      setEmbedJoining(false);
+      return;
+    }
+    const attempt = rejoinAttempts.current;
+    if (attempt >= MAX_AUTO_REJOIN_ATTEMPTS) {
+      setEmbedJoining(false);
+      return;
+    }
+    const delay = attempt === 0 ? 0 : Math.min(15000, 1500 * 2 ** (attempt - 1));
+    setEmbedJoining(true);
+    const timer = setTimeout(() => {
+      rejoinAttempts.current += 1;
+      const name = (useRoomStore.getState().displayName || getRememberedDisplayName() || generateGuestName()).trim().slice(0, 50);
+      setDisplayName(name);
+      console.log(`Embed auto-join (attempt ${rejoinAttempts.current}):`, embedRoomCode, 'as', name);
+      connect(embedRoomCode, name, { silent: true }).catch((error) => {
+        // connectionState flips back to Disconnected and this effect
+        // re-runs with backoff.
+        console.error('Embed auto-join failed:', error);
+      });
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [embedMode, embedRoomCode, embedAutoJoin, view, connectionState, lastDisconnectReason, ldapRequired, participant, connect, setDisplayName, setEmbedJoining]);
 
 
   // Show loading state while checking status

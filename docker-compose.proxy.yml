@@ -14,6 +14,11 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Your own certificate (install.sh option 2 → "existing certificate"):
+      # tls/<domain>.crt + tls/<domain>.key on the host, referenced from
+      # .env as TLS_MODE="tls /certs/<domain>.crt /certs/<domain>.key".
+      # Harmless (empty dir) when Let's Encrypt is used instead.
+      - ${TLS_CERT_DIR:-./tls}:/certs:ro
     environment:
       - MEET_DOMAIN=${MEET_DOMAIN:-localhost}
       - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
