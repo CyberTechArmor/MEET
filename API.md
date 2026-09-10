@@ -151,6 +151,37 @@ your application. Embed mode does exactly that:
   so two windows on one machine, or two people with the same name, never
   evict each other.
 - The admin gear button is hidden in embed mode.
+- **Small windows.** Below 640×480 the room switches to a compact layout:
+  only the other person (or the shared screen) is shown, the self view and
+  room badge are hidden, and the controls shrink to small icons. Nothing to
+  configure; it follows the iframe's size.
+
+### Keeping the call alive while your UI changes (PiP, minimize, tabs)
+
+The call lives inside the iframe's page. Anything that reloads that page
+ends the media session: the screen share stops (browsers require a click to
+start one, so it cannot be restored automatically) and MEET rejoins the room
+as a fresh participant a moment later. Two things reload an iframe even
+though they look harmless:
+
+- **Moving the iframe in the DOM** (`appendChild` into another container,
+  re-parenting it under a "picture-in-picture" wrapper, React re-mounting it
+  because its parent component or `key` changed).
+- **Unmounting it while "minimized"** and mounting it again on restore.
+
+Keep the same iframe element mounted for the whole call and change only its
+CSS (`position`, `width`, `height`, `transform`, `visibility`, or move the
+*wrapper* with CSS rather than the iframe with DOM operations). A hidden or
+tiny iframe keeps publishing camera, microphone and screen share; MEET's
+compact layout takes over as soon as it is small.
+
+```html
+<iframe
+  src="https://meet.example.com/?room=ABC123&name=John&embed=1&hideEndCall=true"
+  allow="camera; microphone; display-capture; autoplay; picture-in-picture"
+  allowfullscreen
+  style="border:0;width:100%;height:100%"></iframe>
+```
 
 `POST /api/rooms` returns a `joinUrl` that already carries `embed=1` and is
 built from `PUBLIC_BASE_URL`, so it points at the web app even when the API

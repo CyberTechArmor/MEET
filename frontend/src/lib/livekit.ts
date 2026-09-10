@@ -467,6 +467,13 @@ export function createRoom(qualityPreset?: VideoQualityPreset): Room {
   };
 
   const roomOptions: RoomOptions = {
+    // Don't let livekit-client hang up on 'pagehide' / 'beforeunload'. A
+    // host page that hides, minimizes, or moves an embedded MEET iframe
+    // can fire pagehide without actually unloading the page, and the
+    // client would report it as a deliberate leave. When the page really
+    // goes away the server times the participant out on its own; a
+    // graceful leave on real unload is handled in useLiveKit.
+    disconnectOnPageLeave: false,
     // Adaptive streaming automatically adjusts quality based on network
     adaptiveStream: true,
     // Dynacast reduces bandwidth by not publishing to subscribers who aren't watching
@@ -481,8 +488,6 @@ export function createRoom(qualityPreset?: VideoQualityPreset): Room {
       echoCancellation: true,
       noiseSuppression: true,
     },
-    // Reconnection policy
-    disconnectOnPageLeave: true,
   };
 
   return new Room(roomOptions);
