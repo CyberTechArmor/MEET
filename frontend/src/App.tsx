@@ -17,6 +17,8 @@ import {
 } from './lib/livekit';
 import JoinForm from './components/JoinForm';
 import LdapLoginForm from './components/LdapLoginForm';
+import { useCompactLayout } from './hooks/useCompactLayout';
+import { useEmbedBridge } from './hooks/useEmbedBridge';
 import VideoRoom from './components/VideoRoom';
 import AdminPanel from './components/AdminPanel';
 
@@ -49,6 +51,9 @@ function App() {
   const { setDisplayName, setRoomCode, setHideEndCall, setEmbed, setEmbedAutoJoin, setEmbedJoining } = useRoomStore();
   const { connect } = useLiveKit();
   const hasAttemptedRejoin = useRef(false);
+  // Embed messaging bridge (events to the host page, commands from it) —
+  // inert when not inside an iframe.
+  useEmbedBridge(useCompactLayout());
   // Hash-driven so a refresh while the admin panel is open lands back in
   // the same panel + tab instead of bouncing to the join screen.
   // #admin              → dashboard

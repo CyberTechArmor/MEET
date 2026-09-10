@@ -147,14 +147,100 @@ your application. Embed mode does exactly that:
   1.5 s doubling to 15 s, up to 12 attempts). Leaving on purpose, the
   meeting ending, being removed, or the same identity joining from another
   window shows a short status and a **Rejoin** button instead.
-- Every open window gets its own participant identity (device id + tab id),
-  so two windows on one machine, or two people with the same name, never
-  evict each other.
+- Every open window gets its own participant identity (`p_<device id>-<tab id>`),
+  never derived from the name, so the same person can join from a laptop and a
+  phone, two windows on one machine work, and two people with the same name
+  never evict each other. **Invite links should therefore carry only `room`**
+  (and `embed=1` / `hideEndCall` as needed) — never the inviter's `name`.
 - The admin gear button is hidden in embed mode.
 - **Small windows.** Below 640×480 the room switches to a compact layout:
   only the other person (or the shared screen) is shown, the self view and
   room badge are hidden, and the controls shrink to small icons. Nothing to
   configure; it follows the iframe's size.
+
+### Embed messaging API (postMessage)
+
+Inside an iframe, MEET talks to the embedding page over `window.postMessage`
+so the host can follow and drive the call **without touching the iframe's
+DOM**. All payloads are plain JSON with no tokens or credentials.
+
+**Events (MEET → host)** — every message has `source: "meet"`:
+
+| `type` | Payload | When |
+|--------|---------|------|
+| `meet:ready` | `embed, room, version` | App loaded |
+| `meet:joining` | `room, name` | Connecting |
+| `meet:joined` | `room, identity, name, isHost, joinedAt` (ms epoch) | In the room — start your timer from `joinedAt` |
+| `meet:reconnecting` | `room` | Network hiccup; LiveKit is recovering |
+| `meet:left` | `room, reason, willRejoin` | `reason`: `left`, `ended`, `removed`, `duplicate`, `connection-lost`; `willRejoin` true when MEET is about to reconnect on its own |
+| `meet:participants` | `room, count, participants[{identity,name}]` | Someone joined/left (count includes you) |
+| `meet:screenshare` | `room, active, by, local` | Screen share started/stopped |
+| `meet:media` | `room, audio, video` | Your mic/camera state changed |
+| `meet:layout` | `compact` | Compact layout toggled |
+| `meet:pip` | `open` | MEET's own picture-in-picture opened/closed |
+| `meet:state` | `state{…}` | Reply to `meet:get-state` |
+| `meet:error` | `command, message` | A command failed |
+
+**Commands (host → MEET)** — `iframe.contentWindow.postMessage({ type, … }, '*')`:
+
+| `type` | Fields | Effect |
+|--------|--------|--------|
+| `meet:leave` | | Leave the call (use this from your Close button) |
+| `meet:end` | | End the meeting for everyone (host only) |
+| `meet:mute` | `audio?`, `video?` (true = muted) | Mute/unmute |
+| `meet:screenshare` | `enabled` | Stop sharing (`false`). Starting needs a click inside MEET — browsers require it |
+| `meet:compact` | `mode: 'auto' \| 'on' \| 'off'` | Force the compact layout regardless of size (e.g. while your window is in its PiP form) |
+| `meet:hideEndCall` | `hide` | Show/hide MEET's leave buttons |
+| `meet:pip` | `open?` | Open/close/toggle MEET's own picture-in-picture (needs user activation inside MEET — see below) |
+| `meet:fullscreen` | `enter?` | Fullscreen the MEET document (needs delegated activation — see below) |
+| `meet:get-state` | | Ask for a `meet:state` snapshot |
+
+```js
+const meet = document.getElementById('meet');           // the <iframe>
+window.addEventListener('message', (e) => {
+  if (e.data?.source !== 'meet') return;
+  if (e.data.type === 'meet:joined') startTimer(e.data.joinedAt);
+  if (e.data.type === 'meet:left' && !e.data.willRejoin) closeCallWindow();
+});
+closeButton.onclick = () => meet.contentWindow.postMessage({ type: 'meet:leave' }, '*');
+```
+
+### Fullscreen and picture-in-picture without reloading
+
+- **Fullscreen:** call `iframe.requestFullscreen()` from your own button. The
+  iframe element itself goes fullscreen; nothing is re-mounted and the call
+  continues. (Do **not** render the iframe into a different "fullscreen"
+  container — that reloads it.)
+- **Picture-in-picture, option A (recommended):** keep the iframe exactly
+  where it is and shrink/move its *wrapper* with CSS, sending
+  `meet:compact` `{ mode: 'on' }` so MEET drops to the compact layout even if
+  the box is still large. Your PiP is then just a small floating box.
+- **Picture-in-picture, option B (browser floating video):** MEET's own PiP
+  button opens the browser's picture-in-picture on the other person's video
+  (or the shared screen) *from inside the iframe*, so nothing reloads and
+  the call continues. It needs `allow="picture-in-picture"` on the iframe
+  and a click inside MEET — browsers refuse `meet:pip` sent from your page
+  without a gesture inside the frame, and the richer Document
+  Picture-in-Picture API is only allowed from a top-level page, so MEET
+  uses it only when it is not embedded. Never move the iframe into a
+  Document PiP window of your own — that reloads it.
+- **Desktop (Electron) hosts:** the cleanest PiP is not a DOM change at all —
+  resize the BrowserWindow and `win.setAlwaysOnTop(true)`; send
+  `meet:compact` `{ mode: 'on' }` so MEET shows only the other person.
+
+### Your own title bar, timer and invite link
+
+MEET never renders a window title; whatever chrome wraps the iframe is
+yours. Build it from the events above rather than from the URL:
+
+- **Timer:** start from `meet:joined.joinedAt`; stop on `meet:left`.
+- **Title:** `meet:joined.name` is the local user, `meet:participants` lists
+  the others — "Call with Bob" comes from there, not from the room code.
+- **Invite / copy-link:** share `https://meet.example.com/?room=CODE` (add
+  `embed=1` if the recipient opens it in your app). Do **not** append the
+  inviter's `name` — every recipient would then join as that person.
+  Identities are per device, so even a shared name cannot disconnect anyone,
+  but the labels would all read the same.
 
 ### Keeping the call alive while your UI changes (PiP, minimize, tabs)
 
@@ -336,7 +422,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `roomName` | string | Yes | Room code/name (max 50 chars) |
 | `participantName` | string | Yes | Display name (max 50 chars) |
-| `deviceId` | string | No | Unique device identifier for same-name handling |
+| `deviceId` | string | No | Stable per-device-and-window id. The participant identity is derived from it, never from the name, so the same person can join from several devices and two people can share a name. Omit it and the server mints a random one. |
 
 #### Example Request
 
@@ -355,7 +441,7 @@ Content-Type: application/json
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "roomName": "ABCDEF",
   "participantName": "John Doe",
-  "participantIdentity": "John Doe_m8x3k_a7b9c2d",
+  "participantIdentity": "p_m8x3ka7b9c2d-st0zdx",
   "isHost": true
 }
 ```
@@ -367,7 +453,7 @@ Content-Type: application/json
 | `token` | string | JWT token for LiveKit connection |
 | `roomName` | string | Sanitized room name |
 | `participantName` | string | Display name shown to other participants |
-| `participantIdentity` | string | Unique identifier combining name and device ID |
+| `participantIdentity` | string | Unique per device + window (`p_<deviceId>`); the display name is carried separately |
 | `isHost` | boolean | `true` if first participant in room (has admin rights) |
 
 #### Status Codes
@@ -429,7 +515,7 @@ Content-Type: application/json
 ```json
 {
   "roomName": "ABCDEF",
-  "participantIdentity": "John Doe_m8x3k_a7b9c2d"
+  "participantIdentity": "p_m8x3ka7b9c2d-st0zdx"
 }
 ```
 
@@ -888,7 +974,7 @@ All webhook payloads follow this structure:
   "data": {
     "roomName": "ABC123",
     "participant": {
-      "identity": "John Doe_m8x3k",
+      "identity": "p_m8x3ka7b9c2d-st0zdx",
       "name": "John Doe"
     },
     "joinedAt": "2024-01-15T10:30:00.000Z"

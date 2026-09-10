@@ -72,6 +72,13 @@ interface RoomState {
   // survives reset() and App.tsx can decide whether to rejoin.
   lastDisconnectReason: number | null;
   setLastDisconnectReason: (r: number | null) => void;
+  // Host-controlled layout override via the embed messaging API:
+  // 'auto' follows the window size, 'on'/'off' force compact mode.
+  compactOverride: 'auto' | 'on' | 'off';
+  setCompactOverride: (v: 'auto' | 'on' | 'off') => void;
+  // MEET's own Document Picture-in-Picture window is open.
+  pipOpen: boolean;
+  setPipOpen: (v: boolean) => void;
 
   // Reset state
   reset: () => void;
@@ -140,6 +147,10 @@ export const useRoomStore = create<RoomState>((set) => ({
   setEmbedJoining: (embedJoining) => set({ embedJoining }),
   lastDisconnectReason: null,
   setLastDisconnectReason: (lastDisconnectReason) => set({ lastDisconnectReason }),
+  compactOverride: 'auto',
+  setCompactOverride: (compactOverride) => set({ compactOverride }),
+  pipOpen: false,
+  setPipOpen: (pipOpen) => set({ pipOpen }),
 
   reset: () => set(initialState),
   resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),

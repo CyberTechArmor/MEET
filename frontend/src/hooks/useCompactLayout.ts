@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useRoomStore } from '../stores/roomStore';
 
 // "Compact" = the app is running in a small window: a picture-in-picture
 // style floating window, a narrow sidebar, or a phone held sideways. In
@@ -13,6 +14,7 @@ function measure(): boolean {
 }
 
 export function useCompactLayout(): boolean {
+  const override = useRoomStore((s) => s.compactOverride);
   const [compact, setCompact] = useState<boolean>(measure);
   useEffect(() => {
     let frame = 0;
@@ -29,5 +31,7 @@ export function useCompactLayout(): boolean {
       window.removeEventListener('orientationchange', onResize);
     };
   }, []);
+  if (override === 'on') return true;
+  if (override === 'off') return false;
   return compact;
 }
