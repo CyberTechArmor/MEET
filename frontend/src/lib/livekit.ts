@@ -71,16 +71,20 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
     audioRed: true,
   },
   /**
-   * Adaptive quality (recommended)
-   * Best for: Most use cases, automatically adapts to network conditions
-   * Resolution: 1080p capture with dynamic adjustment
-   * Bitrate: Adaptive based on network
+   * Adaptive quality (default).
+   *
+   * Captures at 1080p and ships three simulcast layers including 1080p,
+   * so LiveKit's selective forwarding can hand each receiver the highest
+   * resolution their downlink + decoder can handle. Combined with
+   * adaptiveStream on the receiver, this is "push the highest possible
+   * while in a call" — clients on a flaky connection downgrade
+   * automatically without blocking everyone else.
    */
   auto: {
     captureResolution: VideoPresets.h1080,
-    simulcastLayers: [VideoPresets.h180, VideoPresets.h360, VideoPresets.h720],
+    simulcastLayers: [VideoPresets.h180, VideoPresets.h540, VideoPresets.h1080],
     videoCodec: 'vp9',
-    screenSharePreset: ScreenSharePresets.h1080fps15,
+    screenSharePreset: ScreenSharePresets.h1080fps30,
     audioDtx: true,
     audioRed: true,
   },
@@ -114,8 +118,13 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, VideoQualityConfi
   },
 };
 
-/** Current video quality preset (can be changed at runtime) */
-let currentQualityPreset: VideoQualityPreset = 'high';
+/** Current video quality preset (can be changed at runtime).
+ *
+ * Default is 'auto' — adaptive simulcast pushing the highest layer the
+ * network sustains. The /api/token response can override this per-room
+ * via its `quality` field; useLiveKit applies it before connect().
+ */
+let currentQualityPreset: VideoQualityPreset = 'auto';
 
 /**
  * Set the video quality preset
@@ -196,14 +205,82 @@ const SESSION_KEY = 'meet_session';
 /**
  * Get or generate a unique device ID
  */
+const TAB_ID_KEY = 'meet_tab_id';
+
+function randomId(len = 7): string {
+  return Math.random().toString(36).substring(2, 2 + len);
+}
+
+// In-memory fallbacks for contexts where web storage throws (third-party
+// iframes with storage access blocked, private windows on some browsers).
+let memoryDeviceId: string | null = null;
+let memoryTabId: string | null = null;
+
+/**
+ * Stable per-browser id. Combined with a per-tab id below so that two
+ * windows on the same device — or two users on one shared machine — never
+ * produce the same LiveKit identity. LiveKit evicts the earlier connection
+ * when a second one joins with an identical identity, which showed up as
+ * "the first person gets disconnected when the second joins".
+ */
 export function getDeviceId(): string {
-  let deviceId = localStorage.getItem(DEVICE_ID_KEY);
-  if (!deviceId) {
-    // Generate a random device ID
-    deviceId = `${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  try {
+    let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+    if (!deviceId) {
+      deviceId = `${Date.now().toString(36)}${randomId(6)}`;
+      localStorage.setItem(DEVICE_ID_KEY, deviceId);
+    }
+    return deviceId;
+  } catch {
+    if (!memoryDeviceId) memoryDeviceId = `${Date.now().toString(36)}${randomId(6)}`;
+    return memoryDeviceId;
   }
-  return deviceId;
+}
+
+/**
+ * Per-tab id. sessionStorage is scoped to the tab, so a refresh keeps the
+ * same identity (LiveKit then replaces the stale connection immediately)
+ * while a second window gets a new one.
+ */
+export function getTabId(): string {
+  try {
+    let tabId = sessionStorage.getItem(TAB_ID_KEY);
+    if (!tabId) {
+      tabId = randomId(6);
+      sessionStorage.setItem(TAB_ID_KEY, tabId);
+    }
+    return tabId;
+  } catch {
+    if (!memoryTabId) memoryTabId = randomId(6);
+    return memoryTabId;
+  }
+}
+
+/** Sent to /api/token as deviceId: device + tab, unique per open window. */
+export function getParticipantDeviceKey(): string {
+  return `${getDeviceId()}-${getTabId()}`.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 30);
+}
+
+const DISPLAY_NAME_KEY = 'meet_display_name';
+
+/** Last display name this browser joined with (best effort). */
+export function getRememberedDisplayName(): string {
+  try {
+    return localStorage.getItem(DISPLAY_NAME_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function rememberDisplayName(name: string): void {
+  try {
+    if (name.trim()) localStorage.setItem(DISPLAY_NAME_KEY, name.trim());
+  } catch { /* ignore */ }
+}
+
+/** "Guest 4821" — used by embed mode when nobody supplied a name. */
+export function generateGuestName(): string {
+  return `Guest ${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
 /**
@@ -265,6 +342,18 @@ export interface TokenResponse {
   participantName: string;
   participantIdentity: string;
   isHost: boolean;
+  /**
+   * Video quality preset chosen by the server for this participant.
+   * Per-room metadata wins over the platform default. Apply with
+   * setVideoQualityPreset() before connecting.
+   */
+  quality?: VideoQualityPreset;
+  /**
+   * Server-issued TURN/STUN servers. Pass to Room.connect's rtcConfig
+   * so the browser uses them in ICE gathering. Only present when TURN
+   * is configured server-side.
+   */
+  iceServers?: RTCIceServer[];
 }
 
 export interface RoomCodeResponse {
@@ -276,12 +365,13 @@ export interface RoomCodeResponse {
  * Uses deviceId for unique identity while keeping displayName for the visible name
  */
 export async function getToken(roomName: string, participantName: string): Promise<TokenResponse> {
-  const deviceId = getDeviceId();
+  const deviceId = getParticipantDeviceKey();
 
   const response = await fetch(`${API_URL}/api/token`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...participantAuthHeader(),
     },
     body: JSON.stringify({
       roomName,
@@ -290,6 +380,7 @@ export async function getToken(roomName: string, participantName: string): Promi
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get token' }));
     throw new Error(error.error || 'Failed to get token');
@@ -302,8 +393,9 @@ export async function getToken(roomName: string, participantName: string): Promi
  * Generate a random room code
  */
 export async function generateRoomCode(): Promise<string> {
-  const response = await fetch(`${API_URL}/api/room-code`);
+  const response = await fetch(`${API_URL}/api/room-code`, { headers: participantAuthHeader() });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Fallback to client-side generation
     const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -375,6 +467,13 @@ export function createRoom(qualityPreset?: VideoQualityPreset): Room {
   };
 
   const roomOptions: RoomOptions = {
+    // Don't let livekit-client hang up on 'pagehide' / 'beforeunload'. A
+    // host page that hides, minimizes, or moves an embedded MEET iframe
+    // can fire pagehide without actually unloading the page, and the
+    // client would report it as a deliberate leave. When the page really
+    // goes away the server times the participant out on its own; a
+    // graceful leave on real unload is handled in useLiveKit.
+    disconnectOnPageLeave: false,
     // Adaptive streaming automatically adjusts quality based on network
     adaptiveStream: true,
     // Dynacast reduces bandwidth by not publishing to subscribers who aren't watching
@@ -389,8 +488,6 @@ export function createRoom(qualityPreset?: VideoQualityPreset): Room {
       echoCancellation: true,
       noiseSuppression: true,
     },
-    // Reconnection policy
-    disconnectOnPageLeave: true,
   };
 
   return new Room(roomOptions);
@@ -477,10 +574,19 @@ export interface JoinLinkParams {
   name: string | null;
   /** Whether to auto-join when both room and name are provided */
   autojoin: boolean;
+  /** True when `autojoin` was given explicitly in the URL */
+  autojoinExplicit: boolean;
   /** Video quality preset to use */
   quality: VideoQualityPreset | null;
   /** Whether to hide end call buttons (for iframe embeds) */
   hideEndCall: boolean;
+  /**
+   * Embed mode: skip the create/join configuration screen and go straight
+   * into the room (prompting only for a name if none was supplied).
+   * True when `embed=1` is in the URL, or when the page is inside an
+   * iframe and `embed` is not explicitly `0`/`false`.
+   */
+  embed: boolean;
 }
 
 /**
@@ -505,6 +611,10 @@ export interface JoinLinkOptions {
  * - `?room=ABCDEF&name=John` - Pre-fill both, prompt to join
  * - `?room=ABCDEF&name=John&autojoin=true` - Auto-join immediately
  * - `?room=ABCDEF&name=John&quality=max` - Join with specific quality
+ * - `?room=ABCDEF&embed=1` - Embed mode: joins automatically with `name`,
+ *   the last name used in this browser, or a generated guest name; add
+ *   `autojoin=false` to show a name prompt instead (implied automatically
+ *   inside an iframe)
  *
  * @returns Parsed join link parameters
  *
@@ -525,6 +635,7 @@ export function parseJoinLink(): JoinLinkParams {
   const autojoinParam = urlParams.get('autojoin');
   const qualityParam = urlParams.get('quality');
   const hideEndCallParam = urlParams.get('hideEndCall');
+  const embedParam = urlParams.get('embed');
 
   // Parse autojoin - defaults to true if name is provided
   let autojoin = name !== null;
@@ -541,13 +652,34 @@ export function parseJoinLink(): JoinLinkParams {
   // Parse hideEndCall - for iframe embeds that manage their own call lifecycle
   const hideEndCall = hideEndCallParam === 'true' || hideEndCallParam === '1';
 
+  // Embed mode: explicit param wins; otherwise being framed implies it.
+  let embed = isFramed();
+  if (embedParam !== null) {
+    embed = embedParam === 'true' || embedParam === '1';
+  }
+
   return {
     room: room ? parseRoomCode(room) : null,
     name: name ? name.slice(0, 50) : null,
     autojoin,
+    autojoinExplicit: autojoinParam !== null,
     quality,
     hideEndCall,
+    embed,
   };
+}
+
+/**
+ * True when the SPA is running inside an iframe. Cross-origin parents
+ * throw on `window.top` access; treat that as framed too.
+ */
+export function isFramed(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -643,6 +775,8 @@ export function hasJoinLinkParams(): boolean {
  */
 export interface PublicStatusResponse {
   publicAccessEnabled: boolean;
+  /** Participants must sign in with a directory (LDAP) account first */
+  ldapRequired?: boolean;
   version: string;
 }
 
@@ -653,6 +787,7 @@ export interface PublicStatusResponse {
 export async function getPublicStatus(): Promise<PublicStatusResponse> {
   const response = await fetch(`${API_URL}/api/status`);
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     // Default to enabled if we can't reach the status endpoint
     return { publicAccessEnabled: true, version: '1.0.0' };
@@ -676,6 +811,7 @@ export async function endMeetingForAll(roomName: string, participantIdentity: st
     }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to end meeting' }));
     throw new Error(error.error || 'Failed to end meeting');
@@ -726,6 +862,141 @@ export interface AdminLoginResponse {
   expiresAt: string;
   isFirstLogin?: boolean;
   username?: string;
+  /** Directory display name (LDAP admins) */
+  displayName?: string;
+  /** 'local' or 'ldap:<dn>' */
+  principal?: string;
+}
+
+/**
+ * Treat 401 responses on any admin endpoint as "your session is gone";
+ * fire a window event so AdminPanel.tsx can clear local auth and bounce
+ * the user back to the login form. Without this, a server restart that
+ * dropped sessions left the SPA showing the admin shell with every
+ * sub-request 401-ing in the network tab.
+ */
+function notifyUnauthorizedIfNeeded(response: Response): void {
+  if (response.status === 401 && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('admin:unauthorized'));
+  }
+}
+
+// ─────────────────────────────── passkey ──────────────────────────────
+
+export interface PasskeyStatus {
+  configured: boolean;
+  registeredCount: number;
+}
+
+export interface PasskeyCredentialInfo {
+  id: string;
+  label: string;
+  transports: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export async function getPasskeyStatus(): Promise<PasskeyStatus> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/status`);
+  if (!response.ok) return { configured: false, registeredCount: 0 };
+  return response.json();
+}
+
+/**
+ * Register a passkey. Caller must already be authenticated (we use the
+ * existing session token). Throws on failure with a human-readable message.
+ */
+export async function registerPasskey(token: string, label: string): Promise<{ id: string; label: string }> {
+  // Lazy-import the browser SDK so it isn't pulled into the main bundle
+  // for non-admin users.
+  const { startRegistration } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/register/options`, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(optsRes);
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'Failed to start passkey registration' }));
+    throw new Error(err.error || 'Failed to start passkey registration');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  // Browser prompts the user; throws if they cancel or no authenticator.
+  const attestation = await startRegistration({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/register/verify`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ticket, label, response: attestation }),
+  });
+  notifyUnauthorizedIfNeeded(verifyRes);
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey registration failed' }));
+    throw new Error(err.error || 'Passkey registration failed');
+  }
+  return verifyRes.json();
+}
+
+/**
+ * Sign in with a passkey. Returns the same shape as adminLogin so callers
+ * can drop the result into adminStore.setAuth().
+ */
+export async function signInWithPasskey(): Promise<AdminLoginResponse> {
+  const { startAuthentication } = await import('@simplewebauthn/browser');
+
+  const optsRes = await fetch(`${API_URL}/api/admin/webauthn/auth/options`, { method: 'POST' });
+  if (!optsRes.ok) {
+    const err = await optsRes.json().catch(() => ({ error: 'No passkeys registered' }));
+    throw new Error(err.error || 'No passkeys registered');
+  }
+  const { ticket, options } = await optsRes.json();
+
+  const assertion = await startAuthentication({ optionsJSON: options });
+
+  const verifyRes = await fetch(`${API_URL}/api/admin/webauthn/auth/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, response: assertion }),
+  });
+  if (!verifyRes.ok) {
+    const err = await verifyRes.json().catch(() => ({ error: 'Passkey sign-in failed' }));
+    throw new Error(err.error || 'Passkey sign-in failed');
+  }
+  return verifyRes.json();
+}
+
+export async function listRegisteredPasskeys(token: string): Promise<PasskeyCredentialInfo[]> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials`, {
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error('Failed to list passkeys');
+  const body = await response.json();
+  return body.credentials;
+}
+
+export async function deleteRegisteredPasskey(token: string, id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/admin/webauthn/credentials/${id}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ error: 'Failed to delete passkey' }));
+    throw new Error(err.error || 'Failed to delete passkey');
+  }
+}
+
+/**
+ * Whether the current browser supports WebAuthn at all. Use this to hide
+ * passkey UI on platforms that can't deliver it.
+ */
+export function browserSupportsPasskeys(): boolean {
+  return typeof window !== 'undefined' && !!window.PublicKeyCredential;
 }
 
 /**
@@ -740,6 +1011,7 @@ export async function adminLogin(username: string, password: string): Promise<Ad
     body: JSON.stringify({ username, password }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Login failed' }));
     throw new Error(error.error || 'Login failed');
@@ -779,6 +1051,7 @@ export async function getServerStats(token: string): Promise<ServerStats> {
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get stats' }));
     throw new Error(error.error || 'Failed to get stats');
@@ -805,6 +1078,7 @@ export async function listRooms(token: string): Promise<{ rooms: RoomInfo[]; tot
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list rooms' }));
     throw new Error(error.error || 'Failed to list rooms');
@@ -830,6 +1104,7 @@ export async function updateRoomDisplayName(
     body: JSON.stringify({ displayName }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update room' }));
     throw new Error(error.error || 'Failed to update room');
@@ -866,6 +1141,7 @@ export async function listApiKeys(token: string): Promise<{ apiKeys: ApiKeyInfo[
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list API keys' }));
     throw new Error(error.error || 'Failed to list API keys');
@@ -891,6 +1167,7 @@ export async function createApiKey(
     body: JSON.stringify({ name, permissions }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create API key' }));
     throw new Error(error.error || 'Failed to create API key');
@@ -910,6 +1187,7 @@ export async function revokeApiKey(token: string, keyId: string): Promise<void> 
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to revoke API key' }));
     throw new Error(error.error || 'Failed to revoke API key');
@@ -954,6 +1232,7 @@ export async function listWebhooks(token: string): Promise<{ webhooks: WebhookIn
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to list webhooks' }));
     throw new Error(error.error || 'Failed to list webhooks');
@@ -981,6 +1260,7 @@ export async function createWebhook(
     body: JSON.stringify({ name, url, events, enabled }),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create webhook' }));
     throw new Error(error.error || 'Failed to create webhook');
@@ -1006,6 +1286,7 @@ export async function updateWebhook(
     body: JSON.stringify(updates),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update webhook' }));
     throw new Error(error.error || 'Failed to update webhook');
@@ -1025,6 +1306,7 @@ export async function deleteWebhook(token: string, webhookId: string): Promise<v
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to delete webhook' }));
     throw new Error(error.error || 'Failed to delete webhook');
@@ -1049,6 +1331,7 @@ export async function testWebhook(token: string, webhookId: string): Promise<Web
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to test webhook' }));
     throw new Error(error.error || 'Failed to test webhook');
@@ -1063,6 +1346,7 @@ export interface ServerSettings {
   maxParticipantsPerMeeting: number;
   maxConcurrentMeetings: number;
   iframeAllowedDomains: string[];
+  defaultVideoQuality: VideoQualityPreset;
 }
 
 export interface ServerSettingsResponse {
@@ -1071,6 +1355,7 @@ export interface ServerSettingsResponse {
     maxParticipantsPerMeeting: number;
     maxConcurrentMeetings: number;
   };
+  videoQualityOptions: VideoQualityPreset[];
 }
 
 /**
@@ -1083,6 +1368,7 @@ export async function getServerSettings(token: string): Promise<ServerSettingsRe
     },
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to get settings' }));
     throw new Error(error.error || 'Failed to get settings');
@@ -1107,6 +1393,7 @@ export async function updateServerSettings(
     body: JSON.stringify(settings),
   });
 
+  notifyUnauthorizedIfNeeded(response);
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to update settings' }));
     throw new Error(error.error || 'Failed to update settings');
@@ -1115,3 +1402,351 @@ export async function updateServerSettings(
   return response.json();
 }
 
+
+// ───────────────────── sign-in methods / email OTP ─────────────────────
+
+export interface AuthMethods {
+  password: boolean;
+  passkey: boolean;
+  otp: boolean;
+  /** Directory (LDAP) admins may sign in with username + password */
+  ldap?: boolean;
+  /** False when a directory admin has switched the local account off */
+  localAccountEnabled?: boolean;
+  firstLogin: boolean;
+  /** Masked recipient address, present only when otp is true */
+  otpEmail?: string;
+}
+
+/**
+ * Which credentials the admin account currently accepts. Falls back to
+ * password-only if the API is unreachable so the login form still renders.
+ */
+export async function getAuthMethods(): Promise<AuthMethods> {
+  try {
+    const response = await fetch(`${API_URL}/api/admin/auth/methods`);
+    if (!response.ok) throw new Error('bad status');
+    return response.json();
+  } catch {
+    return { password: true, passkey: false, otp: false, firstLogin: false };
+  }
+}
+
+export interface OtpRequestResponse {
+  success: boolean;
+  ticket: string;
+  expiresAt: string;
+  email: string;
+}
+
+async function readError(response: Response, fallback: string): Promise<string> {
+  const body = await response.json().catch(() => ({}));
+  return (body && typeof body.error === 'string' && body.error) || fallback;
+}
+
+/** Ask the server to email a one-time sign-in code to the admin. */
+export async function requestOtp(): Promise<OtpRequestResponse> {
+  const response = await fetch(`${API_URL}/api/admin/otp/request`, { method: 'POST' });
+  if (!response.ok) throw new Error(await readError(response, 'Could not send a sign-in code'));
+  return response.json();
+}
+
+/** Exchange ticket + code for an admin session. */
+export async function verifyOtp(ticket: string, code: string): Promise<AdminLoginResponse> {
+  const response = await fetch(`${API_URL}/api/admin/otp/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ticket, code }),
+  });
+  if (!response.ok) throw new Error(await readError(response, 'Sign-in failed'));
+  return response.json();
+}
+
+// ───────────────────────── SMTP configuration ──────────────────────────
+
+export interface SmtpSettingsView {
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  hasPassword: boolean;
+  fromAddress: string;
+  adminEmail: string;
+  verified: boolean;
+  verifiedAt: string | null;
+}
+
+export interface SmtpStatus {
+  configured: boolean;
+  verified: boolean;
+  passwordLoginEnabled: boolean;
+  settings: SmtpSettingsView | null;
+}
+
+export interface SmtpUpdate {
+  host?: string;
+  port?: number;
+  secure?: boolean;
+  username?: string;
+  /** Omit or '' keeps the stored password */
+  password?: string;
+  fromAddress?: string;
+  adminEmail?: string;
+}
+
+function authHeaders(token: string, json = false): Record<string, string> {
+  return {
+    'Authorization': `Bearer ${token}`,
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
+  };
+}
+
+export async function getSmtpSettings(token: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, { headers: authHeaders(token) });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to load SMTP settings'));
+  return response.json();
+}
+
+export async function updateSmtpSettings(token: string, update: SmtpUpdate): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, {
+    method: 'PUT',
+    headers: authHeaders(token, true),
+    body: JSON.stringify(update),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to save SMTP settings'));
+  return response.json();
+}
+
+export async function deleteSmtpSettings(token: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp`, {
+    method: 'DELETE',
+    headers: authHeaders(token),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to remove SMTP settings'));
+  return response.json();
+}
+
+/** Send a test code using the saved settings. */
+export async function sendSmtpTest(token: string): Promise<OtpRequestResponse> {
+  const response = await fetch(`${API_URL}/api/admin/smtp/test`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Could not send test email'));
+  return response.json();
+}
+
+/** Confirm the test code — marks SMTP verified and disables password login. */
+export async function verifySmtpTest(token: string, ticket: string, code: string): Promise<SmtpStatus> {
+  const response = await fetch(`${API_URL}/api/admin/smtp/test/verify`, {
+    method: 'POST',
+    headers: authHeaders(token, true),
+    body: JSON.stringify({ ticket, code }),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Incorrect code'));
+  return response.json();
+}
+
+
+// ───────────────────── participant directory sign-in ───────────────────
+//
+// Used only when the server reports ldapRequired: the participant signs
+// in against the directory, we keep the session in localStorage and send
+// it as Bearer on /api/token and /api/room-code.
+
+const PARTICIPANT_SESSION_KEY = 'meet-participant-session';
+
+export interface ParticipantSession {
+  token: string;
+  expiresAt: string;
+  username: string;
+  displayName: string;
+}
+
+export function getParticipantSession(): ParticipantSession | null {
+  try {
+    const raw = localStorage.getItem(PARTICIPANT_SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw) as ParticipantSession;
+    if (!s.token || !s.expiresAt || new Date(s.expiresAt) <= new Date()) {
+      localStorage.removeItem(PARTICIPANT_SESSION_KEY);
+      return null;
+    }
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+export function clearParticipantSession(): void {
+  try { localStorage.removeItem(PARTICIPANT_SESSION_KEY); } catch { /* ignore */ }
+}
+
+function participantAuthHeader(): Record<string, string> {
+  const s = getParticipantSession();
+  return s ? { 'Authorization': `Bearer ${s.token}` } : {};
+}
+
+export async function ldapParticipantLogin(username: string, password: string): Promise<ParticipantSession> {
+  const response = await fetch(`${API_URL}/api/auth/ldap/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) throw new Error(await readError(response, 'Sign-in failed'));
+  const body = await response.json();
+  const session: ParticipantSession = {
+    token: body.token, expiresAt: body.expiresAt, username: body.username, displayName: body.displayName,
+  };
+  try { localStorage.setItem(PARTICIPANT_SESSION_KEY, JSON.stringify(session)); } catch { /* ignore */ }
+  return session;
+}
+
+/** Validate the stored participant session against the server. */
+export async function checkParticipantSession(): Promise<ParticipantSession | null> {
+  const s = getParticipantSession();
+  if (!s) return null;
+  try {
+    const response = await fetch(`${API_URL}/api/auth/me`, { headers: { 'Authorization': `Bearer ${s.token}` } });
+    if (response.status === 401) {
+      clearParticipantSession();
+      return null;
+    }
+    return s;
+  } catch {
+    // Network trouble: keep the session and let /api/token decide.
+    return s;
+  }
+}
+
+export async function ldapParticipantLogout(): Promise<void> {
+  const s = getParticipantSession();
+  clearParticipantSession();
+  if (!s) return;
+  try {
+    await fetch(`${API_URL}/api/auth/logout`, { method: 'POST', headers: { 'Authorization': `Bearer ${s.token}` } });
+  } catch { /* ignore */ }
+}
+
+// ───────────────────────── directory (LDAP) admin ──────────────────────
+
+export interface LdapSettingsView {
+  enabled: boolean;
+  url: string;
+  startTls: boolean;
+  tlsRejectUnauthorized: boolean;
+  caCert: string;
+  bindDn: string;
+  hasBindPassword: boolean;
+  baseDn: string;
+  userFilter: string;
+  searchFilter: string;
+  usernameAttribute: string;
+  displayNameAttribute: string;
+  emailAttribute: string;
+  timeoutMs: number;
+  requireForFrontend: boolean;
+  adminsEnabled: boolean;
+}
+
+export interface LdapStatus {
+  configured: boolean;
+  active: boolean;
+  adminsActive: boolean;
+  requiredForFrontend: boolean;
+  localAccountEnabled: boolean;
+  ldapAdminCount: number;
+  settings: LdapSettingsView;
+}
+
+export type LdapUpdate = Partial<Omit<LdapSettingsView, 'hasBindPassword'>> & { bindPassword?: string };
+
+export interface LdapUserResult {
+  dn: string;
+  username: string;
+  displayName: string;
+  email: string;
+  isAdmin: boolean;
+}
+
+export interface LdapAdminInfo {
+  id: string;
+  dn: string;
+  username: string;
+  displayName: string;
+  email: string;
+  addedBy: string;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+async function adminJson<T>(token: string, path: string, init: RequestInit = {}, fallback = 'Request failed'): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    headers: { ...authHeaders(token, !!init.body), ...(init.headers || {}) },
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, fallback));
+  return response.json();
+}
+
+export const getLdapSettings = (token: string) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', {}, 'Failed to load LDAP settings');
+export const updateLdapSettings = (token: string, update: LdapUpdate) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', { method: 'PUT', body: JSON.stringify(update) }, 'Failed to save LDAP settings');
+export const deleteLdapSettings = (token: string) =>
+  adminJson<LdapStatus>(token, '/api/admin/ldap', { method: 'DELETE' }, 'Failed to remove LDAP settings');
+export const testLdap = (token: string) =>
+  adminJson<{ ok: boolean; message: string; matchedUsers: number }>(token, '/api/admin/ldap/test', { method: 'POST' }, 'LDAP test failed');
+export const searchLdapUsers = (token: string, q: string) =>
+  adminJson<{ users: LdapUserResult[] }>(token, `/api/admin/ldap/search?q=${encodeURIComponent(q)}`, {}, 'Directory search failed').then((r) => r.users);
+export const listLdapAdmins = (token: string) =>
+  adminJson<{ admins: LdapAdminInfo[] }>(token, '/api/admin/ldap/admins', {}, 'Failed to list LDAP admins').then((r) => r.admins);
+export const addLdapAdmin = (token: string, dn: string) =>
+  adminJson<{ admin: LdapAdminInfo }>(token, '/api/admin/ldap/admins', { method: 'POST', body: JSON.stringify({ dn }) }, 'Failed to add LDAP admin').then((r) => r.admin);
+export const removeLdapAdmin = (token: string, id: string) =>
+  adminJson<{ success: boolean }>(token, `/api/admin/ldap/admins/${encodeURIComponent(id)}`, { method: 'DELETE' }, 'Failed to remove LDAP admin');
+export const disableLocalAccount = (token: string) =>
+  adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/disable', { method: 'POST' }, 'Failed to disable the local account');
+export const enableLocalAccount = (token: string) =>
+  adminJson<{ success: boolean; localAccountEnabled: boolean }>(token, '/api/admin/local-account/enable', { method: 'POST' }, 'Failed to enable the local account');
+
+// ───────────────────────── profile / account ───────────────────────────
+
+export interface AdminProfile {
+  principal: string;
+  kind: 'local' | 'ldap' | 'apikey';
+  username: string;
+  displayName: string;
+  email: string;
+  localAccountEnabled: boolean;
+  passwordLoginEnabled: boolean;
+  passwordManagedByEnv: boolean;
+  passkeyCount: number;
+  smtpVerified: boolean;
+  ldapActive: boolean;
+  ldapAdminsActive: boolean;
+  ldapAdminCount: number;
+  activeSessions: number;
+  // LDAP admins only
+  dn?: string;
+  addedBy?: string;
+  createdAt?: string | null;
+  lastLoginAt?: string | null;
+}
+
+export const getAdminProfile = (token: string) =>
+  adminJson<AdminProfile>(token, '/api/admin/profile', {}, 'Failed to load profile');
+
+export const updateAdminProfile = (token: string, update: { username?: string; currentPassword: string; newPassword?: string }) =>
+  adminJson<{ success: boolean; username: string; changed: { username: boolean; password: boolean } }>(
+    token, '/api/admin/profile', { method: 'PUT', body: JSON.stringify(update) }, 'Failed to update profile',
+  );
+
+export const revokeOtherAdminSessions = (token: string) =>
+  adminJson<{ success: boolean; revoked: number }>(token, '/api/admin/sessions/revoke-others', { method: 'POST' }, 'Failed to sign out other sessions');

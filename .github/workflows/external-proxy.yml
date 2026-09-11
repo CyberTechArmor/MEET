@@ -1,0 +1,108 @@
+name: external-proxy install variant
+
+# Validates the "Behind external reverse proxy (LXC / bare-metal)" install
+# option: compose syntax, image build, services healthy, /health endpoints
+# answer 200 from the host (i.e. on 0.0.0.0).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/external-proxy/**"
+      - "frontend/**"
+      - "api/**"
+      - ".github/workflows/external-proxy.yml"
+  pull_request:
+    paths:
+      - "deploy/external-proxy/**"
+      - "frontend/**"
+      - "api/**"
+      - ".github/workflows/external-proxy.yml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/external-proxy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Seed .env from .env.example
+        run: cp .env.example .env
+
+      # livekit.yaml is gitignored — install.sh / update.sh render it from
+      # livekit.yaml.template using the .env values. Without this step Docker
+      # auto-creates an empty DIRECTORY at the bind-mount source, LiveKit
+      # crash-loops on "config is a directory", and 127.0.0.1:7880 never
+      # answers. Mirror the installer's render here (no TURN, no NAT block).
+      - name: Render livekit.yaml from template (as install.sh does)
+        run: |
+          set -e
+          udp_start=$(grep -E '^LIVEKIT_UDP_PORT_RANGE_START=' .env | cut -d= -f2)
+          udp_end=$(grep -E '^LIVEKIT_UDP_PORT_RANGE_END=' .env | cut -d= -f2)
+          awk -v nat_block="" -v turn_block="" \
+              -v lk_udp_start="${udp_start:-50000}" -v lk_udp_end="${udp_end:-54900}" '
+              {
+                  gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                  gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                  gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
+                  gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
+                  print
+              }' livekit.yaml.template > livekit.yaml
+          test -s livekit.yaml
+          grep -q '^port: 7880' livekit.yaml
+
+      - name: docker compose config (lint compose file)
+        run: docker compose config --quiet
+
+      - name: Build images
+        run: docker compose build
+
+      - name: Bring stack up
+        run: docker compose up -d
+
+      - name: Wait for services to become healthy
+        run: |
+          set -e
+          for i in $(seq 1 60); do
+            # A crash-looping container reports State=restarting/exited and
+            # an empty Health — it must count as NOT healthy, otherwise a
+            # broken service sails through this gate.
+            unhealthy=$(docker compose ps -a --format '{{.Name}} {{.State}} {{.Health}}' \
+              | awk '$2 != "running" || ($3 != "healthy" && $3 != "") {print $1 "(" $2 "/" $3 ")"}')
+            if [ -z "$unhealthy" ]; then
+              echo "All services running and healthy."
+              exit 0
+            fi
+            echo "Waiting on: $unhealthy"
+            sleep 5
+          done
+          echo "Timed out waiting for healthy state."
+          docker compose ps
+          docker compose logs --tail 200
+          exit 1
+
+      - name: /health on every externally-routed port answers from 0.0.0.0
+        run: |
+          set -e
+          # Frontend (nginx returns "OK" at /health).
+          curl -fsS http://127.0.0.1:3000/health
+          # API (Express returns JSON at /health).
+          curl -fsS http://127.0.0.1:8080/health | grep -q '"status":"ok"'
+          # LiveKit (HTTP root on the signaling port returns "OK").
+          curl -fsS http://127.0.0.1:7880/
+
+      - name: Confirm no port is bound to 127.0.0.1 only
+        run: |
+          # docker compose ports listing should show 0.0.0.0 (or [::]) for
+          # every published port; loopback-only would be 127.0.0.1:.
+          docker compose ps --format '{{.Name}} {{.Ports}}'
+          if docker compose ps --format '{{.Ports}}' | grep -E '127\.0\.0\.1:'; then
+            echo "ERROR: a service is bound to 127.0.0.1 — defeats the point of this install option."
+            exit 1
+          fi
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

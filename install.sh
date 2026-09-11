@@ -446,13 +446,13 @@ setup_repository() {
     # Check if we're already in the MEET directory with required files
     if [ -f "docker-compose.yml" ] && [ -f "docker-compose.proxy.yml" ] && [ -f "Caddyfile" ]; then
         echo -e "${GREEN}✓${NC} Already in MEET directory"
-        # Pull latest changes if it's a git repo
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
+        # NOTE: we used to remove .env at the repo root here. The
+        # external-proxy mode (option 5) keeps its .env at
+        # deploy/external-proxy/.env which we leave alone — install.sh
+        # is idempotent for it. Removing the root .env stays for the
+        # demo / Caddy / nginx / proxypilot modes whose state is at
+        # the root.
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -461,13 +461,7 @@ setup_repository() {
     if [ -d "$MEET_DIR" ] && [ -f "$MEET_DIR/docker-compose.yml" ]; then
         echo -e "${DIM}Found existing MEET directory, switching to it...${NC}"
         cd "$MEET_DIR"
-        # Pull latest changes
-        if [ -d ".git" ]; then
-            echo -e "${DIM}Pulling latest changes...${NC}"
-            git fetch origin 2>/dev/null || true
-            git pull 2>/dev/null || true
-        fi
-        # Remove any stale .env to ensure fresh config
+        pull_latest_or_warn
         rm -f .env 2>/dev/null || true
         return 0
     fi
@@ -485,6 +479,52 @@ setup_repository() {
         echo "  Please check your internet connection and try again."
         echo "  Or manually clone: git clone $MEET_REPO"
         exit 1
+    fi
+}
+
+# Pull latest with visibility into branch, before/after hash, and
+# behind/ahead. Doesn't fail the install on git errors (the user might
+# have intentionally pinned a branch) — but never silently swallows
+# them either.
+pull_latest_or_warn() {
+    [ -d ".git" ] || return 0
+    local branch before_hash
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+    before_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+    if [ -z "$branch" ]; then
+        echo -e "  ${YELLOW}!${NC} HEAD is detached at ${before_hash} — skipping pull."
+        echo -e "  ${DIM}You'll deploy whatever's at this commit. Run 'git checkout <branch>' first if that's not what you want.${NC}"
+        return 0
+    fi
+
+    echo -e "  ${DIM}branch:  ${branch}${NC}"
+    echo -e "  ${DIM}commit:  ${before_hash}${NC}"
+
+    if ! git fetch origin "$branch" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} git fetch failed (network?) — continuing with local copy."
+        return 0
+    fi
+
+    local behind ahead
+    behind=$(git rev-list --count "HEAD..origin/$branch" 2>/dev/null || echo 0)
+    ahead=$(git rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo 0)
+    if [ "$ahead" -gt 0 ] && [ "$behind" -gt 0 ]; then
+        echo -e "  ${YELLOW}!${NC} Local branch has diverged from origin/$branch ($ahead local, $behind remote)."
+        echo -e "  ${DIM}Skipping pull. Resolve manually if you want the remote commits.${NC}"
+        return 0
+    fi
+    if [ "$behind" -eq 0 ]; then
+        echo -e "  ${GREEN}✓${NC} already up to date"
+        return 0
+    fi
+
+    if git pull --ff-only origin "$branch" >/dev/null 2>&1; then
+        local after_hash
+        after_hash=$(git rev-parse --short HEAD)
+        echo -e "  ${GREEN}✓${NC} pulled $behind commit(s); now at $after_hash"
+    else
+        echo -e "  ${YELLOW}!${NC} pull failed (likely uncommitted changes) — continuing with local copy."
     fi
 }
 
@@ -710,6 +750,236 @@ EOF
 }
 
 # Reverse proxy mode installation
+# ── Existing-certificate support (Caddy mode) ──────────────────────────
+#
+# Lets the Caddy install use a certificate that is already on this server
+# instead of Let's Encrypt — a Cloudflare Origin certificate (required when
+# the DNS record is proxied / orange-cloud, because the ACME HTTP challenge
+# never reaches the origin), a wildcard, or a corporate CA cert.
+#
+# discover_certificates scans the usual places for PEM material. It goes by
+# CONTENT (-----BEGIN CERTIFICATE----- / -----BEGIN ... PRIVATE KEY-----),
+# not by extension, so files someone renamed to .peb, .txt or no extension
+# at all are still found. Set MEET_CERT_SEARCH_PATHS to override the
+# directories, or TLS_CERT_FILE + TLS_KEY_FILE to skip the picker entirely.
+
+CERT_SEARCH_PATHS_DEFAULT="/etc/ssl /etc/nginx /etc/apache2 /etc/httpd /etc/pki /etc/letsencrypt/live /etc/caddy /etc/cloudflare /etc/certs /etc/tls /etc/lego /etc/acme.sh /opt /srv /var/www /root /home"
+
+# Prints "kind|path" per PEM file found. kind = cert | key | both.
+discover_certificates() {
+    local paths="${MEET_CERT_SEARCH_PATHS:-$CERT_SEARCH_PATHS_DEFAULT $HOME $(pwd)}"
+    local f kind
+    # shellcheck disable=SC2086
+    $SUDO find $paths -xdev -maxdepth 6 -type f -size -256k \
+        \( -iname '*.pem' -o -iname '*.peb' -o -iname '*.crt' -o -iname '*.cer' -o -iname '*.cert' \
+           -o -iname '*.key' -o -iname '*.pub' -o -iname '*.txt' -o -iname '*chain*' -o -iname '*priv*' \
+           -o -iname '*cert*' -o -iname '*key*' -o -iname '*cloudflare*' -o -iname '*origin*' \
+           -o -iname '*ssl*' -o -iname '*tls*' -o -iname '*bundle*' \) \
+        -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.cache/*' \
+        -not -path '*/.npm/*' -not -path '/proc/*' -not -path '/sys/*' -not -name '*.pub' 2>/dev/null \
+    | sort -u | while IFS= read -r f; do
+        kind=""
+        if $SUDO grep -aq -- '-----BEGIN CERTIFICATE-----' "$f" 2>/dev/null; then kind="cert"; fi
+        if $SUDO grep -aqE -- '-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----' "$f" 2>/dev/null; then
+            if [ "$kind" = "cert" ]; then kind="both"; else kind="key"; fi
+        fi
+        [ -n "$kind" ] && echo "$kind|$f"
+    done
+}
+
+# Hostnames a certificate is valid for (SANs + CN), one per line.
+cert_names() {
+    {
+        $SUDO openssl x509 -in "$1" -noout -text 2>/dev/null \
+            | grep -A1 'Subject Alternative Name' | tail -n1 | tr ',' '\n' | sed -n 's/.*DNS:[[:space:]]*//p'
+        $SUDO openssl x509 -in "$1" -noout -subject 2>/dev/null | sed -n 's/.*CN *= *\([^,/]*\).*/\1/p'
+    } | sed 's/[[:space:]]//g' | grep . | sort -u
+}
+
+# "example.com, *.example.com · expires Jan 1 2040"
+cert_summary() {
+    local names exp
+    names=$(cert_names "$1" | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    exp=$($SUDO openssl x509 -in "$1" -noout -enddate 2>/dev/null | cut -d= -f2 | awk '{print $1, $2, $4}')
+    echo "${names:-no hostnames} · expires ${exp:-?}"
+}
+
+# 0 if the certificate covers $2 (exact or one-level wildcard).
+cert_covers_domain() {
+    local d="$2" parent="${2#*.}" n
+    while IFS= read -r n; do
+        [ "$n" = "$d" ] && return 0
+        [ "$n" = "*.$parent" ] && return 0
+    done < <(cert_names "$1")
+    return 1
+}
+
+# "RSA 2048" / "EC prime256v1" / "" for a private-key file.
+key_summary() {
+    local txt bits curve
+    txt=$($SUDO openssl pkey -in "$1" -noout -text 2>/dev/null) || return 0
+    bits=$(echo "$txt" | head -n1 | grep -o '[0-9]\+ bit' | head -n1 | cut -d' ' -f1)
+    curve=$(echo "$txt" | sed -n 's/.*NIST CURVE: *//p; s/.*ASN1 OID: *//p' | head -n1)
+    if [ -n "$curve" ]; then echo "EC $curve"; elif [ -n "$bits" ]; then echo "RSA $bits"; fi
+}
+
+# 0 if the key belongs to the certificate (works for RSA and EC).
+cert_key_match() {
+    local a b
+    a=$($SUDO openssl x509 -in "$1" -noout -pubkey 2>/dev/null)
+    b=$($SUDO openssl pkey -in "$2" -pubout 2>/dev/null)
+    [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
+# Interactive picker. $1 = domain. On success sets TLS_CERT_SRC / TLS_KEY_SRC.
+select_existing_certificate() {
+    local domain="$1"
+    local -a certs=() keys=()
+    local line kind path i choice
+
+    # Non-interactive path: both files given up front.
+    if [ -n "${TLS_CERT_FILE:-}" ] && [ -n "${TLS_KEY_FILE:-}" ]; then
+        TLS_CERT_SRC="$TLS_CERT_FILE"; TLS_KEY_SRC="$TLS_KEY_FILE"
+        if ! validate_certificate_pair "$domain"; then return 1; fi
+        return 0
+    fi
+
+    echo ""
+    echo -e "${DIM}  Scanning this server for certificates and private keys (by content, any extension)...${NC}"
+    while IFS= read -r line; do
+        kind="${line%%|*}"; path="${line#*|}"
+        case "$kind" in
+            cert) certs+=("$path") ;;
+            key)  keys+=("$path") ;;
+            both) certs+=("$path"); keys+=("$path") ;;
+        esac
+    done < <(discover_certificates)
+
+    # ── certificate ──
+    echo ""
+    if [ ${#certs[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}No certificate files found in the usual places.${NC}"
+    else
+        echo -e "  ${BOLD}Certificates found:${NC}"
+        i=0
+        for path in "${certs[@]}"; do
+            i=$((i+1))
+            if cert_covers_domain "$path" "$domain"; then
+                echo -e "    ${CYAN}[$i]${NC} $path  ${GREEN}✓ covers $domain${NC}"
+            else
+                echo -e "    ${CYAN}[$i]${NC} $path"
+            fi
+            echo -e "        ${DIM}$(cert_summary "$path")${NC}"
+        done
+    fi
+    echo ""
+    while true; do
+        read -p "  Certificate to use [number or full path]: " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#certs[@]} ]; then
+            TLS_CERT_SRC="${certs[$((choice-1))]}"
+        elif [ -n "$choice" ] && $SUDO test -f "$choice"; then
+            TLS_CERT_SRC="$choice"
+        else
+            echo -e "  ${RED}Not a valid choice.${NC}"; continue
+        fi
+        if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout >/dev/null 2>&1; then
+            echo -e "  ${RED}$TLS_CERT_SRC is not a PEM certificate.${NC}"; continue
+        fi
+        break
+    done
+
+    # ── private key ──
+    TLS_KEY_SRC=""
+    if $SUDO grep -aqE -- '-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----' "$TLS_CERT_SRC" 2>/dev/null; then
+        echo -e "  ${DIM}That file also contains a private key.${NC}"
+        read -p "  Use the key from the same file? [Y/n]: " choice
+        if [[ "${choice:-Y}" =~ ^[Yy]$ ]]; then TLS_KEY_SRC="$TLS_CERT_SRC"; fi
+    fi
+    if [ -z "$TLS_KEY_SRC" ]; then
+        echo ""
+        if [ ${#keys[@]} -eq 0 ]; then
+            echo -e "  ${YELLOW}No private key files found in the usual places.${NC}"
+        else
+            echo -e "  ${BOLD}Private keys found:${NC}"
+            i=0
+            for path in "${keys[@]}"; do
+                i=$((i+1))
+                if cert_key_match "$TLS_CERT_SRC" "$path" 2>/dev/null; then
+                    echo -e "    ${CYAN}[$i]${NC} $path  ${GREEN}✓ matches the certificate${NC}  ${DIM}$(key_summary "$path")${NC}"
+                else
+                    echo -e "    ${CYAN}[$i]${NC} $path  ${DIM}$(key_summary "$path")${NC}"
+                fi
+            done
+        fi
+        echo ""
+        while true; do
+            read -p "  Private key to use [number or full path]: " choice
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#keys[@]} ]; then
+                TLS_KEY_SRC="${keys[$((choice-1))]}"
+            elif [ -n "$choice" ] && $SUDO test -f "$choice"; then
+                TLS_KEY_SRC="$choice"
+            else
+                echo -e "  ${RED}Not a valid choice.${NC}"; continue
+            fi
+            break
+        done
+    fi
+
+    validate_certificate_pair "$domain"
+}
+
+# Checks TLS_CERT_SRC / TLS_KEY_SRC: parse, key matches cert, cert covers
+# the domain (warn only). $1 = domain.
+validate_certificate_pair() {
+    local domain="$1" choice
+    if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ $TLS_CERT_SRC is not a PEM certificate.${NC}"; return 1
+    fi
+    if ! $SUDO openssl pkey -in "$TLS_KEY_SRC" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ $TLS_KEY_SRC is not a readable, unencrypted PEM private key.${NC}"
+        echo -e "  ${DIM}  Encrypted keys aren't supported by Caddy — decrypt first: openssl pkey -in KEY -out KEY.plain${NC}"
+        return 1
+    fi
+    if ! cert_key_match "$TLS_CERT_SRC" "$TLS_KEY_SRC"; then
+        echo -e "  ${RED}✗ That private key does not belong to that certificate.${NC}"
+        echo -e "  ${DIM}  cert public key: $($SUDO openssl x509 -in "$TLS_CERT_SRC" -noout -pubkey 2>/dev/null | sha256sum | cut -c1-16)…${NC}"
+        echo -e "  ${DIM}  key public key:  $($SUDO openssl pkey -in "$TLS_KEY_SRC" -pubout 2>/dev/null | sha256sum | cut -c1-16)…${NC}"
+        return 1
+    fi
+    if ! $SUDO openssl x509 -in "$TLS_CERT_SRC" -noout -checkend 86400 >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}! This certificate is expired or expires within a day.${NC}"
+    fi
+    if ! cert_covers_domain "$TLS_CERT_SRC" "$domain"; then
+        echo -e "  ${YELLOW}! This certificate is for: $(cert_names "$TLS_CERT_SRC" | tr '\n' ' ')${NC}"
+        echo -e "  ${YELLOW}  It does not list $domain — browsers will warn unless a proxy (e.g. Cloudflare) fronts it.${NC}"
+        if [ -t 0 ]; then
+            read -p "  Use it anyway? [y/N]: " choice
+            [[ "$choice" =~ ^[Yy]$ ]] || return 1
+        fi
+    fi
+    echo -e "  ${GREEN}✓${NC} Certificate and key match  ${DIM}($(cert_summary "$TLS_CERT_SRC"))${NC}"
+    return 0
+}
+
+# Copies the chosen pair into ./tls/<domain>.crt + .key (only the PEM
+# blocks — a combined file is split), which docker-compose.proxy.yml
+# mounts into Caddy at /certs. $1 = domain.
+install_existing_certificate() {
+    local domain="$1"
+    mkdir -p tls
+    # All CERTIFICATE blocks (leaf + chain, in file order).
+    $SUDO awk '/-----BEGIN CERTIFICATE-----/{p=1} p{print} /-----END CERTIFICATE-----/{p=0}' "$TLS_CERT_SRC" > "tls/$domain.crt"
+    # The first PRIVATE KEY block.
+    $SUDO awk '/-----BEGIN (RSA |EC |ENCRYPTED )?PRIVATE KEY-----/{p=1} p{print} /-----END (RSA |EC |ENCRYPTED )?PRIVATE KEY-----/{if(p){exit}}' "$TLS_KEY_SRC" > "tls/$domain.key"
+    chmod 644 "tls/$domain.crt"
+    chmod 600 "tls/$domain.key"
+    if ! openssl x509 -in "tls/$domain.crt" -noout >/dev/null 2>&1 || ! openssl pkey -in "tls/$domain.key" -noout >/dev/null 2>&1; then
+        echo -e "  ${RED}✗ Could not copy the certificate into ./tls (permissions?).${NC}"; return 1
+    fi
+    echo -e "  ${GREEN}✓${NC} Installed to tls/$domain.crt and tls/$domain.key ${DIM}(gitignored; mounted into Caddy at /certs)${NC}"
+}
+# ── end existing-certificate support ───────────────────────────────────
+
 install_with_proxy() {
     echo -e "${BOLD}Starting MEET with Reverse Proxy (Caddy)...${NC}"
     echo ""
@@ -726,6 +996,8 @@ install_with_proxy() {
     # Detect if input is an IP address
     tls_mode=""
     acme_email="admin@example.com"
+    tls_cert_dir="./tls"
+    tls_own_cert=""
 
     if [ "$domain" = "localhost" ]; then
         # Localhost - no TLS needed
@@ -738,14 +1010,43 @@ install_with_proxy() {
         echo "  For trusted SSL, use a domain name instead."
         tls_mode="tls internal"
     else
-        # Domain name - use Let's Encrypt
+        # Domain name — Let's Encrypt, or a certificate already on the box.
         echo ""
-        echo "  Enter your email for Let's Encrypt SSL certificate notifications."
+        echo -e "  ${BOLD}TLS certificate for $domain${NC}"
+        echo -e "    ${CYAN}[1]${NC} Let's Encrypt — automatic. The domain must resolve straight to this"
+        echo -e "        server on port 80/443. ${YELLOW}Does not work behind the Cloudflare proxy"
+        echo -e "        (orange cloud)${NC} — the challenge never reaches the origin. Pick 2 there."
+        echo -e "    ${CYAN}[2]${NC} Use a certificate already on this server — Cloudflare Origin cert,"
+        echo -e "        wildcard, corporate CA. The installer finds them and you pick."
         echo ""
-        read -p "  Email: " acme_email
-        if [ -z "$acme_email" ]; then
-            echo -e "${RED}  Email is required for SSL certificates.${NC}"
-            exit 1
+        local tls_choice="1"
+        if [ -n "${TLS_CERT_FILE:-}" ] && [ -n "${TLS_KEY_FILE:-}" ]; then
+            tls_choice="2"
+            echo -e "  ${DIM}TLS_CERT_FILE / TLS_KEY_FILE set — using that certificate.${NC}"
+        else
+            read -p "  Choice [1]: " tls_choice
+            tls_choice=${tls_choice:-1}
+        fi
+        if [ "$tls_choice" = "2" ]; then
+            if ! command -v openssl >/dev/null 2>&1; then
+                echo -e "${RED}  openssl is required to inspect certificates. Install it and re-run.${NC}"
+                exit 1
+            fi
+            if ! select_existing_certificate "$domain" || ! install_existing_certificate "$domain"; then
+                echo -e "${RED}  Could not set up the certificate. Nothing was started.${NC}"
+                exit 1
+            fi
+            tls_mode="tls /certs/$domain.crt /certs/$domain.key"
+            tls_own_cert="1"
+        else
+            echo ""
+            echo "  Enter your email for Let's Encrypt SSL certificate notifications."
+            echo ""
+            read -p "  Email: " acme_email
+            if [ -z "$acme_email" ]; then
+                echo -e "${RED}  Email is required for SSL certificates.${NC}"
+                exit 1
+            fi
         fi
     fi
 
@@ -788,7 +1089,11 @@ install_with_proxy() {
     cat > .env << EOF
 MEET_DOMAIN=$domain
 ACME_EMAIL=$acme_email
+# Caddy tls directive: empty = Let's Encrypt, "tls internal" = self-signed,
+# "tls /certs/<domain>.crt /certs/<domain>.key" = your own certificate
+# (files live in TLS_CERT_DIR on the host, mounted at /certs in Caddy).
 TLS_MODE=$tls_mode
+TLS_CERT_DIR=$tls_cert_dir
 LIVEKIT_NODE_IP=$livekit_ip
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
@@ -833,8 +1138,15 @@ EOF
             echo -e "    → ${CYAN}https://$domain${NC}"
             echo ""
             echo -e "  ${BOLD}SSL/TLS:${NC}"
-            echo "    Caddy will automatically obtain Let's Encrypt certificates"
-            echo "    Ensure your domain points to this server's IP address"
+            if [ -n "$tls_own_cert" ]; then
+                echo "    Using your certificate: tls/$domain.crt + tls/$domain.key"
+                echo "    To rotate it, replace those two files and run:"
+                echo -e "      ${YELLOW}docker compose -f docker-compose.proxy.yml restart caddy${NC}"
+                echo "    Behind Cloudflare: set SSL/TLS mode to 'Full (strict)' (Origin cert) or 'Full'."
+            else
+                echo "    Caddy will automatically obtain Let's Encrypt certificates"
+                echo "    Ensure your domain points to this server's IP address"
+            fi
         fi
         echo ""
         echo -e "  ${BOLD}Quick start:${NC}"
@@ -1348,6 +1660,656 @@ ENV_FILE
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# External reverse proxy mode (LXC / bare-metal where the host already
+# terminates TLS — e.g. host Caddy fronting an Incus container).
+install_with_external_proxy() {
+    echo ""
+    echo -e "${BOLD}Behind external reverse proxy (LXC / bare-metal)${NC}"
+    echo ""
+    echo "  This mode is for hosts that already run a reverse proxy"
+    echo "  (host Caddy, host nginx, NPM, …) as the single TLS edge."
+    echo ""
+    echo "  This stack ships NO TLS, NO ACME, NO bundled proxy."
+    echo "  Every externally-routed port binds on 0.0.0.0 so the"
+    echo "  host proxy can reach it across the bridge."
+    echo ""
+
+    local compose_dir="deploy/external-proxy"
+    if [ ! -f "$compose_dir/docker-compose.yml" ] || [ ! -f "$compose_dir/.env.example" ]; then
+        echo -e "${RED}✗ $compose_dir/docker-compose.yml not found.${NC}"
+        echo "  Are you running install.sh from the repo root?"
+        exit 1
+    fi
+
+    read -p "Public hostname (e.g., meet.example.com): " public_host
+    if [ -z "$public_host" ]; then
+        echo -e "${RED}Public hostname is required.${NC}"
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}URL layout:${NC}"
+    echo -e "  ${CYAN}[1]${NC} Single-domain (one DNS record, path-prefix routing)"
+    echo "      https://$public_host/, /api, /livekit"
+    echo -e "  ${CYAN}[2]${NC} Three-domain (subdomain split)"
+    echo "      meet.$public_host, api.$public_host, livekit.$public_host"
+    echo ""
+    read -p "Enter choice [1]: " layout
+    layout=${layout:-1}
+
+    local public_base_url=""
+    local public_api_url=""
+    local public_livekit_url=""
+    case "$layout" in
+        1)
+            public_base_url="https://$public_host"
+            public_api_url=""
+            public_livekit_url=""
+            ;;
+        2)
+            public_base_url="https://$public_host"
+            public_api_url="https://api.$public_host"
+            public_livekit_url="wss://livekit.$public_host"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Exiting.${NC}"
+            exit 1
+            ;;
+    esac
+
+    # Detect host public IP (used by LiveKit so ICE candidates point at a
+    # routable address, not the container's bridge IP).
+    local public_ip
+    public_ip=$(curl -4 -s --connect-timeout 5 https://ifconfig.me 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://api.ipify.org 2>/dev/null || \
+                curl -4 -s --connect-timeout 5 https://ipecho.net/plain 2>/dev/null || \
+                echo "")
+    if [ -n "$public_ip" ]; then
+        echo -e "${GREEN}✓${NC} Detected host public IP: $public_ip"
+        read -p "Use this for LIVEKIT_NODE_IP? [Y/n]: " accept_ip
+        if [[ "$accept_ip" =~ ^[Nn]$ ]]; then
+            read -p "Enter host's public IPv4: " public_ip
+        fi
+    else
+        read -p "Could not auto-detect. Enter host's public IPv4 (blank = STUN auto-detect): " public_ip
+    fi
+
+    # LiveKit credentials. Single source of truth: the .env file.
+    # On rerun we REUSE existing keys instead of regenerating, otherwise
+    # meet-api and the livekit container drift apart and every /api/rooms
+    # call fails with "Unauthorized: invalid API key" (login still works
+    # because login never touches LiveKit, so the breakage is invisible
+    # until the admin panel opens). The same .env value is mirrored into
+    # LIVEKIT_KEYS so the livekit container loads the matching pair —
+    # don't split key generation across two files.
+    local lk_key=""
+    local lk_secret=""
+    if [ -f "$compose_dir/.env" ]; then
+        lk_key=$(grep -E '^LIVEKIT_API_KEY=' "$compose_dir/.env" 2>/dev/null \
+                 | tail -n1 | cut -d= -f2-)
+        lk_secret=$(grep -E '^LIVEKIT_API_SECRET=' "$compose_dir/.env" 2>/dev/null \
+                    | tail -n1 | cut -d= -f2-)
+    fi
+    local lk_keys_reused=0
+    if [ -n "$lk_key" ] && [ -n "$lk_secret" ]; then
+        lk_keys_reused=1
+        echo -e "${GREEN}✓${NC} Reusing existing LiveKit credentials from $compose_dir/.env"
+    else
+        lk_key="meet_$(openssl rand -hex 6 2>/dev/null || head -c 12 /dev/urandom | xxd -p)"
+        lk_secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)
+    fi
+
+    # TURN config. Reuse the previous .env's values on rerun; only ask the
+    # operator if we're starting fresh. Cellular users need TURN; without
+    # it, calls fail on cellular even when wifi works perfectly.
+    #
+    # We deploy a dedicated coturn container (not LiveKit's built-in TURN).
+    # The cert is bind-mounted live from the host's reverse proxy
+    # (ProxyPilot's Caddy / host certbot / etc.) at TURN_CERT_MOUNT, set
+    # up once on the host via mount-cert.sh. Rotations propagate
+    # automatically; MEET never holds a copy.
+    local turn_enabled="false"
+    local turn_domain=""
+    local turn_username=""
+    local turn_password=""
+    local turn_cert_mount=""
+    if [ -f "$compose_dir/.env" ]; then
+        turn_enabled=$(grep -E '^TURN_ENABLED=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_domain=$(grep -E '^TURN_DOMAIN=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_username=$(grep -E '^TURN_USERNAME=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_password=$(grep -E '^TURN_PASSWORD=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_cert_mount=$(grep -E '^TURN_CERT_MOUNT=' "$compose_dir/.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+        turn_enabled=${turn_enabled:-false}
+    fi
+    if [ "$turn_enabled" != "true" ]; then
+        echo ""
+        echo -e "  ${BOLD}TURN server (cellular / restrictive-network fallback)${NC}"
+        echo "    Cellular carriers use symmetric NAT — WebRTC's STUN-based hole punching"
+        echo "    can't get through. Without TURN, phone-on-cellular calls fail even when"
+        echo "    wifi works. Deploys a dedicated coturn container alongside livekit."
+        echo "    Single-domain (reuse the cert your reverse proxy already serves)"
+        echo "    is the default; runs unattended unless you explicitly opt out."
+        echo ""
+
+        # Default ON. The opt-out exists for the rare operator who really
+        # doesn't want a TURN relay (testing, intranet-only, etc.). For
+        # everyone else, this is the path that makes cellular work.
+        # Non-interactive runs (no TTY) just take the default.
+        local enable_turn="Y"
+        if [ -t 0 ] && [ -t 1 ]; then
+            read -p "  Enable coturn? [Y/n]: " enable_turn
+        else
+            echo "  ${DIM}(non-interactive run — enabling by default)${NC}"
+        fi
+        if [[ ! "$enable_turn" =~ ^[Nn]$ ]]; then
+            turn_enabled="true"
+
+            # Cert mode: single-domain is the default and the single-press
+            # path. Operators who want the dedicated subdomain say so by
+            # answering "2"; everything else takes the default.
+            echo ""
+            echo "  Cert reuse:"
+            echo "    [1] Single-domain — reuse the cert your reverse proxy already serves"
+            echo "        for $public_host. No new DNS record. (recommended, default)"
+            echo "    [2] Dedicated turn.$public_host — separate cert, separate DNS record."
+            echo ""
+            local cert_mode="1"
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  Cert mode [1]: " cert_mode
+                cert_mode=${cert_mode:-1}
+            fi
+            case "$cert_mode" in
+                2)  turn_domain="turn.$public_host" ;;
+                *)  turn_domain="$public_host" ;;
+            esac
+            if [ -t 0 ] && [ -t 1 ]; then
+                read -p "  TURN hostname [$turn_domain]: " turn_domain_in
+                turn_domain="${turn_domain_in:-$turn_domain}"
+            fi
+        else
+            turn_enabled="false"
+        fi
+    fi
+
+    # Generate creds if we don't already have them. Same idempotency rule
+    # as the LiveKit keys: never regenerate if .env already has them, so
+    # already-issued JWTs (with embedded TURN creds) keep working.
+    local turn_cert_file=""
+    local turn_key_file=""
+    if [ "$turn_enabled" = "true" ]; then
+        if [ -z "$turn_username" ]; then
+            turn_username="meet"
+        fi
+        if [ -z "$turn_password" ]; then
+            turn_password=$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | xxd -p)
+        fi
+        # Default mount path matches mount-cert.sh's default. Fall back
+        # to ./tls if the operator hasn't run mount-cert.sh on the host
+        # yet — that path works for the manual-copy fallback.
+        if [ -z "$turn_cert_mount" ]; then
+            if [ -d "/var/meet-tls" ]; then
+                turn_cert_mount="/var/meet-tls"
+            else
+                turn_cert_mount="./tls"
+                mkdir -p "$compose_dir/tls"
+            fi
+        fi
+        # Caddy stores certs as <hostname>.{crt,key}. install.sh fills
+        # these in based on TURN_DOMAIN; coturn reads them via the
+        # rendered turnserver.conf.
+        turn_cert_file="$turn_domain.crt"
+        turn_key_file="$turn_domain.key"
+
+        # Validate cert files. Bind-mount path means the files might be
+        # there already (host's Caddy is writing them); just check.
+        # TURN_CERT_MOUNT can be absolute (e.g. /var/meet-tls) or
+        # relative to the compose dir (e.g. ./tls). Resolve to an
+        # absolute-from-here path so stat() works from this cwd.
+        local _mount_abs
+        case "$turn_cert_mount" in
+            /*) _mount_abs="$turn_cert_mount" ;;
+            *)  _mount_abs="$compose_dir/${turn_cert_mount#./}" ;;
+        esac
+        # Caddy's storage layout typically writes <mount>/<domain>.crt,
+        # but some setups (or future Caddy versions) nest one level
+        # deeper at <mount>/<domain>/<domain>.crt. Probe both. Also
+        # accept a generic fullchain.pem / privkey.pem pair (certbot's
+        # naming) so the same install.sh handles host-certbot mounts
+        # without forcing operators to rename files.
+        local cert_path="$_mount_abs/$turn_cert_file"
+        local key_path="$_mount_abs/$turn_key_file"
+        local turn_uid="0"
+        local turn_gid="0"
+        local cert_layout=""
+        if [ -f "$cert_path" ] && [ -f "$key_path" ]; then
+            cert_layout="flat"
+        elif [ -f "$_mount_abs/$turn_domain/$turn_cert_file" ] \
+          && [ -f "$_mount_abs/$turn_domain/$turn_key_file" ]; then
+            cert_path="$_mount_abs/$turn_domain/$turn_cert_file"
+            key_path="$_mount_abs/$turn_domain/$turn_key_file"
+            turn_cert_file="$turn_domain/$turn_cert_file"
+            turn_key_file="$turn_domain/$turn_key_file"
+            cert_layout="nested"
+        elif [ -f "$_mount_abs/fullchain.pem" ] && [ -f "$_mount_abs/privkey.pem" ]; then
+            cert_path="$_mount_abs/fullchain.pem"
+            key_path="$_mount_abs/privkey.pem"
+            turn_cert_file="fullchain.pem"
+            turn_key_file="privkey.pem"
+            cert_layout="certbot"
+        fi
+
+        if [ ! -d "$_mount_abs" ]; then
+            echo ""
+            echo -e "  ${YELLOW}!${NC} TURN_CERT_MOUNT (${turn_cert_mount}) doesn't exist in this LXC."
+            echo -e "  ${BOLD}If the mount is set up via your Incus host's UI (ProxyPilot, etc.):${NC}"
+            echo -e "    confirm it's active and the LXC can see it. Otherwise run on the host:"
+            echo -e "    ${YELLOW}sudo bash $compose_dir/mount-cert.sh${NC}"
+            echo "  coturn won't start until the cert is reachable; the rest of the stack will be fine."
+        elif [ -z "$cert_layout" ]; then
+            echo ""
+            echo -e "  ${YELLOW}!${NC} Cert files not found under ${turn_cert_mount}/ for ${BOLD}${turn_domain}${NC}."
+            echo -e "  Tried: ${DIM}<mount>/${turn_domain}.{crt,key}, <mount>/${turn_domain}/${turn_domain}.{crt,key}, <mount>/{fullchain,privkey}.pem${NC}"
+            echo ""
+            echo -e "  ${BOLD}What's actually visible to this LXC at ${turn_cert_mount}/:${NC}"
+            if ls -la --color=never "$turn_cert_mount/" 2>&1 | head -8 | sed "s|^|    |"; then :; fi
+            echo ""
+            echo -e "  ${DIM}If the listing is empty or shows EACCES, the bind-mount is set up but"
+            echo -e "  uid mapping in this (unprivileged) LXC blocks reads. Either run the LXC as"
+            echo -e "  privileged, or relax permissions on the host cert dir, or copy the files in.${NC}"
+        else
+            if [ "$cert_layout" = "nested" ]; then
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}/${turn_domain}.{crt,key} (nested layout)"
+            elif [ "$cert_layout" = "certbot" ]; then
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/{fullchain,privkey}.pem (certbot layout)"
+            else
+                echo -e "  ${GREEN}✓${NC} cert files found at ${turn_cert_mount}/${turn_domain}.{crt,key}"
+            fi
+            # Detect the cert's owner uid/gid. Caddy stores certs as
+            # 0600 owned by its own uid; coturn must run as that uid
+            # inside its container or it can't read the cert and the
+            # TLS listener silently doesn't bind. Falls back to 0:0
+            # (root, can read anything) if stat fails for any reason.
+            if [ -n "$cert_path" ] && [ -f "$cert_path" ]; then
+                turn_uid=$(stat -c '%u' "$cert_path" 2>/dev/null || echo "0")
+                turn_gid=$(stat -c '%g' "$cert_path" 2>/dev/null || echo "0")
+            fi
+            if [ "$turn_uid" != "0" ] || [ "$turn_gid" != "0" ]; then
+                echo -e "  ${DIM}cert owned by uid:gid ${turn_uid}:${turn_gid} — coturn will run with that user${NC}"
+            fi
+        fi
+    fi
+
+    cat > "$compose_dir/.env" << ENV_FILE
+# MEET Configuration — External Reverse Proxy Mode
+PUBLIC_BASE_URL=$public_base_url
+PUBLIC_API_URL=$public_api_url
+PUBLIC_LIVEKIT_URL=$public_livekit_url
+
+BIND_HOST=0.0.0.0
+
+MEET_FRONTEND_PORT=3000
+MEET_API_PORT=8080
+MEET_LIVEKIT_WS_PORT=7880
+MEET_LIVEKIT_TCP_PORT=7881
+
+LIVEKIT_UDP_PORT_RANGE_START=50000
+LIVEKIT_UDP_PORT_RANGE_END=54900
+LIVEKIT_NODE_IP=$public_ip
+
+# LiveKit auth — DO NOT EDIT EITHER OF THESE WITHOUT UPDATING LIVEKIT_KEYS BELOW.
+# meet-api reads LIVEKIT_API_KEY/SECRET; livekit reads LIVEKIT_KEYS. The two
+# must agree. Re-running install.sh preserves these values.
+LIVEKIT_API_KEY=$lk_key
+LIVEKIT_API_SECRET=$lk_secret
+LIVEKIT_KEYS="$lk_key: $lk_secret"
+
+# TURN — cellular / symmetric-NAT fallback. Deployed via the coturn
+# service (profile-gated). The turnserver.conf is rendered from
+# turnserver.conf.template using these values; the password is also
+# embedded in /api/token's iceServers field for the browser.
+#
+# TURN_CERT_MOUNT is the path INSIDE the LXC where the host's reverse-
+# proxy cert dir is bind-mounted (run mount-cert.sh on the Incus host).
+# TURN_CERT_FILE / TURN_KEY_FILE are the filenames under that path
+# (Caddy uses <hostname>.{crt,key}).
+TURN_ENABLED=$turn_enabled
+TURN_DOMAIN=$turn_domain
+TURN_USERNAME=$turn_username
+TURN_PASSWORD=$turn_password
+TURN_TLS_PORT=5349
+TURN_UDP_PORT=3478
+TURN_RELAY_RANGE_START=55000
+TURN_RELAY_RANGE_END=60000
+TURN_CERT_MOUNT=$turn_cert_mount
+TURN_CERT_FILE=$turn_cert_file
+TURN_KEY_FILE=$turn_key_file
+# uid/gid that owns the cert files. coturn must run as this uid to read
+# them — otherwise the TLS listener on tcp/5349 silently doesn't bind.
+# Set automatically from `stat` at install/update time; default 0:0 is
+# "run as root" which can read anything.
+TURN_UID=$turn_uid
+TURN_GID=$turn_gid
+ENV_FILE
+    echo -e "${GREEN}✓${NC} Configuration saved to $compose_dir/.env"
+    if [ "$lk_keys_reused" = "1" ]; then
+        echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (reused — meet-api ↔ livekit pair preserved)${NC}"
+    else
+        echo -e "  ${DIM}LiveKit auth: ${lk_key:0:14}…  (newly generated — installed in both meet-api and livekit)${NC}"
+    fi
+
+    # Detect the LXC bridge IP — used by both turnserver.conf (relay-ip)
+    # and livekit.yaml (nat_1_to_1_ips). Same filter as info.sh: skip
+    # docker bridges and similar internal interfaces.
+    local detected_bridge_ip
+    detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                         | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                         | cut -d/ -f1 | head -n1)
+    detected_bridge_ip=${detected_bridge_ip:-127.0.0.1}
+
+    # If a previous `docker compose up` ran before these files were
+    # rendered, Docker auto-created the bind-mount source paths
+    # (turnserver.conf, livekit.yaml) as DIRECTORIES — that's its default
+    # behavior when a bind-mount source doesn't exist. Re-running
+    # install.sh then fails on the awk/sed redirect with "Is a directory".
+    # Detect and remove the empty directories so the renders below can
+    # write real files. We only remove EMPTY directories — if Docker
+    # somehow accumulated content here, the operator should look at it.
+    for _stale in "$compose_dir/livekit.yaml" "$compose_dir/turnserver.conf"; do
+        if [ -d "$_stale" ]; then
+            if rmdir "$_stale" 2>/dev/null; then
+                echo -e "  ${YELLOW}!${NC} Removed empty directory at $_stale (Docker auto-created it before the file existed)"
+            else
+                echo -e "  ${RED}✗${NC} $_stale is a non-empty directory — refusing to clobber."
+                echo -e "    Inspect and remove manually, then re-run install.sh."
+                exit 1
+            fi
+        fi
+    done
+
+    # Render turnserver.conf from the template if TURN is enabled. The
+    # bridge IP gets baked in here so coturn knows which interface to
+    # relay traffic on; if the bridge IP changes, re-run install.sh
+    # (or update.sh, which calls render_turnserver_conf via the same
+    # logic). The rendered file is gitignored.
+    if [ "$turn_enabled" = "true" ]; then
+        sed -e "s|@TURN_UDP_PORT@|3478|g" \
+            -e "s|@TURN_TLS_PORT@|5349|g" \
+            -e "s|@TURN_RELAY_RANGE_START@|55000|g" \
+            -e "s|@TURN_RELAY_RANGE_END@|60000|g" \
+            -e "s|@TURN_DOMAIN@|$turn_domain|g" \
+            -e "s|@TURN_USERNAME@|$turn_username|g" \
+            -e "s|@TURN_PASSWORD@|$turn_password|g" \
+            -e "s|@TURN_CERT_FILE@|$turn_cert_file|g" \
+            -e "s|@TURN_KEY_FILE@|$turn_key_file|g" \
+            -e "s|@BRIDGE_IP@|$detected_bridge_ip|g" \
+            -e "s|@LIVEKIT_NODE_IP@|$public_ip|g" \
+            "$compose_dir/turnserver.conf.template" > "$compose_dir/turnserver.conf"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/turnserver.conf for TURN_DOMAIN=$turn_domain"
+    fi
+
+    # Render livekit.yaml from livekit.yaml.template. Substitute two
+    # placeholders:
+    #
+    # @NAT_1_TO_1_IPS@ — LiveKit's nat_1_to_1_ips config. When the LXC
+    #   bridge IP differs from the public IP (the typical NAT'd-LXC
+    #   case), advertise BOTH so coturn (which is on the bridge) can
+    #   relay to LiveKit's bridge candidate directly without a host
+    #   NAT-loopback. Symptom of needing this: cellular calls connect
+    #   slowly (10s+) or unreliably.
+    #
+    # @TURN_SERVERS_BLOCK@ — LiveKit's rtc.turn_servers list. When TURN
+    #   is enabled, populate so LiveKit advertises coturn to clients via
+    #   the participant join response — a redundant path alongside
+    #   meet-api's /api/token iceServers.
+    if [ -f "$compose_dir/livekit.yaml.template" ]; then
+        local nat_1_to_1_block=""
+        if [ -n "$public_ip" ] && [ -n "$detected_bridge_ip" ] && [ "$public_ip" != "$detected_bridge_ip" ]; then
+            nat_1_to_1_block=$(cat <<NAT_BLOCK
+  nat_1_to_1_ips:
+    - $public_ip
+    - $detected_bridge_ip
+NAT_BLOCK
+)
+        fi
+
+        # Render TWO turn_servers entries: TURN-over-TLS (the cellular-
+        # survivable path) and plain UDP (faster when the network allows
+        # it). The browser tries them in order; LiveKit advertises both
+        # via JoinResponse iceServers so even clients that ignore
+        # /api/token's iceServers get a working relay path.
+        local turn_servers_block=""
+        if [ "$turn_enabled" = "true" ]; then
+            turn_servers_block=$(cat <<TURN_BLOCK
+
+  turn_servers:
+    - host: $turn_domain
+      port: 5349
+      protocol: tls
+      username: $turn_username
+      credential: $turn_password
+    - host: $turn_domain
+      port: 3478
+      protocol: udp
+      username: $turn_username
+      credential: $turn_password
+TURN_BLOCK
+)
+        fi
+        # Use awk to do the substitution because the blocks have newlines
+        # and special chars that would confuse sed.
+        awk -v nat_block="$nat_1_to_1_block" \
+            -v turn_block="$turn_servers_block" \
+            -v lk_udp_start="50000" \
+            -v lk_udp_end="54900" '
+            {
+                gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
+                gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
+                print
+            }
+        ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
+    fi
+
+    echo ""
+    echo "Building and starting Docker containers..."
+    echo "(Using cached layers — set FORCE_REBUILD=1 to rebuild from scratch.)"
+    echo ""
+    local build_args=""
+    if [ "${FORCE_REBUILD:-}" = "1" ]; then
+        build_args="--no-cache"
+    fi
+    # --profile turn includes the coturn service when TURN_ENABLED=true.
+    # Without the profile, compose ignores any service marked profiles:[turn].
+    local compose_profiles=""
+    if [ "$turn_enabled" = "true" ]; then
+        compose_profiles="--profile turn"
+    fi
+    if ! (cd "$compose_dir" && docker compose $compose_profiles build $build_args && docker compose $compose_profiles up -d); then
+        echo -e "${RED}✗ Failed to build or start Docker containers${NC}"
+        echo "  Logs: (cd $compose_dir && docker compose logs)"
+        exit 1
+    fi
+
+    # Verify containers actually came up. `docker compose up -d` exits 0 even
+    # if a container immediately crashes, so the proxy ends up probing ports
+    # that nobody is listening on.
+    echo ""
+    echo "Waiting for containers to become healthy..."
+    local healthy=0
+    for i in $(seq 1 24); do
+        local bad
+        bad=$(cd "$compose_dir" && docker compose ps --format '{{.Service}} {{.State}} {{.Health}}' \
+              | awk '$2 != "running" || ($3 != "" && $3 != "healthy" && $3 != "starting") {print $1}')
+        if [ -z "$bad" ]; then
+            healthy=1
+            break
+        fi
+        sleep 5
+    done
+
+    if [ "$healthy" != "1" ]; then
+        echo -e "${RED}✗ One or more containers are not running / not healthy:${NC}"
+        (cd "$compose_dir" && docker compose ps)
+        echo ""
+        echo "  Last 50 log lines per service:"
+        (cd "$compose_dir" && docker compose logs --tail 50)
+        echo ""
+        echo -e "  ${YELLOW}This is usually one of:${NC}"
+        echo "    • Out-of-memory during build (LXC memory limit too low for"
+        echo "      the Vite build — give the container ≥2 GiB or set a swap)"
+        echo "    • Missing security.nesting=true on the LXC profile"
+        echo "    • Port already in use on the host"
+        exit 1
+    fi
+    echo -e "${GREEN}✓${NC} All containers running"
+
+    # Detect the bridge IP — the address the host reverse proxy must dial.
+    # Filter out Docker's per-network bridges (docker0, br-<hash>, veth*) and
+    # CNI/libvirt/lxcbr scaffolding so we don't return e.g. 172.17.0.1, which
+    # is only reachable from inside the LXC. The Incus host can route to the
+    # LXC's external interface (eth0 → e.g. 10.185.17.131); it cannot route
+    # to docker0 inside the LXC. Same filter as info.sh.
+    local bridge_ip
+    bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
+                | cut -d/ -f1 | head -n1)
+    if [ -z "$bridge_ip" ]; then
+        # Fallback if the filter eliminated everything.
+        bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
+                    | awk '{print $4}' | cut -d/ -f1 | head -n1)
+    fi
+    bridge_ip=${bridge_ip:-<bridge-ip>}
+
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${GREEN}  ✓ MEET is running on this host.${NC}"
+    echo ""
+    echo -e "  ${BOLD}Next: point your existing reverse proxy at this stack.${NC}"
+    echo "  Reference snippets:"
+    if [ "$layout" = "1" ]; then
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/single-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/single-domain.conf${NC}"
+    else
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/three-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/three-domain.conf${NC}"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Port → service map${NC} (give these to your reverse proxy):"
+    echo ""
+    printf "     ${BOLD}%-6s %-26s %s${NC}\n" "PROTO" "UPSTREAM" "SERVICE"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "HTTP"  "$bridge_ip:3000"          "frontend"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "HTTP"  "$bridge_ip:8080"          "meet-api  (/api/*, /ws/*)"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "WS"    "$bridge_ip:7880"          "livekit signaling  (24h timeouts)"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "TCP"   "$bridge_ip:7881"          "livekit TCP fb  (L4, NOT proxied)"
+    printf "     %-6s ${CYAN}%-26s${NC} %s\n" "UDP"   "$bridge_ip:50000-54900"   "livekit RTC media  (L4, NOT proxied)"
+    if [ "$turn_enabled" = "true" ]; then
+        printf "     %-6s ${CYAN}%-26s${NC} %s\n" "UDP"   "$bridge_ip:55000-60000"   "coturn TURN relay  (L4, NOT proxied)"
+    fi
+    echo ""
+    if [ "$layout" = "1" ]; then
+        echo -e "  ${BOLD}Routing for ${CYAN}$public_host${NC}:"
+        echo -e "    https://$public_host/             → ${CYAN}$bridge_ip:3000${NC}"
+        echo -e "    https://$public_host/api/*        → ${CYAN}$bridge_ip:8080${NC}"
+        echo -e "    https://$public_host/ws/*         → ${CYAN}$bridge_ip:8080${NC}  (WS)"
+        echo -e "    https://$public_host/livekit/*    → ${CYAN}$bridge_ip:7880${NC}  (WS, ${BOLD}strip prefix${NC})"
+    else
+        echo -e "  ${BOLD}Routing (three-domain):${NC}"
+        echo -e "    https://$public_host/             → ${CYAN}$bridge_ip:3000${NC}"
+        echo -e "    https://api.$public_host/         → ${CYAN}$bridge_ip:8080${NC}"
+        echo -e "    wss://livekit.$public_host/       → ${CYAN}$bridge_ip:7880${NC}  (24h)"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Smoke-test from the host (should all return 200):${NC}"
+    echo -e "    ${YELLOW}curl -fsSI http://$bridge_ip:3000/health${NC}"
+    echo -e "    ${YELLOW}curl -fsS  http://$bridge_ip:8080/health${NC}"
+    echo -e "    ${YELLOW}curl -fsSI http://$bridge_ip:7880/${NC}"
+    echo ""
+    echo -e "  ${BOLD}Host firewall (internet-facing):${NC}"
+    echo "     tcp/443             (HTTPS via your reverse proxy)"
+    echo "     tcp/7881            (LiveKit RTC TCP fallback)"
+    if [ "$turn_enabled" = "true" ]; then
+        echo "     udp/50000-60000     (LiveKit RTC media + coturn relay — single contiguous range)"
+        echo "     tcp/5349            (TURN-TLS — cellular fallback)"
+        echo "     udp/3478            (TURN — STUN/TURN bind)"
+    else
+        echo "     udp/50000-54900     (LiveKit RTC media)"
+    fi
+    echo ""
+    echo -e "  ${BOLD}LXC users:${NC} the livekit container runs with host networking, so"
+    echo -e "  ports 7880/7881/50000-54900 already bind on ${CYAN}$bridge_ip${NC} (plus"
+    echo -e "  55000-60000 when coturn is enabled, also via host networking)."
+    echo -e "  Open the firewall to the internet pointed at that IP. If your"
+    echo -e "  bridge isn't directly routable from the WAN, forward with:"
+    echo -e "    ${YELLOW}incus config device add <container> rtcudp proxy \\${NC}"
+    echo -e "    ${YELLOW}    listen=udp:0.0.0.0:50000-60000 connect=udp:$bridge_ip:50000-60000${NC}"
+    echo -e "  (note: connect=$bridge_ip, not 127.0.0.1 — livekit isn't on Docker's loopback)"
+    echo ""
+
+    # If TURN was enabled, the cert mount is the one remaining manual
+    # step (we run inside the LXC; mount-cert.sh runs on the Incus host).
+    # Flag it loudly with the exact one-liner so it isn't missed.
+    #
+    # Check for the cert FILES, not just the directory — install.sh
+    # auto-creates ./tls/ as a fallback before the cert is provisioned,
+    # so a directory check is always true and the message never showed.
+    if [ "$turn_enabled" = "true" ]; then
+        local _cert_path="$compose_dir/$turn_cert_mount/$turn_cert_file"
+        # If TURN_CERT_MOUNT is absolute (e.g. /var/meet-tls), use it directly.
+        case "$turn_cert_mount" in
+            /*) _cert_path="$turn_cert_mount/$turn_cert_file" ;;
+        esac
+        if [ ! -f "$_cert_path" ]; then
+            echo -e "  ${BOLD}${YELLOW}━━━ Final step (run on the Incus host, NOT this LXC) ━━━${NC}"
+            echo ""
+            echo "  TURN's TLS cert isn't in place yet — coturn started but will fail TLS"
+            echo "  handshakes until you give it a real cert. One command does it: idempotent,"
+            echo "  auto-discovers ProxyPilot's Caddy / host certbot / host Caddy, then runs"
+            echo "  update.sh in the LXC for you so coturn picks up the new cert."
+            echo ""
+            echo -e "    ${YELLOW}sudo bash <path-to-MEET-on-host>/deploy/external-proxy/mount-cert.sh${NC}"
+            echo ""
+            echo -e "  ${DIM}Don't have the repo on the host? Pull mount-cert.sh out of the LXC:${NC}"
+            echo -e "  ${DIM}    incus file pull <container>/root/MEET/deploy/external-proxy/mount-cert.sh /tmp/mount-cert.sh${NC}"
+            echo -e "  ${DIM}    sudo bash /tmp/mount-cert.sh${NC}"
+            echo ""
+            echo -e "  ${DIM}Looking for $_cert_path inside the LXC.${NC}"
+            echo ""
+        else
+            echo -e "  ${GREEN}✓${NC} TURN cert in place at ${DIM}$_cert_path${NC}"
+            echo ""
+        fi
+    fi
+    if [ "$layout" != "1" ]; then
+        echo -e "  ${YELLOW}!${NC} ${BOLD}Three-domain mode:${NC} the frontend was built with"
+        echo -e "    ${CYAN}PUBLIC_API_URL=$public_api_url${NC}"
+        echo -e "    ${CYAN}PUBLIC_LIVEKIT_URL=$public_livekit_url${NC}"
+        echo -e "    If you change either, rebuild:"
+        echo -e "      ${YELLOW}(cd $compose_dir && docker compose build meet-frontend && docker compose up -d)${NC}"
+        echo ""
+    fi
+    echo -e "  ${BOLD}Reference snippets:${NC}"
+    if [ "$layout" = "1" ]; then
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/single-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/single-domain.conf${NC}"
+    else
+        echo -e "    Caddy: ${YELLOW}$compose_dir/caddy/three-domain.Caddyfile${NC}"
+        echo -e "    nginx: ${YELLOW}$compose_dir/nginx/three-domain.conf${NC}"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Re-print this summary anytime:${NC} ${YELLOW}bash $compose_dir/info.sh${NC}"
+    echo -e "  ${BOLD}Walk-through:${NC} ${CYAN}docs/install/external-reverse-proxy.md${NC}"
+    echo ""
+    echo -e "  ${BOLD}Commands:${NC}"
+    echo -e "    Stop:    ${YELLOW}(cd $compose_dir && docker compose down)${NC}"
+    echo -e "    Logs:    ${YELLOW}(cd $compose_dir && docker compose logs -f)${NC}"
+    echo -e "    Restart: ${YELLOW}(cd $compose_dir && docker compose restart)${NC}"
+    echo ""
+    echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
 # Production mode placeholder
 install_production() {
     echo ""
@@ -1399,7 +2361,11 @@ main() {
     echo "      For servers already running ProxyPilot, NPM, or similar"
     echo "      Uses subdomains (api.*, livekit.*) for each service"
     echo ""
-    echo -e "  ${CYAN}[5]${NC} Production Mode"
+    echo -e "  ${CYAN}[5]${NC} Behind external reverse proxy (LXC / bare-metal)"
+    echo "      Host already runs Caddy/nginx as the TLS edge"
+    echo "      Stack ships NO TLS, binds 0.0.0.0, host proxy reaches it"
+    echo ""
+    echo -e "  ${CYAN}[6]${NC} Production Mode"
     echo "      Full deployment with persistence, auth, etc."
     echo -e "      ${YELLOW}(Coming soon)${NC}"
     echo ""
@@ -1422,6 +2388,9 @@ main() {
             install_with_proxypilot
             ;;
         5)
+            install_with_external_proxy
+            ;;
+        6)
             install_production
             ;;
         *)

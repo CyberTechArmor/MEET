@@ -53,6 +53,32 @@ interface RoomState {
   // Embed mode
   hideEndCall: boolean;
   setHideEndCall: (hide: boolean) => void;
+  // Set once from the join link (`embed=1` or iframe). Deliberately NOT
+  // part of initialState so reset() after leaving a call keeps the SPA in
+  // embed mode with the same room, instead of dropping the host page into
+  // the full create/join configuration screen.
+  embedMode: boolean;
+  embedRoomCode: string;
+  setEmbed: (embedMode: boolean, embedRoomCode: string) => void;
+  // Embed mode joins on its own unless the link says autojoin=false.
+  embedAutoJoin: boolean;
+  setEmbedAutoJoin: (v: boolean) => void;
+  // True while App.tsx is (re)connecting automatically — JoinForm shows a
+  // spinner instead of the name prompt.
+  embedJoining: boolean;
+  setEmbedJoining: (v: boolean) => void;
+  // Why the last room connection ended (livekit DisconnectReason numeric
+  // value), or null if never / cleared. Not part of initialState so it
+  // survives reset() and App.tsx can decide whether to rejoin.
+  lastDisconnectReason: number | null;
+  setLastDisconnectReason: (r: number | null) => void;
+  // Host-controlled layout override via the embed messaging API:
+  // 'auto' follows the window size, 'on'/'off' force compact mode.
+  compactOverride: 'auto' | 'on' | 'off';
+  setCompactOverride: (v: 'auto' | 'on' | 'off') => void;
+  // MEET's own Document Picture-in-Picture window is open.
+  pipOpen: boolean;
+  setPipOpen: (v: boolean) => void;
 
   // Reset state
   reset: () => void;
@@ -111,6 +137,20 @@ export const useRoomStore = create<RoomState>((set) => ({
   setControlsPinned: (controlsPinned) => set({ controlsPinned }),
 
   setHideEndCall: (hideEndCall) => set({ hideEndCall }),
+
+  embedMode: false,
+  embedRoomCode: '',
+  setEmbed: (embedMode, embedRoomCode) => set({ embedMode, embedRoomCode }),
+  embedAutoJoin: true,
+  setEmbedAutoJoin: (embedAutoJoin) => set({ embedAutoJoin }),
+  embedJoining: false,
+  setEmbedJoining: (embedJoining) => set({ embedJoining }),
+  lastDisconnectReason: null,
+  setLastDisconnectReason: (lastDisconnectReason) => set({ lastDisconnectReason }),
+  compactOverride: 'auto',
+  setCompactOverride: (compactOverride) => set({ compactOverride }),
+  pipOpen: false,
+  setPipOpen: (pipOpen) => set({ pipOpen }),
 
   reset: () => set(initialState),
   resetKeepingName: () => set((state) => ({ ...initialState, displayName: state.displayName })),
