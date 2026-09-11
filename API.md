@@ -164,6 +164,10 @@ Inside an iframe, MEET talks to the embedding page over `window.postMessage`
 so the host can follow and drive the call **without touching the iframe's
 DOM**. All payloads are plain JSON with no tokens or credentials.
 
+The same bridge works when you open MEET in its own window or tab with
+`window.open()` instead of framing it: events then go to `window.opener`.
+See [Popup mode](#popup-mode-open-meet-in-its-own-window).
+
 **Events (MEET → host)** — every message has `source: "meet"`:
 
 | `type` | Payload | When |
@@ -181,7 +185,8 @@ DOM**. All payloads are plain JSON with no tokens or credentials.
 | `meet:state` | `state{…}` | Reply to `meet:get-state` |
 | `meet:error` | `command, message` | A command failed |
 
-**Commands (host → MEET)** — `iframe.contentWindow.postMessage({ type, … }, '*')`:
+**Commands (host → MEET)** — `iframe.contentWindow.postMessage({ type, … }, '*')`,
+or `win.postMessage({ type, … }, meetOrigin)` for a window you opened:
 
 | `type` | Fields | Effect |
 |--------|--------|--------|
@@ -227,6 +232,79 @@ closeButton.onclick = () => meet.contentWindow.postMessage({ type: 'meet:leave' 
 - **Desktop (Electron) hosts:** the cleanest PiP is not a DOM change at all —
   resize the BrowserWindow and `win.setAlwaysOnTop(true)`; send
   `meet:compact` `{ mode: 'on' }` so MEET shows only the other person.
+
+### Popup mode (open MEET in its own window)
+
+A host does not have to frame MEET. `window.open()` gives you a call in its
+own window, and the messaging API above works there unchanged — MEET posts
+its events to `window.opener` instead of `window.parent`, and you send
+commands to the window handle.
+
+Two reasons to reach for it:
+
+1. **The full picture-in-picture.** Document Picture-in-Picture — a real
+   always-on-top window, not a floating video — is only allowed from a
+   top-level page. In a popup MEET *is* top-level, so its PiP button opens
+   that window. Inside an iframe the same button falls back to the browser's
+   video picture-in-picture.
+2. **A way through a hostile embedding context.** Framing can be refused by
+   headers, by a sandbox, or by a mobile browser's anti-tracking. A window
+   is first-party: MEET asks for its own camera and microphone, so nothing
+   has to be delegated.
+
+```js
+const MEET_ORIGIN = 'https://meet.example.com';
+
+function openMeetWindow(url) {
+  // Desktop gets a real window; phones and tablets have no popup windows,
+  // so window.open() is a tab there — which is the right answer anyway.
+  const desktop = window.matchMedia('(min-width: 900px) and (pointer: fine)').matches;
+  const win = window.open(url, 'meet-call', desktop ? 'popup,width=980,height=660' : '');
+  win?.focus();                       // a second click re-focuses the same window
+  return win;
+}
+
+callButton.onclick = () => {          // must be inside a user gesture
+  const win = openMeetWindow(`${MEET_ORIGIN}/?room=ABC123&embed=1`);
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== MEET_ORIGIN || e.source !== win) return;
+    if (e.data?.source !== 'meet') return;
+    if (e.data.type === 'meet:joined') startTimer(e.data.joinedAt);
+    if (e.data.type === 'meet:left' && !e.data.willRejoin) endCall();
+  });
+
+  hangUpButton.onclick = () => win.postMessage({ type: 'meet:leave' }, MEET_ORIGIN);
+
+  // A window closed by its own title bar cannot send meet:left — watch for it.
+  const poll = setInterval(() => {
+    if (win.closed) { clearInterval(poll); endCall(); }
+  }, 1000);
+};
+```
+
+Rules that bite if you miss them:
+
+- **Never pass `noopener`** (or `rel="noopener"` on a link). It severs
+  `window.opener`, and with it every event MEET would send you. Cross-origin
+  `opener` only permits `postMessage` — it cannot read your page.
+- **Open it from a click.** A popup without a user gesture is blocked.
+- **Name the window** (`'meet-call'` above) and `focus()` it, so a second
+  click brings the existing call forward instead of starting another.
+- **Pass `embed=1`** so MEET joins straight away instead of showing the
+  create/join screen, and a `name` if you know who this is.
+- **Leave `hideEndCall` off**, or give the person your own way out: in a
+  window there is no host UI around the frame to hang up from. Your own
+  button sends `meet:leave`.
+- **Check `e.source` and `e.origin`** on every message, as above.
+
+| | iframe | popup window (desktop) | tab (mobile) |
+|---|---|---|---|
+| Messaging API | ✅ via `window.parent` | ✅ via `window.opener` | ✅ via `window.opener` |
+| Document PiP (own window) | ❌ top-level only | ✅ Chromium 116+ | ❌ not on mobile browsers |
+| Video PiP (floating video) | ✅ needs `allow="picture-in-picture"` | ✅ | ⚠️ browser-dependent |
+| Camera / mic | delegated by `allow=` | first-party to MEET | first-party to MEET |
+| Your UI around the call | ✅ | ❌ separate window | ❌ separate tab |
 
 ### Your own title bar, timer and invite link
 

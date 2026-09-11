@@ -85,7 +85,10 @@ The installer offers five modes:
 - **Participant Notifications**: Toast notifications when people join/leave
 - **Embed Mode**: Meetings created via the API (or loaded in an iframe) join
   automatically, reconnect on their own, adapt to small windows, and talk to
-  the host page over a postMessage API (events + commands) — see API.md
+  the host page over a postMessage API (events + commands). The same API
+  serves a host that opens MEET in its own window with `window.open()`
+  instead of framing it — where MEET's picture-in-picture button becomes a
+  real always-on-top window — see API.md
 - **Account & Security tab**: Profile (rename, change password, sign out other
   sessions), passkeys, email sign-in and LDAP in one place in the admin panel
 - **Admin Passkeys**: Register any number of devices (Touch ID, Windows Hello,

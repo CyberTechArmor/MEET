@@ -2,7 +2,9 @@
 //
 // When MEET runs inside an iframe, the host page can drive it and follow
 // it WITHOUT touching the iframe's DOM (moving or re-mounting an iframe
-// reloads it, which ends the call and any screen share). Everything goes
+// reloads it, which ends the call and any screen share). The same bridge
+// serves a host that opens MEET in a popup window instead of framing it —
+// there the events go to window.opener. Everything goes
 // over window.postMessage:
 //
 //   host ← MEET   { source: 'meet', type: 'meet:joined', ... }
@@ -53,11 +55,39 @@ export function isFramed(): boolean {
   }
 }
 
-/** Post an event to the embedding page. No-op when not framed. */
-export function postToHost(event: HostEvent): void {
-  if (!isFramed()) return;
+/**
+ * The window driving this one, if any: the embedding page when MEET is in an
+ * iframe, otherwise the page that opened it with window.open().
+ *
+ * A popup is how a host gets MEET's own Document Picture-in-Picture — that
+ * needs a top-level page, so it is unavailable in a frame — and a host that
+ * pops the call out still wants to know when it joined, reconnected or left.
+ * `window.parent` is the window itself outside a frame, so events have to go
+ * to the opener there or they go nowhere at all.
+ */
+export function hostWindow(): Window | null {
   try {
-    window.parent.postMessage({ source: 'meet', ...event }, '*');
+    if (typeof window === 'undefined') return null;
+    if (isFramed()) return window.parent;
+    const opener = window.opener as Window | null;
+    // `closed` is readable cross-origin; a closed opener cannot receive anything.
+    return opener && !opener.closed ? opener : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when some page is driving MEET — embedded in a frame or opened as a popup. */
+export function isHosted(): boolean {
+  return hostWindow() !== null;
+}
+
+/** Post an event to the host page. No-op when nothing is hosting MEET. */
+export function postToHost(event: HostEvent): void {
+  const target = hostWindow();
+  if (!target) return;
+  try {
+    target.postMessage({ source: 'meet', ...event }, '*');
   } catch (e) {
     console.warn('embed bridge: postMessage failed', e);
   }

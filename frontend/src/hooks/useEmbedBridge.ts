@@ -3,7 +3,7 @@ import { ConnectionState, DisconnectReason, Track } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from './useLiveKit';
 import { useDocumentPip } from './useDocumentPip';
-import { isFramed, onHostCommand, postToHost, type LeftReason } from '../lib/embedBridge';
+import { isHosted, onHostCommand, postToHost, type LeftReason } from '../lib/embedBridge';
 
 const APP_VERSION = '1.0.0';
 
@@ -20,31 +20,33 @@ function leftReason(reason: number | null): LeftReason {
 }
 
 /**
- * Mirrors call state to the embedding page and executes its commands.
- * Mounted once in App. Does nothing when MEET is not inside an iframe.
+ * Mirrors call state to the host page and executes its commands.
+ * Mounted once in App. The host is the embedding page when MEET is in an
+ * iframe, or window.opener when a host popped MEET out into its own window;
+ * with neither, this does nothing.
  */
 export function useEmbedBridge(compact: boolean) {
   const { disconnect, endMeeting, toggleMic, toggleCamera, toggleScreenShare } = useLiveKit();
   const pip = useDocumentPip();
   const joinedAtRef = useRef<number | null>(null);
   const prevRef = useRef<{ view?: string; conn?: string; parts?: string; share?: string; media?: string }>({});
-  const framed = isFramed();
+  const hosted = isHosted();
 
   // ── ready ──
   useEffect(() => {
-    if (!framed) return;
+    if (!hosted) return;
     const s = useRoomStore.getState();
     postToHost({ type: 'meet:ready', embed: s.embedMode, room: s.embedRoomCode || s.roomCode || null, version: APP_VERSION });
-  }, [framed]);
+  }, [hosted]);
 
   // ── layout ──
   useEffect(() => {
-    if (framed) postToHost({ type: 'meet:layout', compact });
-  }, [framed, compact]);
+    if (hosted) postToHost({ type: 'meet:layout', compact });
+  }, [hosted, compact]);
 
   // ── state → events ──
   useEffect(() => {
-    if (!framed) return;
+    if (!hosted) return;
     const emit = () => {
       const s = useRoomStore.getState();
       const room = s.roomCode || s.embedRoomCode;
@@ -106,11 +108,11 @@ export function useEmbedBridge(compact: boolean) {
     };
     emit();
     return useRoomStore.subscribe(emit);
-  }, [framed]);
+  }, [hosted]);
 
   // ── commands ──
   useEffect(() => {
-    if (!framed) return;
+    if (!hosted) return;
     return onHostCommand(async (cmd) => {
       const s = useRoomStore.getState();
       const fail = (message: string) => postToHost({ type: 'meet:error', command: cmd.type, message });
@@ -167,7 +169,7 @@ export function useEmbedBridge(compact: boolean) {
         fail(e instanceof Error ? e.message : String(e));
       }
     });
-  }, [framed, compact, disconnect, endMeeting, toggleMic, toggleCamera, toggleScreenShare, pip]);
+  }, [hosted, compact, disconnect, endMeeting, toggleMic, toggleCamera, toggleScreenShare, pip]);
 
   // Keep Track import used for type narrowing in chooseTrack callers.
   void Track;
