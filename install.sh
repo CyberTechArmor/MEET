@@ -1998,7 +1998,7 @@ ENV_FILE
     fi
 
     # Detect the LXC bridge IP — used by both turnserver.conf (relay-ip)
-    # and livekit.yaml (nat_1_to_1_ips). Same filter as info.sh: skip
+    # and livekit.yaml (advertise_internal_ip). Same filter as info.sh: skip
     # docker bridges and similar internal interfaces.
     local detected_bridge_ip
     detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
@@ -2050,11 +2050,13 @@ ENV_FILE
     # Render livekit.yaml from livekit.yaml.template. Substitute two
     # placeholders:
     #
-    # @NAT_1_TO_1_IPS@ — LiveKit's nat_1_to_1_ips config. When the LXC
-    #   bridge IP differs from the public IP (the typical NAT'd-LXC
-    #   case), advertise BOTH so coturn (which is on the bridge) can
-    #   relay to LiveKit's bridge candidate directly without a host
-    #   NAT-loopback. Symptom of needing this: cellular calls connect
+    # @ADVERTISE_INTERNAL_IP@ — LiveKit's rtc.advertise_internal_ip. When
+    #   the LXC bridge IP differs from the public IP (the typical NAT'd-LXC
+    #   case), have LiveKit advertise its bridge address alongside the
+    #   public one so coturn (which is on the bridge) can relay to that
+    #   candidate directly without a host NAT-loopback. (`nat_1_to_1_ips`
+    #   is NOT a LiveKit config key — rendering it makes LiveKit reject the
+    #   whole file and crash-loop.) Symptom of needing this: cellular calls connect
     #   slowly (10s+) or unreliably.
     #
     # @TURN_SERVERS_BLOCK@ — LiveKit's rtc.turn_servers list. When TURN
@@ -2062,14 +2064,9 @@ ENV_FILE
     #   the participant join response — a redundant path alongside
     #   meet-api's /api/token iceServers.
     if [ -f "$compose_dir/livekit.yaml.template" ]; then
-        local nat_1_to_1_block=""
+        local advertise_internal_ip_block=""
         if [ -n "$public_ip" ] && [ -n "$detected_bridge_ip" ] && [ "$public_ip" != "$detected_bridge_ip" ]; then
-            nat_1_to_1_block=$(cat <<NAT_BLOCK
-  nat_1_to_1_ips:
-    - $public_ip
-    - $detected_bridge_ip
-NAT_BLOCK
-)
+            advertise_internal_ip_block="  advertise_internal_ip: true"
         fi
 
         # Render TWO turn_servers entries: TURN-over-TLS (the cellular-
@@ -2097,19 +2094,19 @@ TURN_BLOCK
         fi
         # Use awk to do the substitution because the blocks have newlines
         # and special chars that would confuse sed.
-        awk -v nat_block="$nat_1_to_1_block" \
+        awk -v advertise_block="$advertise_internal_ip_block" \
             -v turn_block="$turn_servers_block" \
             -v lk_udp_start="50000" \
             -v lk_udp_end="54900" '
             {
-                gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                gsub(/@ADVERTISE_INTERNAL_IP@/, advertise_block);
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
                 print
             }
         ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
-        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
+        echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${advertise_internal_ip_block:+ (with advertise_internal_ip)}"
     fi
 
     echo ""

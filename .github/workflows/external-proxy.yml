@@ -35,16 +35,16 @@ jobs:
       # livekit.yaml.template using the .env values. Without this step Docker
       # auto-creates an empty DIRECTORY at the bind-mount source, LiveKit
       # crash-loops on "config is a directory", and 127.0.0.1:7880 never
-      # answers. Mirror the installer's render here (no TURN, no NAT block).
+      # answers. Mirror the installer's render here (no TURN, no advertise_internal_ip).
       - name: Render livekit.yaml from template (as install.sh does)
         run: |
           set -e
           udp_start=$(grep -E '^LIVEKIT_UDP_PORT_RANGE_START=' .env | cut -d= -f2)
           udp_end=$(grep -E '^LIVEKIT_UDP_PORT_RANGE_END=' .env | cut -d= -f2)
-          awk -v nat_block="" -v turn_block="" \
+          awk -v advertise_block="" -v turn_block="" \
               -v lk_udp_start="${udp_start:-50000}" -v lk_udp_end="${udp_end:-54900}" '
               {
-                  gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                  gsub(/@ADVERTISE_INTERNAL_IP@/, advertise_block);
                   gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
                   gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
                   gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
