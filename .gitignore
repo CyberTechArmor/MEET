@@ -40,3 +40,7 @@ coverage/
 *.pem
 *.key
 *.cert
+
+# Certificates copied in by install.sh (Caddy mode, existing certificate)
+/tls/*
+!/tls/.gitkeep

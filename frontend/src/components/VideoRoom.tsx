@@ -6,6 +6,7 @@ import ScreenShareView from './ScreenShareView';
 import ControlBar from './ControlBar';
 import SelfViewPip from './SelfViewPip';
 import { formatRoomCode } from '../lib/livekit';
+import { useCompactLayout } from '../hooks/useCompactLayout';
 
 function VideoRoom() {
   const {
@@ -22,6 +23,11 @@ function VideoRoom() {
 
   // PiP self-view state
   const [isPipMinimized, setIsPipMinimized] = useState(false);
+
+  // Small window (floating PiP window, sidebar, phone): show only the
+  // other person or the shared screen, no self view, no room badge,
+  // small controls.
+  const compact = useCompactLayout();
 
   const hideTimeoutRef = useRef<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -149,7 +155,8 @@ function VideoRoom() {
       className="h-full w-full bg-meet-bg relative overflow-hidden"
       onMouseMove={handleMouseMove}
     >
-      {/* Room Code Badge */}
+      {/* Room Code Badge (hidden in compact windows) */}
+      {!compact && (
       <div
         className={`absolute top-4 left-4 z-20 transition-opacity duration-300 ${
           controlsVisible ? 'opacity-100' : 'opacity-0'
@@ -176,35 +183,47 @@ function VideoRoom() {
           </button>
         </div>
       </div>
+      )}
 
-      {/* Screen Share Indicator */}
+      {/* Screen Share Indicator (just a dot in compact windows) */}
       {screenShareParticipant && (
-        <div className="absolute top-4 right-4 z-20">
-          <div className="bg-meet-success/20 border border-meet-success/50 rounded-lg px-4 py-2 flex items-center gap-2 pulse-glow">
+        <div className={`absolute z-20 ${compact ? 'top-2 right-2' : 'top-4 right-4'}`}>
+          <div
+            className={`bg-meet-success/20 border border-meet-success/50 rounded-lg flex items-center gap-2 pulse-glow ${
+              compact ? 'px-2 py-1' : 'px-4 py-2'
+            }`}
+            title={screenShareParticipant.isLocal
+              ? 'Sharing your screen'
+              : `${screenShareParticipant.participant.name || screenShareParticipant.participant.identity} is sharing`}
+          >
             <div className="w-2 h-2 rounded-full bg-meet-success animate-pulse" />
-            <span className="text-meet-success text-sm font-medium">
-              {screenShareParticipant.isLocal
-                ? 'Sharing your screen'
-                : `${screenShareParticipant.participant.name || screenShareParticipant.participant.identity} is sharing`}
-            </span>
+            {!compact && (
+              <span className="text-meet-success text-sm font-medium">
+                {screenShareParticipant.isLocal
+                  ? 'Sharing your screen'
+                  : `${screenShareParticipant.participant.name || screenShareParticipant.participant.identity} is sharing`}
+              </span>
+            )}
           </div>
         </div>
       )}
 
       {/* Waiting for others */}
-      {remoteParticipants.length === 0 && (
+      {remoteParticipants.length === 0 && !screenShareParticipant && (
         <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
           <div className="text-center">
-            <div className="glass rounded-2xl px-8 py-6 animate-fade-in">
-              <p className="text-meet-text-secondary text-lg mb-2">
+            <div className={`glass rounded-2xl animate-fade-in ${compact ? 'px-4 py-3' : 'px-8 py-6'}`}>
+              <p className={`text-meet-text-secondary ${compact ? 'text-sm' : 'text-lg mb-2'}`}>
                 Waiting for others to join...
               </p>
-              <p className="text-meet-text-tertiary text-sm">
-                Share the room code:{' '}
-                <span className="font-mono font-semibold text-meet-accent">
-                  {formatRoomCode(roomCode)}
-                </span>
-              </p>
+              {!compact && (
+                <p className="text-meet-text-tertiary text-sm">
+                  Share the room code:{' '}
+                  <span className="font-mono font-semibold text-meet-accent">
+                    {formatRoomCode(roomCode)}
+                  </span>
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -215,14 +234,16 @@ function VideoRoom() {
         // Screen share layout - main screen share with participant strip
         <div className="screen-share-layout h-full">
           {/* Main screen share area */}
-          <div className="screen-share-main flex-1 p-4 pb-2 min-h-0">
+          <div className={`screen-share-main flex-1 min-h-0 ${compact ? 'p-0 pb-14' : 'p-4 pb-2'}`}>
             <ScreenShareView
               participant={screenShareParticipant.participant}
               isLocal={screenShareParticipant.isLocal}
             />
           </div>
 
-          {/* Participant strip at bottom (or side in landscape) */}
+          {/* Participant strip at bottom (or side in landscape); the
+              shared screen gets the whole compact window */}
+          {!compact && (
           <div className="screen-share-strip h-32 px-4 pb-24 flex gap-2 overflow-x-auto">
             {/* Local participant */}
             {localParticipant && (
@@ -245,11 +266,12 @@ function VideoRoom() {
               </div>
             ))}
           </div>
+          )}
         </div>
       ) : (
         // Regular video grid
         <>
-          <div className={`video-grid ${gridClass} h-full`}>
+          <div className={`video-grid ${compact ? 'video-grid-compact' : gridClass} h-full`}>
             {/* Remote participants */}
             {remoteParticipants.map((participant) => (
               <VideoTile
@@ -269,8 +291,10 @@ function VideoRoom() {
             )}
           </div>
 
-          {/* PiP Self View - shown when there are remote participants and no screen share */}
-          {localParticipant && remoteParticipants.length > 0 && (
+          {/* PiP Self View - shown when there are remote participants and no
+              screen share; never in a compact window (the other person gets
+              the whole frame) */}
+          {localParticipant && remoteParticipants.length > 0 && !compact && (
             <SelfViewPip
               participant={localParticipant}
               isMinimized={isPipMinimized}
@@ -286,7 +310,7 @@ function VideoRoom() {
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        <ControlBar />
+        <ControlBar compact={compact} />
       </div>
     </div>
   );

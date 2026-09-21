@@ -183,6 +183,26 @@
   overflow: hidden;
 }
 
+/* Compact window (PiP / sidebar): a single tile fills everything above
+   the small control bar; extra tiles stack underneath and scroll. */
+.video-grid-compact {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  padding-bottom: 52px;
+  overflow-y: auto;
+}
+
+.video-grid-compact > * {
+  width: 100%;
+  height: 100%;
+  flex: 1 1 100%;
+  min-height: 0;
+  aspect-ratio: auto !important;
+  border-radius: 0;
+}
+
 /* 1 participant - fill viewport */
 .video-grid-1 {
   padding: 0;

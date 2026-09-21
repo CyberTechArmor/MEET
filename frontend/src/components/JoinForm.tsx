@@ -1,11 +1,16 @@
 import { useState, useEffect, FormEvent, useCallback } from 'react';
-import { ConnectionState } from 'livekit-client';
+import { ConnectionState, DisconnectReason } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
 import { useLiveKit } from '../hooks/useLiveKit';
 import { generateRoomCode, formatRoomCode, parseRoomCode, getJoinLink } from '../lib/livekit';
 
 function JoinForm() {
   const { displayName, setDisplayName, roomCode, setRoomCode, connectionState } = useRoomStore();
+  const embedMode = useRoomStore((state) => state.embedMode);
+  const embedRoomCode = useRoomStore((state) => state.embedRoomCode);
+  const embedJoining = useRoomStore((state) => state.embedJoining);
+  const lastDisconnectReason = useRoomStore((state) => state.lastDisconnectReason);
+  const setLastDisconnectReason = useRoomStore((state) => state.setLastDisconnectReason);
   const { connect } = useLiveKit();
 
   const [mode, setMode] = useState<'create' | 'join' | null>(null);
@@ -76,6 +81,107 @@ function JoinForm() {
     setRoomCode('');
     setError(null);
   }, [setRoomCode]);
+
+  // Embed mode: the room was decided by whoever built the link (API /
+  // iframe host). Show only what the participant must supply — their
+  // name — and a join button. No create/join picker, no room code
+  // editing, no invite link, no branding block.
+  const handleEmbedSubmit = useCallback(async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!displayName.trim()) {
+      setError('Please enter your name');
+      return;
+    }
+    // A manual (re)join clears the "why we got disconnected" state so the
+    // automatic rejoin logic starts fresh afterwards.
+    setLastDisconnectReason(null);
+    try {
+      await connect(embedRoomCode, displayName.trim());
+    } catch (err) {
+      console.error('Connection failed:', err);
+    }
+  }, [displayName, embedRoomCode, connect, setLastDisconnectReason]);
+
+  if (embedMode && embedRoomCode) {
+    if (embedJoining || isConnecting) {
+      return (
+        <div className="min-h-full flex flex-col items-center justify-center p-6 gap-4">
+          <div className="animate-spin h-8 w-8 border-4 border-meet-accent border-t-transparent rounded-full"></div>
+          <p className="text-sm text-meet-text-secondary">
+            {lastDisconnectReason === null ? 'Joining meeting…' : 'Reconnecting…'}
+          </p>
+        </div>
+      );
+    }
+
+    let status: string | null = null;
+    switch (lastDisconnectReason) {
+      case null: break;
+      case DisconnectReason.CLIENT_INITIATED: status = 'You left the meeting.'; break;
+      case DisconnectReason.DUPLICATE_IDENTITY: status = 'This meeting was opened in another window.'; break;
+      case DisconnectReason.ROOM_DELETED:
+      case DisconnectReason.ROOM_CLOSED: status = 'The meeting has ended.'; break;
+      case DisconnectReason.PARTICIPANT_REMOVED: status = 'You were removed from the meeting.'; break;
+      default: status = 'Connection lost.'; break;
+    }
+
+    return (
+      <div className="min-h-full flex flex-col items-center justify-center p-6">
+        <form
+          onSubmit={handleEmbedSubmit}
+          className="glass rounded-2xl p-6 w-full max-w-sm shadow-soft animate-fade-in space-y-4"
+        >
+          {status && (
+            <p className="text-sm text-meet-text-secondary">{status}</p>
+          )}
+          <div>
+            <label
+              htmlFor="displayName"
+              className="block text-sm font-medium text-meet-text-secondary mb-2"
+            >
+              Your name
+            </label>
+            <input
+              id="displayName"
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Enter your name to join"
+              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+              maxLength={50}
+              disabled={isConnecting}
+              autoFocus
+            />
+          </div>
+
+          {error && (
+            <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm">
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isConnecting || !displayName.trim()}
+            className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            {isConnecting ? (
+              <>
+                <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                </svg>
+                Connecting...
+              </>
+            ) : (
+              lastDisconnectReason === null ? 'Join meeting' : 'Rejoin meeting'
+            )}
+          </button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-full flex flex-col items-center justify-center p-6">

@@ -99,6 +99,7 @@ MEET supports URL-based join links that allow you to create shareable meeting in
 | `autojoin` | boolean | No | Auto-join when page loads (default: `true` if name provided) |
 | `quality` | string | No | Video quality preset: `max`, `high`, `auto`, `balanced`, `low` |
 | `hideEndCall` | boolean | No | Hide leave/end call buttons (for iframe embeds where the host page manages call lifecycle) |
+| `embed` | boolean | No | Embed mode: skip the create/join configuration screen. Only a name prompt is shown (none at all when `name` is given). **Implied automatically inside an iframe**; pass `embed=0` to force the full screen. `joinUrl` from `POST /api/rooms` already includes `embed=1`. |
 
 ### URL Examples
 
@@ -120,7 +121,235 @@ https://meet.example.com/?room=ABC123&name=John%20Doe&autojoin=true&quality=high
 
 # Iframe embed without end call buttons
 https://meet.example.com/?room=ABC123&name=John&hideEndCall=true
+
+# API-created meeting: straight into the room, no configuration screen
+https://meet.example.com/?room=ABC123&embed=1
 ```
+
+### Embed mode
+
+When a meeting is created through the API (or the page is loaded inside an
+iframe) the participant should never see MEET's own "Create a new room / Join
+existing room" configuration screen — the room has already been decided by
+your application. Embed mode does exactly that:
+
+- `?room=ABC123&name=John&embed=1` → joins immediately as John, no UI before the call.
+- `?room=ABC123&embed=1` → also joins immediately. The name is, in order: the
+  session saved before a reload of the same room, the last name this browser
+  joined with, or a generated `Guest 1234`. Pass `name` whenever your app
+  knows it.
+- `?room=ABC123&embed=1&autojoin=false` → shows a single "Your name" prompt
+  instead of joining on its own.
+- Inside an iframe, embed mode is on by default even without the parameter.
+- **Survives drops.** If the connection is lost for a reason the participant
+  didn't choose (network, server restart, the host page reloading the
+  iframe), the app reconnects on its own with backoff (immediate, then
+  1.5 s doubling to 15 s, up to 12 attempts). Leaving on purpose, the
+  meeting ending, being removed, or the same identity joining from another
+  window shows a short status and a **Rejoin** button instead.
+- Every open window gets its own participant identity (`p_<device id>-<tab id>`),
+  never derived from the name, so the same person can join from a laptop and a
+  phone, two windows on one machine work, and two people with the same name
+  never evict each other. **Invite links should therefore carry only `room`**
+  (and `embed=1` / `hideEndCall` as needed) — never the inviter's `name`.
+- The admin gear button is hidden in embed mode.
+- **Small windows.** Below 640×480 the room switches to a compact layout:
+  only the other person (or the shared screen) is shown, the self view and
+  room badge are hidden, and the controls shrink to small icons. Nothing to
+  configure; it follows the iframe's size.
+
+### Embed messaging API (postMessage)
+
+Inside an iframe, MEET talks to the embedding page over `window.postMessage`
+so the host can follow and drive the call **without touching the iframe's
+DOM**. All payloads are plain JSON with no tokens or credentials.
+
+The same bridge works when you open MEET in its own window or tab with
+`window.open()` instead of framing it: events then go to `window.opener`.
+See [Popup mode](#popup-mode-open-meet-in-its-own-window).
+
+**Events (MEET → host)** — every message has `source: "meet"`:
+
+| `type` | Payload | When |
+|--------|---------|------|
+| `meet:ready` | `embed, room, version` | App loaded |
+| `meet:joining` | `room, name` | Connecting |
+| `meet:joined` | `room, identity, name, isHost, joinedAt` (ms epoch) | In the room — start your timer from `joinedAt` |
+| `meet:reconnecting` | `room` | Network hiccup; LiveKit is recovering |
+| `meet:left` | `room, reason, willRejoin` | `reason`: `left`, `ended`, `removed`, `duplicate`, `connection-lost`; `willRejoin` true when MEET is about to reconnect on its own |
+| `meet:participants` | `room, count, participants[{identity,name}]` | Someone joined/left (count includes you) |
+| `meet:screenshare` | `room, active, by, local` | Screen share started/stopped |
+| `meet:media` | `room, audio, video` | Your mic/camera state changed |
+| `meet:layout` | `compact` | Compact layout toggled |
+| `meet:pip` | `open` | MEET's own picture-in-picture opened/closed |
+| `meet:state` | `state{…}` | Reply to `meet:get-state` |
+| `meet:error` | `command, message` | A command failed |
+
+**Commands (host → MEET)** — `iframe.contentWindow.postMessage({ type, … }, '*')`,
+or `win.postMessage({ type, … }, meetOrigin)` for a window you opened:
+
+| `type` | Fields | Effect |
+|--------|--------|--------|
+| `meet:leave` | | Leave the call (use this from your Close button) |
+| `meet:end` | | End the meeting for everyone (host only) |
+| `meet:mute` | `audio?`, `video?` (true = muted) | Mute/unmute |
+| `meet:screenshare` | `enabled` | Stop sharing (`false`). Starting needs a click inside MEET — browsers require it |
+| `meet:compact` | `mode: 'auto' \| 'on' \| 'off'` | Force the compact layout regardless of size (e.g. while your window is in its PiP form) |
+| `meet:hideEndCall` | `hide` | Show/hide MEET's leave buttons |
+| `meet:pip` | `open?` | Open/close/toggle MEET's own picture-in-picture (needs user activation inside MEET — see below) |
+| `meet:fullscreen` | `enter?` | Fullscreen the MEET document (needs delegated activation — see below) |
+| `meet:get-state` | | Ask for a `meet:state` snapshot |
+
+```js
+const meet = document.getElementById('meet');           // the <iframe>
+window.addEventListener('message', (e) => {
+  if (e.data?.source !== 'meet') return;
+  if (e.data.type === 'meet:joined') startTimer(e.data.joinedAt);
+  if (e.data.type === 'meet:left' && !e.data.willRejoin) closeCallWindow();
+});
+closeButton.onclick = () => meet.contentWindow.postMessage({ type: 'meet:leave' }, '*');
+```
+
+### Fullscreen and picture-in-picture without reloading
+
+- **Fullscreen:** call `iframe.requestFullscreen()` from your own button. The
+  iframe element itself goes fullscreen; nothing is re-mounted and the call
+  continues. (Do **not** render the iframe into a different "fullscreen"
+  container — that reloads it.)
+- **Picture-in-picture, option A (recommended):** keep the iframe exactly
+  where it is and shrink/move its *wrapper* with CSS, sending
+  `meet:compact` `{ mode: 'on' }` so MEET drops to the compact layout even if
+  the box is still large. Your PiP is then just a small floating box.
+- **Picture-in-picture, option B (browser floating video):** MEET's own PiP
+  button opens the browser's picture-in-picture on the other person's video
+  (or the shared screen) *from inside the iframe*, so nothing reloads and
+  the call continues. It needs `allow="picture-in-picture"` on the iframe
+  and a click inside MEET — browsers refuse `meet:pip` sent from your page
+  without a gesture inside the frame, and the richer Document
+  Picture-in-Picture API is only allowed from a top-level page, so MEET
+  uses it only when it is not embedded. Never move the iframe into a
+  Document PiP window of your own — that reloads it.
+- **Desktop (Electron) hosts:** the cleanest PiP is not a DOM change at all —
+  resize the BrowserWindow and `win.setAlwaysOnTop(true)`; send
+  `meet:compact` `{ mode: 'on' }` so MEET shows only the other person.
+
+### Popup mode (open MEET in its own window)
+
+A host does not have to frame MEET. `window.open()` gives you a call in its
+own window, and the messaging API above works there unchanged — MEET posts
+its events to `window.opener` instead of `window.parent`, and you send
+commands to the window handle.
+
+Two reasons to reach for it:
+
+1. **The full picture-in-picture.** Document Picture-in-Picture — a real
+   always-on-top window, not a floating video — is only allowed from a
+   top-level page. In a popup MEET *is* top-level, so its PiP button opens
+   that window. Inside an iframe the same button falls back to the browser's
+   video picture-in-picture.
+2. **A way through a hostile embedding context.** Framing can be refused by
+   headers, by a sandbox, or by a mobile browser's anti-tracking. A window
+   is first-party: MEET asks for its own camera and microphone, so nothing
+   has to be delegated.
+
+```js
+const MEET_ORIGIN = 'https://meet.example.com';
+
+function openMeetWindow(url) {
+  // Desktop gets a real window; phones and tablets have no popup windows,
+  // so window.open() is a tab there — which is the right answer anyway.
+  const desktop = window.matchMedia('(min-width: 900px) and (pointer: fine)').matches;
+  const win = window.open(url, 'meet-call', desktop ? 'popup,width=980,height=660' : '');
+  win?.focus();                       // a second click re-focuses the same window
+  return win;
+}
+
+callButton.onclick = () => {          // must be inside a user gesture
+  const win = openMeetWindow(`${MEET_ORIGIN}/?room=ABC123&embed=1`);
+
+  window.addEventListener('message', (e) => {
+    if (e.origin !== MEET_ORIGIN || e.source !== win) return;
+    if (e.data?.source !== 'meet') return;
+    if (e.data.type === 'meet:joined') startTimer(e.data.joinedAt);
+    if (e.data.type === 'meet:left' && !e.data.willRejoin) endCall();
+  });
+
+  hangUpButton.onclick = () => win.postMessage({ type: 'meet:leave' }, MEET_ORIGIN);
+
+  // A window closed by its own title bar cannot send meet:left — watch for it.
+  const poll = setInterval(() => {
+    if (win.closed) { clearInterval(poll); endCall(); }
+  }, 1000);
+};
+```
+
+Rules that bite if you miss them:
+
+- **Never pass `noopener`** (or `rel="noopener"` on a link). It severs
+  `window.opener`, and with it every event MEET would send you. Cross-origin
+  `opener` only permits `postMessage` — it cannot read your page.
+- **Open it from a click.** A popup without a user gesture is blocked.
+- **Name the window** (`'meet-call'` above) and `focus()` it, so a second
+  click brings the existing call forward instead of starting another.
+- **Pass `embed=1`** so MEET joins straight away instead of showing the
+  create/join screen, and a `name` if you know who this is.
+- **Leave `hideEndCall` off**, or give the person your own way out: in a
+  window there is no host UI around the frame to hang up from. Your own
+  button sends `meet:leave`.
+- **Check `e.source` and `e.origin`** on every message, as above.
+
+| | iframe | popup window (desktop) | tab (mobile) |
+|---|---|---|---|
+| Messaging API | ✅ via `window.parent` | ✅ via `window.opener` | ✅ via `window.opener` |
+| Document PiP (own window) | ❌ top-level only | ✅ Chromium 116+ | ❌ not on mobile browsers |
+| Video PiP (floating video) | ✅ needs `allow="picture-in-picture"` | ✅ | ⚠️ browser-dependent |
+| Camera / mic | delegated by `allow=` | first-party to MEET | first-party to MEET |
+| Your UI around the call | ✅ | ❌ separate window | ❌ separate tab |
+
+### Your own title bar, timer and invite link
+
+MEET never renders a window title; whatever chrome wraps the iframe is
+yours. Build it from the events above rather than from the URL:
+
+- **Timer:** start from `meet:joined.joinedAt`; stop on `meet:left`.
+- **Title:** `meet:joined.name` is the local user, `meet:participants` lists
+  the others — "Call with Bob" comes from there, not from the room code.
+- **Invite / copy-link:** share `https://meet.example.com/?room=CODE` (add
+  `embed=1` if the recipient opens it in your app). Do **not** append the
+  inviter's `name` — every recipient would then join as that person.
+  Identities are per device, so even a shared name cannot disconnect anyone,
+  but the labels would all read the same.
+
+### Keeping the call alive while your UI changes (PiP, minimize, tabs)
+
+The call lives inside the iframe's page. Anything that reloads that page
+ends the media session: the screen share stops (browsers require a click to
+start one, so it cannot be restored automatically) and MEET rejoins the room
+as a fresh participant a moment later. Two things reload an iframe even
+though they look harmless:
+
+- **Moving the iframe in the DOM** (`appendChild` into another container,
+  re-parenting it under a "picture-in-picture" wrapper, React re-mounting it
+  because its parent component or `key` changed).
+- **Unmounting it while "minimized"** and mounting it again on restore.
+
+Keep the same iframe element mounted for the whole call and change only its
+CSS (`position`, `width`, `height`, `transform`, `visibility`, or move the
+*wrapper* with CSS rather than the iframe with DOM operations). A hidden or
+tiny iframe keeps publishing camera, microphone and screen share; MEET's
+compact layout takes over as soon as it is small.
+
+```html
+<iframe
+  src="https://meet.example.com/?room=ABC123&name=John&embed=1&hideEndCall=true"
+  allow="camera; microphone; display-capture; autoplay; picture-in-picture"
+  allowfullscreen
+  style="border:0;width:100%;height:100%"></iframe>
+```
+
+`POST /api/rooms` returns a `joinUrl` that already carries `embed=1` and is
+built from `PUBLIC_BASE_URL`, so it points at the web app even when the API
+lives on its own subdomain.
 
 ### Generating Join Links
 
@@ -271,7 +500,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `roomName` | string | Yes | Room code/name (max 50 chars) |
 | `participantName` | string | Yes | Display name (max 50 chars) |
-| `deviceId` | string | No | Unique device identifier for same-name handling |
+| `deviceId` | string | No | Stable per-device-and-window id. The participant identity is derived from it, never from the name, so the same person can join from several devices and two people can share a name. Omit it and the server mints a random one. |
 
 #### Example Request
 
@@ -290,7 +519,7 @@ Content-Type: application/json
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "roomName": "ABCDEF",
   "participantName": "John Doe",
-  "participantIdentity": "John Doe_m8x3k_a7b9c2d",
+  "participantIdentity": "p_m8x3ka7b9c2d-st0zdx",
   "isHost": true
 }
 ```
@@ -302,7 +531,7 @@ Content-Type: application/json
 | `token` | string | JWT token for LiveKit connection |
 | `roomName` | string | Sanitized room name |
 | `participantName` | string | Display name shown to other participants |
-| `participantIdentity` | string | Unique identifier combining name and device ID |
+| `participantIdentity` | string | Unique per device + window (`p_<deviceId>`); the display name is carried separately |
 | `isHost` | boolean | `true` if first participant in room (has admin rights) |
 
 #### Status Codes
@@ -364,7 +593,7 @@ Content-Type: application/json
 ```json
 {
   "roomName": "ABCDEF",
-  "participantIdentity": "John Doe_m8x3k_a7b9c2d"
+  "participantIdentity": "p_m8x3ka7b9c2d-st0zdx"
 }
 ```
 
@@ -823,7 +1052,7 @@ All webhook payloads follow this structure:
   "data": {
     "roomName": "ABC123",
     "participant": {
-      "identity": "John Doe_m8x3k",
+      "identity": "p_m8x3ka7b9c2d-st0zdx",
       "name": "John Doe"
     },
     "joinedAt": "2024-01-15T10:30:00.000Z"
@@ -1464,3 +1693,139 @@ Currently, there is no rate limiting implemented. For production deployments, co
 3. **Host Privileges**: First joiner becomes host automatically
 4. **CORS**: Configure `CORS_ORIGIN` for production deployments
 5. **HTTPS**: Use reverse proxy (Caddy) for production with TLS
+
+
+---
+
+## Admin Sign-in Methods
+
+The admin account supports three credentials. Which ones are accepted is
+reported by `GET /api/admin/auth/methods` (public) so the login form can
+render itself:
+
+| Method | Endpoint(s) | Notes |
+|--------|-------------|-------|
+| Passkey (WebAuthn) | `POST /api/admin/webauthn/auth/options` → `POST /api/admin/webauthn/auth/verify` | Register as many devices as you like under **Settings → Passkeys**. Requires `PUBLIC_BASE_URL`. |
+| Emailed one-time code | `POST /api/admin/otp/request` → `POST /api/admin/otp/verify` | Available once SMTP is configured **and verified** (see below). 6 digits, 10-minute validity, 5 attempts, one code per 30 s. |
+| Password | `POST /api/admin/login` | Accepted only while email sign-in is **not** verified. Returns `403 PASSWORD_LOGIN_DISABLED` afterwards. |
+
+### SMTP configuration (email sign-in)
+
+```
+GET    /api/admin/smtp              current settings (password never returned)
+PUT    /api/admin/smtp              { host, port, secure, username, password, fromAddress, adminEmail }
+DELETE /api/admin/smtp              forget settings → password login re-enabled
+POST   /api/admin/smtp/test         email a test code to adminEmail
+POST   /api/admin/smtp/test/verify  { ticket, code } → marks SMTP verified
+```
+
+Password login is switched off **only** at the moment a test code has been
+confirmed, so a mistyped host or wrong credentials can never lock you out.
+Changing any delivery field (host, port, TLS, username, password, from
+address, admin address) resets the verification, and the password works again
+until a new test code is confirmed.
+
+**Recovery.** If the mail server stops delivering and no passkey is
+registered, run this inside the API container to forget the SMTP settings and
+restore password login:
+
+```bash
+docker compose exec meet-api node dist/reset-admin.js --clear-smtp
+docker compose restart meet-api
+```
+
+---
+
+## Admin Profile
+
+Everything about the signed-in admin lives under **Account & Security** in the
+admin panel: profile, passkeys, email sign-in (SMTP) and the directory (LDAP).
+
+```
+GET  /api/admin/profile                 who is signed in (local / LDAP admin / API key), sign-in method summary, active sessions
+PUT  /api/admin/profile                 { username?, currentPassword, newPassword? } — local account only; current password always required
+POST /api/admin/sessions/revoke-others  sign out every other session of the current admin
+```
+
+`PUT` is refused with `409` when the credentials come from
+`MEET_ADMIN_USERNAME` / `MEET_ADMIN_PASSWORD`, and with `403` for LDAP admins
+(their identity is managed in the directory).
+
+---
+
+## Directory Integration (LDAP / LDAPS)
+
+Off by default. Configure it under **Settings → Directory (LDAP / LDAPS)** or
+through the API. Works with Active Directory, OpenLDAP, FreeIPA and any other
+LDAP v3 server over `ldap://` (optionally with StartTLS) or `ldaps://`, with an
+optional private-CA certificate.
+
+Once a connection is saved and **Enable LDAP** is on, two independent switches
+decide what it is used for:
+
+| Switch | Effect |
+|--------|--------|
+| **Require directory sign-in to use the meeting frontend** | Participants see an LDAP sign-in screen before the join screen. The web app then sends a 12-hour participant session as `Authorization: Bearer` on `POST /api/token` and `GET /api/room-code`; without it both answer `401 LDAP_LOGIN_REQUIRED`. API-key callers are exempt. |
+| **Allow LDAP admins to sign in to this panel** | Directory users you pick (search the directory, click **Make admin**) can sign in to the admin panel with their directory username or email and password through the normal `POST /api/admin/login`. |
+
+A signed-in **LDAP admin** can **disable the local account**: the built-in
+admin's password, passkeys and emailed codes all stop working and its sessions
+end. Only an LDAP admin can re-enable it. Changes that would leave nobody able
+to sign in (turning LDAP admins off, removing LDAP, or removing the last LDAP
+admin while the local account is disabled) are refused with
+`409 WOULD_LOCK_OUT`.
+
+### Endpoints
+
+```
+GET    /api/admin/auth/methods          now also reports ldap + localAccountEnabled
+GET    /api/admin/ldap                   settings (bind password never returned)
+PUT    /api/admin/ldap                   partial update — see fields below
+DELETE /api/admin/ldap                   forget settings and all LDAP admins
+POST   /api/admin/ldap/test              connect + bind + one search with the saved settings
+GET    /api/admin/ldap/search?q=         directory users (max 25) with isAdmin flag
+GET    /api/admin/ldap/admins            LDAP admins
+POST   /api/admin/ldap/admins            { dn } — grant admin access (DN is verified in the directory)
+DELETE /api/admin/ldap/admins/{id}       revoke
+POST   /api/admin/local-account/disable  LDAP admins only
+POST   /api/admin/local-account/enable   LDAP admins only
+
+POST   /api/auth/ldap/login              participant sign-in → { token, expiresAt, username, displayName }
+GET    /api/auth/me                      validate a participant session
+POST   /api/auth/logout                  end it
+GET    /api/status                       now includes ldapRequired
+```
+
+### Settings fields
+
+| Field | Default | Notes |
+|-------|---------|-------|
+| `url` | | `ldap://host:389` or `ldaps://host:636` |
+| `startTls` | `false` | Upgrade an `ldap://` connection with StartTLS before binding |
+| `tlsRejectUnauthorized` | `true` | Verify the server certificate |
+| `caCert` | | PEM bundle for a private CA (LDAPS / StartTLS) |
+| `bindDn` / `bindPassword` | | Service account used to search for users. Blank = anonymous search |
+| `baseDn` | | Where users are searched |
+| `userFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid={{username}})(sAMAccountName={{username}})(mail={{username}})))` | `{{username}}` is replaced with the (escaped) value the user typed |
+| `searchFilter` | `(&(\|(objectClass=person)(objectClass=user))(\|(uid=*{{q}}*)(sAMAccountName=*{{q}}*)(cn=*{{q}}*)(displayName=*{{q}}*)(mail=*{{q}}*)))` | Admin picker; `{{q}}` is the search text |
+| `usernameAttribute` | `uid` | Use `sAMAccountName` for Active Directory |
+| `displayNameAttribute` | `displayName` | Falls back to `cn` |
+| `emailAttribute` | `mail` | |
+| `timeoutMs` | `8000` | Connect and operation timeout |
+| `requireForFrontend` | `false` | Gate the meeting frontend |
+| `adminsEnabled` | `false` | Allow LDAP admins into the admin panel |
+
+Authentication is search-then-bind: the service account finds the user's DN
+with `userFilter`, then a second connection binds as that DN with the supplied
+password. Empty passwords are rejected before reaching the directory. Filter
+values are escaped per RFC 4515.
+
+**Recovery.** From inside the API container:
+
+```bash
+# Re-enable the local admin account after an LDAP admin disabled it
+docker compose exec meet-api node dist/reset-admin.js --enable-local
+# Forget the LDAP settings and every LDAP admin
+docker compose exec meet-api node dist/reset-admin.js --clear-ldap
+docker compose restart meet-api
+```

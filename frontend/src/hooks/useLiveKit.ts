@@ -9,13 +9,21 @@ import {
   LocalTrackPublication,
   TrackPublication,
   Participant,
+  DisconnectReason,
 } from 'livekit-client';
 import toast from 'react-hot-toast';
 import { useRoomStore } from '../stores/roomStore';
-import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll } from '../lib/livekit';
+import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeetingForAll, setVideoQualityPreset, rememberDisplayName } from '../lib/livekit';
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
+
+// Set right before WE ask livekit-client to disconnect (Leave, End for
+// all, real page unload). livekit-client also hangs up on its own — on
+// pagehide / freeze — and reports that as CLIENT_INITIATED too; without
+// this flag the two are indistinguishable and a host page that merely
+// hid or moved the iframe would look like the user pressing Leave.
+let leaveRequested = false;
 
 export function useLiveKit() {
   const roomRef = useRef<Room | null>(null);
@@ -34,6 +42,7 @@ export function useLiveKit() {
     setRoomCode,
     setView,
     resetKeepingName,
+    setLastDisconnectReason,
     roomCode: storedRoomCode,
     isHost,
     localParticipant,
@@ -176,8 +185,25 @@ export function useLiveKit() {
       }
     });
 
-    room.on(RoomEvent.Disconnected, () => {
+    room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
       setConnectionState(ConnectionState.Disconnected);
+      // Remember why, so embed mode can decide whether to rejoin on its
+      // own (transient network trouble) or show the prompt (user left,
+      // meeting ended, removed, duplicate identity). A CLIENT_INITIATED
+      // that we did not ask for came from livekit-client's own page-leave
+      // handling — treat it as transient so the call comes back.
+      let effective = reason ?? DisconnectReason.UNKNOWN_REASON;
+      if (effective === DisconnectReason.CLIENT_INITIATED && !leaveRequested) {
+        console.warn('Room disconnected by the client library without a leave request — will rejoin');
+        effective = DisconnectReason.UNKNOWN_REASON;
+      }
+      leaveRequested = false;
+      setLastDisconnectReason(effective);
+      if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
+        toast.error('This meeting was opened from another window');
+      } else if (reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.ROOM_CLOSED) {
+        toast('The meeting has ended', { icon: '👋' });
+      }
       // Clear session and reset state, keeping the display name
       clearSession();
       sharedRoomInstance = null;
@@ -200,15 +226,26 @@ export function useLiveKit() {
     setCameraEnabled,
     resetKeepingName,
     setView,
+    setLastDisconnectReason,
   ]);
 
-  // Connect to room
-  const connect = useCallback(async (roomCode: string, displayName: string) => {
+  // Connect to room. `silent` suppresses the failure toast — used by the
+  // embed auto-rejoin loop, which shows its own "Reconnecting…" state
+  // instead of stacking one toast per attempt.
+  const connect = useCallback(async (roomCode: string, displayName: string, opts: { silent?: boolean } = {}) => {
     try {
       setConnectionState(ConnectionState.Connecting);
 
       // Get token from API
-      const { token, isHost: hostStatus } = await getToken(roomCode, displayName);
+      const tokenResponse = await getToken(roomCode, displayName);
+      const { token, isHost: hostStatus, quality, iceServers } = tokenResponse;
+
+      // Server picked a quality preset for this room (per-room override or
+      // platform default). Apply it before we build the room options below
+      // so the room picks up the right simulcast layers / codec / etc.
+      if (quality) {
+        setVideoQualityPreset(quality);
+      }
 
       // Set host status and room code
       setIsHost(hostStatus);
@@ -220,54 +257,78 @@ export function useLiveKit() {
       sharedRoomInstance = newRoom; // Store in singleton for cross-component access
       setupRoomEvents(newRoom);
 
-      // Connect to LiveKit
-      await newRoom.connect(getLiveKitUrl(), token);
+      // Connect to LiveKit. If the API issued TURN servers (i.e.
+      // TURN_ENABLED=true on the backend), pass them in via rtcConfig so
+      // the browser's ICE gatherer can use them. Without this, cellular
+      // clients can't reach the LXC media path even when the TURN server
+      // is up and listening.
+      const connectOpts = iceServers && iceServers.length > 0
+        ? { rtcConfig: { iceServers } as RTCConfiguration }
+        : undefined;
+      await newRoom.connect(getLiveKitUrl(), token, connectOpts);
 
-      // Try to enable camera and microphone, but handle missing devices gracefully
-      let micEnabled = false;
-      let cameraEnabled = false;
+      // livekit-client registers a 'freeze' listener that disconnects the
+      // room whenever the browser freezes the page (background tab, a
+      // minimized host window). Drop it: a frozen page can't do anything
+      // anyway, and on resume the client's reconnect logic (or our
+      // auto-rejoin) brings the call back instead of ending it.
+      const pageLeave = (newRoom as unknown as { onPageLeave?: EventListener }).onPageLeave;
+      if (pageLeave) window.removeEventListener('freeze', pageLeave);
+      // Graceful leave on a real unload (tab close / top-level navigation)
+      // so the others see us go immediately instead of after a timeout.
+      // 'beforeunload' does not fire when a host page merely removes or
+      // moves an iframe, so hiding/minimizing never triggers it.
+      const onBeforeUnload = () => {
+        leaveRequested = true;
+        void newRoom.disconnect();
+      };
+      window.addEventListener('beforeunload', onBeforeUnload);
+      newRoom.once(RoomEvent.Disconnected, () => window.removeEventListener('beforeunload', onBeforeUnload));
 
-      // Try to enable microphone
-      try {
-        await newRoom.localParticipant.setMicrophoneEnabled(true);
-        micEnabled = true;
-      } catch (micError) {
-        console.warn('Could not enable microphone:', micError);
-        // Continue without microphone
-      }
-
-      // Try to enable camera
-      try {
-        await newRoom.localParticipant.setCameraEnabled(true);
-        cameraEnabled = true;
-      } catch (cameraError) {
-        console.warn('Could not enable camera:', cameraError);
-        // Continue without camera
-      }
-
-      // Notify user if devices are missing
-      if (!micEnabled && !cameraEnabled) {
-        toast('Joined without camera/microphone', { icon: '📺' });
-      } else if (!micEnabled) {
-        toast('No microphone detected', { icon: '🔇' });
-      } else if (!cameraEnabled) {
-        toast('No camera detected', { icon: '📷' });
-      }
-
+      // Transition to the room view IMMEDIATELY after the signaling
+      // connection is up. Don't wait for track publishing — on a slow or
+      // symmetric-NAT'd network (cellular without TURN), setMic/setCamera
+      // can stall waiting for ICE to establish, never resolving and never
+      // rejecting. That used to leave the join screen showing "Connected"
+      // with mic/camera permissions granted by the OS but the user never
+      // moving to the call UI. Each track now publishes independently and
+      // its own state flag flips when it lands.
       setRoom(newRoom);
       setLocalParticipant(newRoom.localParticipant);
       setRemoteParticipants(Array.from(newRoom.remoteParticipants.values()));
-      setMicEnabled(micEnabled);
-      setCameraEnabled(cameraEnabled);
       setView('room');
 
-      // Save session for auto-rejoin on refresh
+      // Save session for auto-rejoin on refresh; remember the name so an
+      // embed link without `name` can reuse it next time.
       saveSession(roomCode, displayName, hostStatus);
+      rememberDisplayName(displayName);
+      setLastDisconnectReason(null);
+
+      // Fire-and-forget mic + camera. Promise.then/.catch instead of await,
+      // so a stuck publish never blocks the UI. The VideoRoom component
+      // listens for LocalTrackPublished and re-renders when the track lands.
+      newRoom.localParticipant.setMicrophoneEnabled(true).then(
+        () => setMicEnabled(true),
+        (err) => {
+          console.warn('Could not enable microphone:', err);
+          toast('Microphone unavailable', { icon: '🔇' });
+        },
+      );
+      newRoom.localParticipant.setCameraEnabled(true).then(
+        () => setCameraEnabled(true),
+        (err) => {
+          console.warn('Could not enable camera:', err);
+          toast('Camera unavailable', { icon: '📷' });
+        },
+      );
 
     } catch (error) {
       console.error('Failed to connect:', error);
       setConnectionState(ConnectionState.Disconnected);
 
+      if (opts.silent) {
+        throw error;
+      }
       if (error instanceof Error) {
         if (error.message.includes('Permission denied') || error.message.includes('NotAllowedError')) {
           toast.error('Camera/microphone permission denied. Please allow access and try again.');
@@ -291,6 +352,7 @@ export function useLiveKit() {
     setIsHost,
     setRoomCode,
     setView,
+    setLastDisconnectReason,
   ]);
 
   // Disconnect from room
@@ -299,6 +361,7 @@ export function useLiveKit() {
     clearSession();
 
     if (sharedRoomInstance) {
+      leaveRequested = true;
       await sharedRoomInstance.disconnect();
       sharedRoomInstance = null;
     }
