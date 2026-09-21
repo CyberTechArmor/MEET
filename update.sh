@@ -546,8 +546,8 @@ update_with_external_proxy() {
 
     # Detect the LXC bridge IP and read public IP from .env — needed by
     # both turnserver.conf (relay-ip, when TURN is on) and livekit.yaml
-    # (nat_1_to_1_ips). Always run, regardless of turn_enabled, so even
-    # non-TURN deployments behind NAT get nat_1_to_1_ips advertised.
+    # (advertise_internal_ip). Always run, regardless of turn_enabled, so
+    # even non-TURN deployments behind NAT advertise the bridge address.
     local detected_bridge_ip public_ip
     detected_bridge_ip=$(ip -4 -o addr show scope global 2>/dev/null \
                          | awk '$2 !~ /^(docker|br-|veth|cni|lxcbr|virbr|tun|tap)/ {print $4}' \
@@ -713,10 +713,13 @@ update_with_external_proxy() {
     # Re-render livekit.yaml from its template every run. Substitute two
     # placeholders:
     #
-    # @NAT_1_TO_1_IPS@ — LiveKit's nat_1_to_1_ips config. When the LXC
-    #   bridge IP differs from the public IP (typical NAT'd-LXC case),
-    #   advertise BOTH so coturn (which is on the bridge) can relay to
-    #   LiveKit's bridge candidate directly without a host NAT-loopback.
+    # @ADVERTISE_INTERNAL_IP@ — LiveKit's rtc.advertise_internal_ip. When
+    #   the LXC bridge IP differs from the public IP (typical NAT'd-LXC
+    #   case), have LiveKit advertise its bridge address alongside the
+    #   public one so coturn (which is on the bridge) can relay to that
+    #   candidate directly without a host NAT-loopback. (`nat_1_to_1_ips`
+    #   is NOT a LiveKit config key — rendering it makes LiveKit reject the
+    #   whole file and crash-loop.)
     #   Symptom of needing this: cellular calls connect slowly (10s+) or
     #   fail with "camera/microphone unavailable".
     #
@@ -725,14 +728,9 @@ update_with_external_proxy() {
     #   the participant join response (a redundant path alongside
     #   meet-api's /api/token iceServers).
     if [ -f "$dir/livekit.yaml.template" ]; then
-        local nat_1_to_1_block=""
+        local advertise_internal_ip_block=""
         if [ -n "$public_ip" ] && [ -n "$detected_bridge_ip" ] && [ "$public_ip" != "$detected_bridge_ip" ]; then
-            nat_1_to_1_block=$(cat <<NAT_BLOCK
-  nat_1_to_1_ips:
-    - $public_ip
-    - $detected_bridge_ip
-NAT_BLOCK
-)
+            advertise_internal_ip_block="  advertise_internal_ip: true"
         fi
 
         # Render TWO turn_servers entries (TLS + UDP) so LiveKit's
@@ -761,19 +759,19 @@ NAT_BLOCK
 TURN_BLOCK
 )
         fi
-        awk -v nat_block="$nat_1_to_1_block" \
+        awk -v advertise_block="$advertise_internal_ip_block" \
             -v turn_block="$turn_servers_block" \
             -v lk_udp_start="$lk_udp_start" \
             -v lk_udp_end="$lk_udp_end" '
             {
-                gsub(/@NAT_1_TO_1_IPS@/, nat_block);
+                gsub(/@ADVERTISE_INTERNAL_IP@/, advertise_block);
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
                 print
             }
         ' "$dir/livekit.yaml.template" > "$dir/livekit.yaml"
-        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml (media udp/$lk_udp_start-$lk_udp_end)${turn_servers_block:+ (with turn_servers TLS+UDP)}${nat_1_to_1_block:+ (with nat_1_to_1_ips)}"
+        echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml (media udp/$lk_udp_start-$lk_udp_end)${turn_servers_block:+ (with turn_servers TLS+UDP)}${advertise_internal_ip_block:+ (with advertise_internal_ip)}"
     fi
 
     (
