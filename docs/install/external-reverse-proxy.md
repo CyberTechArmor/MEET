@@ -262,73 +262,105 @@ cd ../..
 ./update.sh                       # re-renders turnserver.conf and starts coturn
 ```
 
-### 7b. Bind-mount the cert (single-domain — recommended)
+### 7b. Reuse the existing hostname certificate
 
-The cert your reverse proxy already serves for the main host can be
-**reused directly**. We don't copy it into the LXC; we bind-mount the
-host's Caddy/certbot cert directory into the LXC as a read-only Incus
-disk device. The cert file inside the LXC is then literally the same
-file the host's reverse proxy is writing — when Caddy/certbot
-rotates, the LXC sees the new content immediately. No cron, no copy,
-no two-sources-of-truth.
+A certificate for `meet.example.com` can also serve
+`turns:meet.example.com:5349`. Prefer the existing certificate and its CA
+renewal mechanism; no additional issuance or CA agreement is needed.
 
-Set `TURN_DOMAIN` to your main hostname (e.g. `meet.example.com`),
-then either:
+The host operator must explicitly authorize the read-only certificate mount.
+Run the following on the **Incus host**, from a trusted checkout of this
+repository. Do not use this helper through an agent/startup script to bypass a
+ProxyPilot denied source path. It requires Python 3, OpenSSL, Incus CLI access,
+and an already running, configured coturn service.
 
-**Option 1 (recommended if your reverse proxy is ProxyPilot):** open
-the LXC's detail page in ProxyPilot, find the "TLS bind-mount" section,
-pick the cert hostname, target LXC, target path (`/var/meet-tls`), and
-click "Bind-mount". ProxyPilot runs the same `incus config device add`
-this script does, with no host-side shell access required. After it
-completes, jump straight to step 7d.
+First confirm the existing guest configuration uses the selected hostname,
+`cert=/etc/coturn/certs/meet.example.com.crt`,
+`pkey=/etc/coturn/certs/meet.example.com.key`, `tls-listening-port=5349`, and a
+read-only Docker bind `/var/meet-tls:/etc/coturn/certs:ro`. Preserve the existing
+TURN password. Relevant renderer settings are `TURN_CERT_MOUNT=/var/meet-tls`,
+`TURN_CERT_FILE=meet.example.com.crt`, and `TURN_KEY_FILE=meet.example.com.key`.
+The helper verifies these prerequisites; it does not rewrite configuration.
 
-**Option 2 (any reverse proxy):** run on the **Incus host** (not inside
-the LXC):
-
-```bash
-sudo bash /path/to/MEET/deploy/external-proxy/mount-cert.sh
-```
-
-It auto-discovers ProxyPilot's Caddy data volume, host Caddy
-(`~/.local/share/caddy/`), and host certbot
-(`/etc/letsencrypt/live/<host>/`); then runs:
+Create an explicit metadata-only configuration (substitute actual values):
 
 ```bash
-incus config device add <container> meet-tls disk \
-    source=/path/to/cert/dir \
-    path=/var/meet-tls \
-    readonly=true
+sudo install -d -m 700 /etc/meet-turn-cert
+sudo tee /etc/meet-turn-cert/meet.json >/dev/null <<'JSON'
+{
+  "container": "pp-MEET",
+  "domain": "meet.example.com",
+  "source": "/var/lib/caddy/.local/share/caddy/certificates/acme-v02.api.letsencrypt.org-directory/meet.example.com"
+}
+JSON
+sudo chmod 600 /etc/meet-turn-cert/meet.json
+sudo bash deploy/external-proxy/mount-cert.sh check --config /etc/meet-turn-cert/meet.json
+sudo bash deploy/external-proxy/mount-cert.sh apply --config /etc/meet-turn-cert/meet.json
 ```
 
-Idempotent — re-running with the same source is a no-op; re-running
-with a different source rebinds. Override discovery via env vars
-(`MEET_CONTAINER`, `TURN_DOMAIN`, `CADDY_CERT_DIR`, `LXC_MOUNT_PATH`)
-if your layout's exotic.
+Optional JSON fields: `device` (default `meet-tls`), `coturn` (default
+`external-proxy-coturn-1`), `interface` (default `eth0`), and `port` (default
+5349). The interface must have exactly one global IPv4 address.
 
-Then in the LXC, `./update.sh` picks up the mount automatically. The
-TURN URL ends up looking like `turns:meet.example.com:5349`, which is
-unusual but valid.
+`check` is read-only. `apply` adds only a missing Incus disk device, with
+`readonly=true` and `shift=true`, then restarts only coturn and verifies TLS
+against the guest IP using the hostname and the system CA store. It checks
+that the served public certificate matches the selected source. It refuses
+conflicting devices, overlapping mounts, nonempty guest destinations, shared
+certificate directories, symlinks, wildcard/multihost certificates, weak key
+permissions, or certificates expiring within 24 hours. The source directory
+must contain only regular `<hostname>.crt`, `<hostname>.key`, and optionally
+`<hostname>.json` files. No private key is read by Python, copied, printed, or
+passed to OpenSSL. Coturn reads the key normally to serve TLS.
 
-**Cert rotation:** zero operator action. Caddy renews on its own
-schedule (60 days), writes the new cert to the same path, and coturn
-picks up the new cert on its next TLS handshake. Existing TURN
-allocations finish on the old cert; new ones use the new one.
+Failures preserve the previous success fingerprint; they do not remove a
+newly added mount or roll back a CA renewal. Inspect the stated failure and
+coturn logs locally before retrying. Do not paste credentials or private keys
+into logs or support requests.
 
-### 7c. Provision a dedicated turn.&lt;host&gt; cert
+### 7c. Reload renewed certificates
 
-If you'd rather have a separate hostname:
-
-1. Add DNS: `turn.meet.example.com` → host's public IP.
-2. Set `TURN_DOMAIN=turn.meet.example.com` in `.env`.
-3. Issue a cert on the **host** (briefly frees port 80):
+Caddy remains responsible for CA renewal. A directory bind exposes replacement
+files to the guest, but coturn must reload them. Install this optional host
+timer **after a successful apply**:
 
 ```bash
-certbot certonly --standalone -d turn.meet.example.com --http-01-port 80
+sudo install -d /usr/local/libexec
+sudo install -m 755 deploy/external-proxy/turn-cert.py /usr/local/libexec/meet-turn-cert.py
+sudo install -m 644 deploy/external-proxy/systemd/meet-turn-cert@.service /etc/systemd/system/
+sudo install -m 644 deploy/external-proxy/systemd/meet-turn-cert@.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meet-turn-cert@meet.timer
+sudo systemctl start meet-turn-cert@meet.service
+sudo journalctl -u meet-turn-cert@meet.service --since today
 ```
 
-4. Run `mount-cert.sh` on the host the same way; it discovers the new
-   cert under `/etc/letsencrypt/live/turn.meet.example.com/` and binds
-   it into the LXC at `/var/meet-tls`. Same zero-cron rotation story.
+The timer checks every 15 minutes with jitter. A changed public certificate
+fingerprint restarts only coturn; this may interrupt existing TURN allocations.
+An unchanged certificate is TLS-probed without restarting. A root-only lock
+serializes runs, and a public fingerprint in `/var/lib/meet-turn-cert` is saved
+only after TLS verification succeeds. The timer does **not** issue/renew CA
+certificates, rotate TURN credentials, change permissions, update MEET, or
+modify firewalls. Monitor failures through the systemd journal.
+
+To stop automatic reloads, disable `meet-turn-cert@meet.timer`. If reverting a
+new mount, the operator should remove only the device created for this setup;
+removing it disables TURN TLS and must not affect other certificate mounts.
+
+A separate TURN hostname is optional. Before issuing a new certificate,
+explicitly approve its DNS configuration, CA/account terms, challenge method,
+and any required credentials. Use an approved CA deploy hook to maintain a
+protected single-hostname directory of regular files. Certbot's `live/`
+symlinks and broad archive mounts are deliberately not accepted. Do not stop
+the reverse proxy to free port 80 as part of this procedure.
+
+Host-to-guest TLS verification does not prove internet reachability or relay
+media. After separately approved routing/firewall setup, verify external
+TCP/5349 with hostname/CA checking. Then use two isolated test clients with
+`rtcConfig.iceTransportPolicy = 'relay'`, confirm the selected ICE candidate
+is `relay`, and confirm bidirectional audio/video. Do not log TURN passwords,
+access tokens, or contact existing participants. Until that test passes,
+forced-relay functionality remains unverified.
 
 ### 7d. Open the firewall
 
