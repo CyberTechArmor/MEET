@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify renewed MEET TURN certificate (%i)
+After=incus.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/libexec/meet-turn-cert.py renew --config /etc/meet-turn-cert/%i.json

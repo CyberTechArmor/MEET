@@ -12,12 +12,22 @@ on:
       - "frontend/**"
       - "api/**"
       - ".github/workflows/external-proxy.yml"
+      - "tests/test_turn_cert_setup.py"
+      - "tests/test_livekit_render.py"
+      - "docs/install/external-reverse-proxy.md"
+      - "install.sh"
+      - "update.sh"
   pull_request:
     paths:
       - "deploy/external-proxy/**"
       - "frontend/**"
       - "api/**"
       - ".github/workflows/external-proxy.yml"
+      - "tests/test_turn_cert_setup.py"
+      - "tests/test_livekit_render.py"
+      - "docs/install/external-reverse-proxy.md"
+      - "install.sh"
+      - "update.sh"
 
 jobs:
   validate:
@@ -27,6 +37,12 @@ jobs:
         working-directory: deploy/external-proxy
     steps:
       - uses: actions/checkout@v4
+
+      - name: Certificate setup and configuration renderer regressions
+        run: |
+          python3 ../../tests/test_turn_cert_setup.py
+          python3 ../../tests/test_livekit_render.py
+          bash -n mount-cert.sh ../../install.sh ../../update.sh
 
       - name: Seed .env from .env.example
         run: cp .env.example .env
