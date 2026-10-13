@@ -799,11 +799,12 @@ export async function getPublicStatus(): Promise<PublicStatusResponse> {
 /**
  * End meeting for all participants (host only)
  */
-export async function endMeetingForAll(roomName: string, participantIdentity: string): Promise<void> {
+export async function endMeetingForAll(roomName: string, participantIdentity: string, token: string): Promise<void> {
   const response = await fetch(`${API_URL}/api/end-meeting`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`,
     },
     body: JSON.stringify({
       roomName,

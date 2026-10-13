@@ -2094,7 +2094,10 @@ TURN_BLOCK
         fi
         # Use awk to do the substitution because the blocks have newlines
         # and special chars that would confuse sed.
-        awk -v advertise_block="$advertise_internal_ip_block" \
+        # Stage and validate before replacing a working config.
+        local rendered_livekit
+        rendered_livekit=$(mktemp "$compose_dir/livekit.yaml.render.XXXXXX")
+        if ! awk -v advertise_block="$advertise_internal_ip_block" \
             -v turn_block="$turn_servers_block" \
             -v lk_udp_start="50000" \
             -v lk_udp_end="54900" '
@@ -2103,9 +2106,21 @@ TURN_BLOCK
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
+                if ($0 ~ /@[A-Z][A-Z0-9_]*@/) {
+                    print "Unresolved LiveKit template marker; existing config preserved" > "/dev/stderr";
+                    exit 1;
+                }
                 print
             }
-        ' "$compose_dir/livekit.yaml.template" > "$compose_dir/livekit.yaml"
+        ' "$compose_dir/livekit.yaml.template" > "$rendered_livekit"; then
+            rm -f "$rendered_livekit"
+            return 1
+        fi
+        if [ -f "$compose_dir/livekit.yaml" ]; then
+            cp -p "$compose_dir/livekit.yaml" "$compose_dir/livekit.yaml.pre-render"
+            chmod --reference="$compose_dir/livekit.yaml" "$rendered_livekit"
+        fi
+        mv "$rendered_livekit" "$compose_dir/livekit.yaml"
         echo -e "${GREEN}✓${NC} Rendered $compose_dir/livekit.yaml${turn_servers_block:+ (with turn_servers)}${advertise_internal_ip_block:+ (with advertise_internal_ip)}"
     fi
 

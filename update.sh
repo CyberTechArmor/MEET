@@ -22,6 +22,9 @@
 
 set -e
 
+# Preserve CLI flags when a pull updates the renderer itself.
+UPDATE_ORIGINAL_ARGS=("$@")
+
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 RED='\033[0;31m'; NC='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
 if [ ! -t 1 ]; then CYAN=; GREEN=; YELLOW=; RED=; NC=; BOLD=; DIM=; fi
@@ -118,6 +121,10 @@ git_pull() {
         after_hash=$(git rev-parse --short HEAD)
         after_subject=$(git log -1 --format=%s)
         echo -e "   ${GREEN}✓${NC} now at: ${after_hash} ${after_subject}"
+        if ! git diff --quiet "$before_hash" "$after_hash" -- update.sh; then
+            echo "Update script changed; restarting with the new renderer."
+            exec bash "$0" "${UPDATE_ORIGINAL_ARGS[@]}"
+        fi
     elif [ "$ahead" -gt 0 ]; then
         echo -e "   ${YELLOW}!${NC} ahead: $ahead local commit(s) not pushed (won't pull)"
     else
@@ -759,7 +766,10 @@ update_with_external_proxy() {
 TURN_BLOCK
 )
         fi
-        awk -v advertise_block="$advertise_internal_ip_block" \
+        # Stage and validate before replacing a working config.
+        local rendered_livekit
+        rendered_livekit=$(mktemp "$dir/livekit.yaml.render.XXXXXX")
+        if ! awk -v advertise_block="$advertise_internal_ip_block" \
             -v turn_block="$turn_servers_block" \
             -v lk_udp_start="$lk_udp_start" \
             -v lk_udp_end="$lk_udp_end" '
@@ -768,9 +778,21 @@ TURN_BLOCK
                 gsub(/@TURN_SERVERS_BLOCK@/, turn_block);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_START@/, lk_udp_start);
                 gsub(/@LIVEKIT_UDP_PORT_RANGE_END@/, lk_udp_end);
+                if ($0 ~ /@[A-Z][A-Z0-9_]*@/) {
+                    print "Unresolved LiveKit template marker; existing config preserved" > "/dev/stderr";
+                    exit 1;
+                }
                 print
             }
-        ' "$dir/livekit.yaml.template" > "$dir/livekit.yaml"
+        ' "$dir/livekit.yaml.template" > "$rendered_livekit"; then
+            rm -f "$rendered_livekit"
+            return 1
+        fi
+        if [ -f "$dir/livekit.yaml" ]; then
+            cp -p "$dir/livekit.yaml" "$dir/livekit.yaml.pre-render"
+            chmod --reference="$dir/livekit.yaml" "$rendered_livekit"
+        fi
+        mv "$rendered_livekit" "$dir/livekit.yaml"
         echo -e "${YELLOW}!${NC} Re-rendered $dir/livekit.yaml (media udp/$lk_udp_start-$lk_udp_end)${turn_servers_block:+ (with turn_servers TLS+UDP)}${advertise_internal_ip_block:+ (with advertise_internal_ip)}"
     fi
 
