@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, RoomServiceClient, TokenVerifier } from 'livekit-server-sdk';
 
 const app = express();
 const server = http.createServer(app);
@@ -30,6 +30,7 @@ const SERVER_START_TIME = Date.now();
 
 // Initialize RoomServiceClient for room management
 const roomService = new RoomServiceClient(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
+const roomTokenVerifier = new TokenVerifier(LIVEKIT_API_KEY, LIVEKIT_API_SECRET);
 
 // ============================================================================
 // PERSISTENT STORAGE
@@ -49,6 +50,7 @@ import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword } from './auth.js';
+import { permitsApiOperation, isHostForMeeting } from './meeting-access.js';
 import * as webauthn from './webauthn.js';
 import * as mailer from './mailer.js';
 import * as otp from './otp.js';
@@ -542,6 +544,10 @@ function authenticateAdmin(req: AuthRequest, res: Response, next: NextFunction):
     const keyHash = hashString(apiKeyHeader);
     const apiKey = store.findApiKeyByHash(keyHash);
     if (apiKey) {
+      if (!permitsApiOperation(apiKey.permissions, 'admin')) {
+        res.status(403).json({ error: 'Admin permission required' });
+        return;
+      }
       apiKey.lastUsedAt = new Date();
       store.saveApiKey(apiKey);
       req.apiKey = apiKey;
@@ -589,6 +595,11 @@ function authenticateApiKeyOrAdmin(req: AuthRequest, res: Response, next: NextFu
     const keyHash = hashString(apiKeyHeader);
     const apiKey = store.findApiKeyByHash(keyHash);
     if (apiKey) {
+      const permission = ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ? 'read' : 'write';
+      if (!permitsApiOperation(apiKey.permissions, permission)) {
+        res.status(403).json({ error: `${permission} permission required` });
+        return;
+      }
       apiKey.lastUsedAt = new Date();
       store.saveApiKey(apiKey);
       req.apiKey = apiKey;
@@ -2070,29 +2081,39 @@ interface TokenRequest {
   deviceId?: string;
 }
 
-app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: Response) => {
+// Public meeting access accepts an API key only after validating its value and scope.
+function authorizeMeetingAccess(req: Request, res: Response, next: NextFunction): void {
+  const suppliedKey = req.headers['x-api-key'];
+  if (suppliedKey !== undefined) {
+    const key = typeof suppliedKey === 'string' && suppliedKey
+      ? store.findApiKeyByHash(hashString(suppliedKey)) : undefined;
+    if (!key) {
+      res.status(401).json({ error: 'Invalid API key' });
+      return;
+    }
+    if (!permitsApiOperation(key.permissions, 'write')) {
+      res.status(403).json({ error: 'write permission required' });
+      return;
+    }
+    key.lastUsedAt = new Date();
+    store.saveApiKey(key);
+    next();
+    return;
+  }
+  if (!serverSettings.publicAccessEnabled) {
+    res.status(403).json({ error: 'Public access is currently disabled. Please use API key authentication.' });
+    return;
+  }
+  if (ldapRequiredForFrontend() && !participantSessionFromRequest(req)) {
+    res.status(401).json({ error: 'Sign in with your directory account to join meetings', code: 'LDAP_LOGIN_REQUIRED' });
+    return;
+  }
+  next();
+}
+
+app.post('/api/token', authorizeMeetingAccess, async (req: Request<object, object, TokenRequest>, res: Response) => {
   try {
     const { roomName, participantName, deviceId } = req.body;
-
-    // Check if request is from API key or public access
-    const apiKeyHeader = req.headers['x-api-key'] as string;
-    const isApiAccess = !!apiKeyHeader;
-
-    // Check public access setting (API access is always allowed)
-    if (!isApiAccess && !serverSettings.publicAccessEnabled) {
-      res.status(403).json({ error: 'Public access is currently disabled. Please use API key authentication.' });
-      return;
-    }
-
-    // Directory-gated frontend: browser callers need a participant (or
-    // admin) session. API-key callers are exempt.
-    if (!isApiAccess && ldapRequiredForFrontend() && !participantSessionFromRequest(req)) {
-      res.status(401).json({
-        error: 'Sign in with your directory account to join meetings',
-        code: 'LDAP_LOGIN_REQUIRED',
-      });
-      return;
-    }
 
     if (!roomName || typeof roomName !== 'string') {
       res.status(400).json({ error: 'roomName is required' });
@@ -2133,12 +2154,14 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
       allRooms = await roomService.listRooms();
       const targetRoom = allRooms.find(r => r.name === sanitizedRoomName);
       isNewRoom = !targetRoom;
-      isHost = isNewRoom || (targetRoom?.numParticipants ?? 0) === 0;
-      currentParticipants = targetRoom?.numParticipants ?? 0;
+      // Room summaries can lag joins; use the authoritative live participant list.
+      const participants = targetRoom ? await roomService.listParticipants(sanitizedRoomName) : [];
+      currentParticipants = participants.length;
+      isHost = currentParticipants === 0;
     } catch (err) {
-      console.warn('Could not check room status:', err);
-      isHost = true;
-      isNewRoom = true;
+      console.warn('Could not check room status');
+      res.status(503).json({ error: 'Meeting service is unavailable. Please try again.' });
+      return;
     }
 
     // Check concurrent meetings limit (only for new rooms)
@@ -2220,11 +2243,8 @@ app.post('/api/token', async (req: Request<object, object, TokenRequest>, res: R
 });
 
 // Generate random room code
-app.get('/api/room-code', (req: Request, res: Response) => {
-  if (ldapRequiredForFrontend() && !req.headers['x-api-key'] && !participantSessionFromRequest(req)) {
-    res.status(401).json({ error: 'Sign in with your directory account first', code: 'LDAP_LOGIN_REQUIRED' });
-    return;
-  }
+app.get('/api/room-code', authorizeMeetingAccess, (req: Request, res: Response) => {
+
   const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 6; i++) {
@@ -2239,7 +2259,7 @@ interface EndMeetingRequest {
   participantIdentity: string;
 }
 
-app.post('/api/end-meeting', async (req: Request<object, object, EndMeetingRequest>, res: Response) => {
+app.post('/api/end-meeting', async (req: AuthRequest, res: Response) => {
   try {
     const { roomName, participantIdentity } = req.body;
 
@@ -2254,6 +2274,45 @@ app.post('/api/end-meeting', async (req: Request<object, object, EndMeetingReque
     }
 
     const sanitizedRoomName = roomName.replace(/[^a-zA-Z0-9-_]/g, '').slice(0, 50);
+    if (!sanitizedRoomName) {
+      res.status(400).json({ error: 'Invalid room name' });
+      return;
+    }
+
+    // API/admin automation uses the existing authenticated, scoped path.
+    // Browser hosts prove room and identity with their signed LiveKit token.
+    if (req.headers['x-api-key'] !== undefined) {
+      let authorized = false;
+      authenticateApiKeyOrAdmin(req, res, () => { authorized = true; });
+      if (!authorized) return;
+    } else {
+      const token = bearerToken(req);
+      if (!token) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+      }
+      const session = store.getAdminSession(token);
+      if (!session || session.expiresAt <= new Date()) {
+        let claims;
+        try {
+          claims = await roomTokenVerifier.verify(token);
+        } catch {
+          res.status(401).json({ error: 'Invalid or expired meeting token' });
+          return;
+        }
+        if (!isHostForMeeting(claims, sanitizedRoomName, participantIdentity)) {
+          res.status(403).json({ error: 'Only the host can end this meeting' });
+          return;
+        }
+        // A signed token alone must not end a later meeting reusing the name.
+        try {
+          await roomService.getParticipant(sanitizedRoomName, participantIdentity);
+        } catch {
+          res.status(403).json({ error: 'Host must be connected to this meeting' });
+          return;
+        }
+      }
+    }
     await roomService.deleteRoom(sanitizedRoomName);
 
     // Trigger webhooks

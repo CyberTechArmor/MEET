@@ -17,6 +17,8 @@ import { createRoom, getToken, getLiveKitUrl, saveSession, clearSession, endMeet
 
 // Singleton room instance shared across all hook instances
 let sharedRoomInstance: Room | null = null;
+// In-memory only: proves the current host's room and identity to end-meeting.
+let sharedMeetingToken: string | null = null;
 
 // Set right before WE ask livekit-client to disconnect (Leave, End for
 // all, real page unload). livekit-client also hangs up on its own — on
@@ -207,6 +209,7 @@ export function useLiveKit() {
       // Clear session and reset state, keeping the display name
       clearSession();
       sharedRoomInstance = null;
+      sharedMeetingToken = null;
       resetKeepingName();
       setView('join');
     });
@@ -266,6 +269,7 @@ export function useLiveKit() {
         ? { rtcConfig: { iceServers } as RTCConfiguration }
         : undefined;
       await newRoom.connect(getLiveKitUrl(), token, connectOpts);
+      sharedMeetingToken = token;
 
       // livekit-client registers a 'freeze' listener that disconnects the
       // room whenever the browser freezes the page (background tab, a
@@ -364,6 +368,7 @@ export function useLiveKit() {
       leaveRequested = true;
       await sharedRoomInstance.disconnect();
       sharedRoomInstance = null;
+      sharedMeetingToken = null;
     }
     if (roomRef.current) {
       roomRef.current = null;
@@ -455,7 +460,8 @@ export function useLiveKit() {
     }
 
     try {
-      await endMeetingForAll(storedRoomCode, localParticipant.identity);
+      if (!sharedMeetingToken) throw new Error('Meeting token unavailable; rejoin the room');
+      await endMeetingForAll(storedRoomCode, localParticipant.identity, sharedMeetingToken);
       toast.success('Meeting ended for all participants');
       // The room disconnect event will handle cleanup
     } catch (error) {
