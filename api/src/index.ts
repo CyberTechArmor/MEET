@@ -6,6 +6,7 @@ import path from 'path';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AccessToken, RoomServiceClient, TokenVerifier } from 'livekit-server-sdk';
+import {installNodusPrivate} from './nodus-runtime.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -2074,6 +2075,40 @@ app.get('/api/docs', (_req: Request, res: Response) => {
   res.json(openApiSpec);
 });
 
+// Private Nodus rooms wrap the existing room/media service. No new key is created.
+const boundedPrivateCall = <T,>(work:Promise<T>):Promise<T> => {
+  let timer:ReturnType<typeof setTimeout>;
+  return Promise.race([work,new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('Private meeting unavailable')),5000);})]).finally(()=>clearTimeout(timer));
+};
+const nodusPrivate = installNodusPrivate({
+  app, db:getDb(), authenticate:authenticateApiKeyOrAdmin,
+  keyId:process.env.NODUS_INTEGRATION_KEY_ID || '', nodusOrigin:process.env.NODUS_ORIGIN || '', embedOrigin:PUBLIC_BASE_URL,
+  key:store.getApiKey, livekitUrl:LIVEKIT_URL, report:()=>console.warn('Private meeting verification failed'),
+  media:{
+    iceServers:buildIceServers,
+    ensure:async name=>{
+      const rooms=await boundedPrivateCall(roomService.listRooms([name]));
+      if(!rooms.length){
+        const all=await boundedPrivateCall(roomService.listRooms());
+        if(serverSettings.maxConcurrentMeetings>0&&all.length>=serverSettings.maxConcurrentMeetings)throw new Error('Meeting capacity reached');
+        await boundedPrivateCall(roomService.createRoom({name,maxParticipants:serverSettings.maxParticipantsPerMeeting||100,emptyTimeout:300}));
+      }
+    },
+    token:async (room,identity,name,ttl)=>{
+      const token=new AccessToken(LIVEKIT_API_KEY,LIVEKIT_API_SECRET,{identity,name,ttl});
+      token.addGrant({room,roomJoin:true,canPublish:true,canSubscribe:true,canPublishData:true,roomAdmin:false});
+      return token.toJwt();
+    },
+    remove:async(room,identity)=>{
+      if(!(await boundedPrivateCall(roomService.listRooms([room]))).length)return;
+      if(!(await boundedPrivateCall(roomService.listParticipants(room))).some(p=>p.identity===identity))return;
+      await boundedPrivateCall(roomService.removeParticipant(room,identity));
+    },
+    end:async room=>{if((await boundedPrivateCall(roomService.listRooms([room]))).length)await boundedPrivateCall(roomService.deleteRoom(room));},
+    participants:async room=>(await boundedPrivateCall(roomService.listParticipants(room))).map(p=>p.identity),
+  },
+});
+
 // Token generation endpoint
 interface TokenRequest {
   roomName: string;
@@ -3800,7 +3835,15 @@ app.post('/api/admin/webhooks/:webhookId/test', authenticateAdmin, async (req: R
 // WEBSOCKET SERVER FOR REAL-TIME ADMIN UPDATES
 // ============================================================================
 
-const wss = new WebSocketServer({ server, path: '/ws/admin' });
+const wss = new WebSocketServer({ noServer:true });
+server.on('upgrade',(req,socket,head)=>{
+  let pathname:string;
+  try{pathname=new URL(req.url||'/', 'http://localhost').pathname;}catch{socket.destroy();return;}
+  if(pathname==='/api/private/livekit'||pathname==='/api/private/livekit/rtc'){void nodusPrivate.upgrade(req,socket,head);return;}
+  if(pathname==='/ws/admin'){wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));return;}
+  socket.destroy();
+});
+server.on('close',()=>nodusPrivate.stop());
 
 // Store authenticated WebSocket connections with custom properties
 interface AuthenticatedWs {

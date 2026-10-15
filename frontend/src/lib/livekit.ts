@@ -437,7 +437,7 @@ export async function generateRoomCode(): Promise<string> {
  * const room = createRoom('auto');
  * ```
  */
-export function createRoom(qualityPreset?: VideoQualityPreset): Room {
+export function createRoom(qualityPreset?: VideoQualityPreset, privateCall=false): Room {
   const config = getQualityConfig(qualityPreset);
 
   const videoCaptureDefaults: VideoCaptureOptions = {
@@ -490,6 +490,7 @@ export function createRoom(qualityPreset?: VideoQualityPreset): Room {
     },
   };
 
+  if(privateCall){roomOptions.singlePeerConnection=false;roomOptions.reconnectPolicy={nextRetryDelayInMs:()=>null};}
   return new Room(roomOptions);
 }
 

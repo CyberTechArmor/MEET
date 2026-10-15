@@ -1,3 +1,4 @@
+import {privateCallContext} from '../lib/nodusPrivateContext';
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
 import { ConnectionState, Track, Participant } from 'livekit-client';
 import { useRoomStore } from '../stores/roomStore';
@@ -9,6 +10,7 @@ import { formatRoomCode } from '../lib/livekit';
 import { useCompactLayout } from '../hooks/useCompactLayout';
 
 function VideoRoom() {
+  const privateCall=!!privateCallContext();
   const {
     roomCode,
     connectionState,
@@ -156,7 +158,7 @@ function VideoRoom() {
       onMouseMove={handleMouseMove}
     >
       {/* Room Code Badge (hidden in compact windows) */}
-      {!compact && (
+      {!compact && !privateCall && (
       <div
         className={`absolute top-4 left-4 z-20 transition-opacity duration-300 ${
           controlsVisible ? 'opacity-100' : 'opacity-0'
@@ -216,7 +218,7 @@ function VideoRoom() {
               <p className={`text-meet-text-secondary ${compact ? 'text-sm' : 'text-lg mb-2'}`}>
                 Waiting for others to join...
               </p>
-              {!compact && (
+              {!compact && !privateCall && (
                 <p className="text-meet-text-tertiary text-sm">
                   Share the room code:{' '}
                   <span className="font-mono font-semibold text-meet-accent">

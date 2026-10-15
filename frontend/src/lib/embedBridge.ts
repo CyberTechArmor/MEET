@@ -1,3 +1,4 @@
+import {privateCallContext} from './nodusPrivateContext';
 // Embed messaging bridge.
 //
 // When MEET runs inside an iframe, the host page can drive it and follow
@@ -84,6 +85,7 @@ export function isHosted(): boolean {
 
 /** Post an event to the host page. No-op when nothing is hosting MEET. */
 export function postToHost(event: HostEvent): void {
+  if(typeof window!=='undefined'&&new URLSearchParams(window.location.search).get('private')==='nodus'){privateCallContext()?.post?.(event);return;}
   const target = hostWindow();
   if (!target) return;
   try {
@@ -95,6 +97,7 @@ export function postToHost(event: HostEvent): void {
 
 /** Subscribe to host commands. Returns an unsubscribe function. */
 export function onHostCommand(handler: (cmd: HostCommand, event: MessageEvent) => void): () => void {
+  if(new URLSearchParams(window.location.search).get('private')==='nodus')return()=>{};
   const listener = (event: MessageEvent) => {
     const data = event.data;
     if (!data || typeof data !== 'object' || typeof data.type !== 'string') return;
