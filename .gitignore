@@ -18,6 +18,7 @@ build/
 .env
 .env.local
 .env.*.local
+deploy/external-proxy/nodus.env
 
 # Logs
 logs/
@@ -40,3 +41,7 @@ coverage/
 *.pem
 *.key
 *.cert
+
+# Certificates copied in by install.sh (Caddy mode, existing certificate)
+/tls/*
+!/tls/.gitkeep

@@ -8,6 +8,7 @@ import {
   listApiKeys,
   createApiKey,
   revokeApiKey,
+  rotateApiKey,
   listWebhooks,
   createWebhook,
   updateWebhook,
@@ -18,14 +19,29 @@ import {
   getJoinLink,
   formatRoomCode,
   updateRoomDisplayName,
+  getPasskeyStatus,
+  registerPasskey,
+  signInWithPasskey,
+  listRegisteredPasskeys,
+  deleteRegisteredPasskey,
+  browserSupportsPasskeys,
+  getAuthMethods,
+  requestOtp,
+  verifyOtp,
+  type PasskeyCredentialInfo,
+  type AuthMethods,
   getServerSettings,
   updateServerSettings,
   WEBHOOK_EVENTS,
 } from '../lib/livekit';
 import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookResponse, ServerSettings } from '../lib/livekit';
 import type { RoomInfo } from '../stores/adminStore';
+import SmtpSettingsSection from './SmtpSettingsSection';
+import LdapSettingsSection from './LdapSettingsSection';
+import NodusSettingsSection from './NodusSettingsSection';
+import ProfileSection from './ProfileSection';
 
-type TabType = 'dashboard' | 'settings' | 'api-keys' | 'webhooks' | 'docs';
+type TabType = 'dashboard' | 'settings' | 'security' | 'api-keys' | 'webhooks' | 'docs';
 type DocsSubTab = 'api' | 'iframe';
 
 interface AdminPanelProps {
@@ -39,6 +55,8 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   const {
     isAuthenticated,
     token,
+    principal,
+    displayName: adminDisplayName,
     isSessionValid,
     setAuth,
     logout,
@@ -56,10 +74,132 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     setError,
   } = useAdminStore();
 
-  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  // Hash-persisted tab state — surviving page refresh.
+  // Hash format: #admin or #admin/<tab>. Anything else falls back to dashboard.
+  const parseTabFromHash = (): TabType => {
+    if (typeof window === 'undefined') return 'dashboard';
+    const m = window.location.hash.match(/^#admin\/([\w-]+)$/);
+    const valid: TabType[] = ['dashboard', 'settings', 'security', 'api-keys', 'webhooks', 'docs'];
+    if (m && (valid as string[]).includes(m[1])) return m[1] as TabType;
+    return 'dashboard';
+  };
+  const [activeTab, setActiveTab] = useState<TabType>(parseTabFromHash);
+
+  // Mirror activeTab into the hash when the admin panel is open.
+  useEffect(() => {
+    if (window.location.hash.startsWith('#admin')) {
+      const next = activeTab === 'dashboard' ? '#admin' : `#admin/${activeTab}`;
+      if (window.location.hash !== next) {
+        window.history.replaceState(null, '', next);
+      }
+    }
+  }, [activeTab]);
+
+  // React to back/forward / external hash changes.
+  useEffect(() => {
+    const onHashChange = () => setActiveTab(parseTabFromHash());
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  // The api-side dispatches `admin:unauthorized` whenever any admin endpoint
+  // returns 401 — typically after meet-api was recreated and our session
+  // token is no longer recognised. Clear local auth and bounce back to the
+  // login form instead of leaving the panel showing 401s on every request.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      logout();
+      setLoginError('Your session expired or the server restarted. Please sign in again.');
+    };
+    window.addEventListener('admin:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('admin:unauthorized', onUnauthorized);
+  }, [logout]);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
+
+  // Passkey availability — inferred from /api/admin/webauthn/status. We
+  // hide the "Sign in with passkey" button when no passkeys are registered
+  // OR the browser doesn't support WebAuthn.
+  const [passkeyStatus, setPasskeyStatus] = useState<{ configured: boolean; registeredCount: number }>({
+    configured: false,
+    registeredCount: 0,
+  });
+  const [isPasskeyAuthing, setIsPasskeyAuthing] = useState(false);
+
+  // Which credentials the server accepts right now. Password login goes
+  // away once email sign-in (SMTP) has been verified; the form re-fetches
+  // this every time it is shown so a change made in Settings is reflected
+  // at the next sign-in without a reload.
+  const [authMethods, setAuthMethods] = useState<AuthMethods>({
+    password: true, passkey: false, otp: false, firstLogin: false,
+  });
+  const [otpTicket, setOtpTicket] = useState<string | null>(null);
+  const [otpEmail, setOtpEmail] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [isOtpBusy, setIsOtpBusy] = useState(false);
+
+  useEffect(() => {
+    if (isAuthenticated) return;
+    let cancelled = false;
+    getAuthMethods().then((m) => { if (!cancelled) setAuthMethods(m); });
+    return () => { cancelled = true; };
+  }, [isAuthenticated]);
+
+  const handleOtpRequest = useCallback(async () => {
+    setLoginError('');
+    setIsOtpBusy(true);
+    try {
+      const r = await requestOtp();
+      setOtpTicket(r.ticket);
+      setOtpEmail(r.email);
+      setOtpCode('');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Could not send a sign-in code');
+    } finally {
+      setIsOtpBusy(false);
+    }
+  }, []);
+
+  const handleOtpVerify = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!otpTicket) return;
+    setLoginError('');
+    setIsOtpBusy(true);
+    try {
+      const response = await verifyOtp(otpTicket, otpCode);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
+      setOtpTicket(null);
+      setOtpCode('');
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Sign-in failed');
+    } finally {
+      setIsOtpBusy(false);
+    }
+  }, [otpTicket, otpCode, setAuth]);
+
+  // Passkey management (Settings tab).
+  const [passkeyList, setPasskeyList] = useState<PasskeyCredentialInfo[]>([]);
+  const [isRegisteringPasskey, setIsRegisteringPasskey] = useState(false);
+  const [newPasskeyLabel, setNewPasskeyLabel] = useState('');
+  const [passkeyError, setPasskeyError] = useState<string>('');
+
+  useEffect(() => {
+    getPasskeyStatus().then(setPasskeyStatus).catch(() => {});
+  }, []);
+
+  const handlePasskeyLogin = useCallback(async () => {
+    setLoginError('');
+    setIsPasskeyAuthing(true);
+    try {
+      const response = await signInWithPasskey();
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Passkey sign-in failed');
+    } finally {
+      setIsPasskeyAuthing(false);
+    }
+  }, [setAuth]);
   const wsRef = useRef<WebSocket | null>(null);
   const [wsState, setWsState] = useState<WsConnectionState>('disconnected');
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -70,7 +210,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   // API Key creation state
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyPermissions, setNewKeyPermissions] = useState<string[]>(['read']);
-  const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
+  const [createdKey, setCreatedKey] = useState<(CreateApiKeyResponse & { rotated?: boolean }) | null>(null);
+  // Key whose Rotate was clicked once; the second click confirms.
+  const [rotateConfirm, setRotateConfirm] = useState<string | null>(null);
 
   // Webhook creation state
   const [showWebhookForm, setShowWebhookForm] = useState(false);
@@ -300,7 +442,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
     try {
       const response = await adminLogin(username, password);
-      setAuth(response.token, response.expiresAt, response.isFirstLogin);
+      setAuth(response.token, response.expiresAt, response.isFirstLogin, response.principal, response.displayName);
       setUsername('');
       setPassword('');
     } catch (err) {
@@ -356,6 +498,19 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke API key');
+    }
+  };
+
+  // Rotate an API key: new value, same ID, name and permissions. The old value stops working at once.
+  const handleRotateApiKey = async (keyId: string) => {
+    if (!token) return;
+    setRotateConfirm(null);
+    try {
+      const key = await rotateApiKey(token, keyId);
+      setCreatedKey({ ...key, rotated: true });
+      requestRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rotate API key');
     }
   };
 
@@ -478,6 +633,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
     if (activeTab === 'settings' && !settings && !settingsLoading) {
       loadSettings();
     }
+    if (activeTab === 'security' && token) {
+      listRegisteredPasskeys(token).then(setPasskeyList).catch(() => {});
+    }
   }, [activeTab, settings, settingsLoading, loadSettings]);
 
   // Handle settings update
@@ -519,39 +677,157 @@ function AdminPanel({ onClose }: AdminPanelProps) {
           </div>
 
           <p className="text-meet-text-secondary mb-6 text-sm">
-            Enter your admin credentials to access the admin panel. If this is your first login, the credentials you enter will be set as the admin account.
+            {authMethods.password && authMethods.firstLogin
+              ? 'This is the first login. The credentials you enter will be set as the admin account.'
+              : authMethods.password && authMethods.ldap
+                ? 'Sign in with the local admin password or with a directory (LDAP) admin account.'
+                : authMethods.password
+                  ? 'Enter your admin credentials to access the admin panel.'
+                  : authMethods.ldap && authMethods.localAccountEnabled === false
+                    ? 'The local admin account is disabled. Sign in with a directory (LDAP) admin account.'
+                    : authMethods.ldap
+                      ? 'Password login for the local account is turned off. Sign in with a directory (LDAP) admin account, a passkey, or an emailed code.'
+                      : 'Password login is turned off for this account. Sign in with a passkey or a one-time code sent to your email.'}
           </p>
 
-          <form onSubmit={handleLogin} className="space-y-4">
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Username"
-              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-              autoFocus
-            />
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Password"
-              className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
-            />
+          {(() => {
+            const showPasskey = authMethods.passkey && browserSupportsPasskeys();
+            const showOtp = authMethods.otp;
+            const showPasswordForm = authMethods.password || !!authMethods.ldap;
+            const nothing = !showPasswordForm && !showPasskey && !showOtp;
+            let sections = 0;
+            const divider = () => {
+              sections += 1;
+              if (sections === 1) return null;
+              return (
+                <div className="flex items-center gap-3 text-meet-text-tertiary text-xs">
+                  <div className="flex-1 h-px bg-meet-border" />
+                  <span>or</span>
+                  <div className="flex-1 h-px bg-meet-border" />
+                </div>
+              );
+            };
+            return (
+              <div className="space-y-4">
+                {showPasswordForm && (
+                  <>
+                    {divider()}
+                    <form onSubmit={handleLogin} className="space-y-4">
+                      <input
+                        type="text"
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder={authMethods.ldap && !authMethods.password ? 'Directory username' : 'Username'}
+                        className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                        autoFocus
+                      />
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Password"
+                        className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      />
+                      <button
+                        type="submit"
+                        className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth"
+                      >
+                        Login
+                      </button>
+                    </form>
+                  </>
+                )}
 
-            {loginError && (
-              <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm">
-                {loginError}
+                {showPasskey && (
+                  <>
+                    {divider()}
+                    <button
+                      type="button"
+                      onClick={handlePasskeyLogin}
+                      disabled={isPasskeyAuthing}
+                      className={`w-full font-medium py-3 px-6 rounded-xl transition-smooth flex items-center justify-center gap-2 disabled:opacity-50 ${
+                        authMethods.password
+                          ? 'bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary border border-meet-border'
+                          : 'bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold'
+                      }`}
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+                      </svg>
+                      {isPasskeyAuthing ? 'Authenticating…' : 'Sign in with passkey'}
+                    </button>
+                  </>
+                )}
+
+                {showOtp && (
+                  <>
+                    {divider()}
+                    {otpTicket ? (
+                      <form onSubmit={handleOtpVerify} className="space-y-3">
+                        <p className="text-sm text-meet-text-secondary">
+                          Enter the 6-digit code sent to <span className="text-meet-text-primary">{otpEmail}</span>.
+                        </p>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          pattern="[0-9]{6}"
+                          maxLength={6}
+                          value={otpCode}
+                          onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="123456"
+                          className="w-full bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-3 text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none text-center text-2xl font-mono tracking-widest"
+                          autoFocus
+                        />
+                        <button
+                          type="submit"
+                          disabled={isOtpBusy || otpCode.length !== 6}
+                          className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth disabled:opacity-50"
+                        >
+                          {isOtpBusy ? 'Checking…' : 'Verify code'}
+                        </button>
+                        <div className="flex justify-between text-xs">
+                          <button type="button" onClick={() => { setOtpTicket(null); setOtpCode(''); setLoginError(''); }}
+                            className="text-meet-text-tertiary hover:text-meet-text-secondary">
+                            Back
+                          </button>
+                          <button type="button" onClick={handleOtpRequest} disabled={isOtpBusy}
+                            className="text-meet-accent hover:text-meet-accent-light disabled:opacity-50">
+                            Send a new code
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleOtpRequest}
+                        disabled={isOtpBusy}
+                        className="w-full bg-meet-bg-secondary hover:bg-meet-bg-tertiary text-meet-text-primary font-medium py-3 px-6 rounded-xl border border-meet-border transition-smooth flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                        </svg>
+                        {isOtpBusy ? 'Sending…' : `Email me a sign-in code${authMethods.otpEmail ? ` (${authMethods.otpEmail})` : ''}`}
+                      </button>
+                    )}
+                  </>
+                )}
+
+                {nothing && (
+                  <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-3 text-meet-error text-sm">
+                    No sign-in method is available in this browser. Passkeys need a WebAuthn-capable browser over HTTPS.
+                    To restore password login run <code>reset-admin.js --clear-smtp</code> on the server.
+                  </div>
+                )}
+
+                {loginError && (
+                  <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm">
+                    {loginError}
+                  </div>
+                )}
               </div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full bg-meet-accent hover:bg-meet-accent-dark text-meet-bg font-semibold py-3 px-6 rounded-xl transition-smooth"
-            >
-              Login
-            </button>
-          </form>
+            );
+          })()}
         </div>
       </div>
     );
@@ -567,6 +843,11 @@ function AdminPanel({ onClose }: AdminPanelProps) {
             <h1 className="text-xl font-bold text-meet-text-primary">Admin Panel</h1>
             {stats && (
               <span className="text-xs text-meet-text-tertiary">v{stats.version}</span>
+            )}
+            {adminDisplayName && (
+              <span className="text-xs text-meet-text-tertiary hidden sm:inline" title={principal}>
+                {principal.startsWith('ldap:') ? 'LDAP admin: ' : ''}{adminDisplayName}
+              </span>
             )}
             <span className={`text-xs flex items-center gap-1 ${
               wsState === 'connected' ? 'text-meet-success' :
@@ -615,7 +896,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
 
         {/* Tabs */}
         <div className="flex gap-1 mt-4">
-          {(['dashboard', 'settings', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
+          {(['dashboard', 'settings', 'security', 'api-keys', 'webhooks', 'docs'] as TabType[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -625,7 +906,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                   : 'text-meet-text-secondary hover:text-meet-text-primary hover:bg-meet-bg-tertiary'
               }`}
             >
-              {tab === 'api-keys' ? 'API Keys' : tab.charAt(0).toUpperCase() + tab.slice(1)}
+              {tab === 'api-keys' ? 'API Keys' : tab === 'security' ? 'Account & Security' : tab.charAt(0).toUpperCase() + tab.slice(1)}
             </button>
           ))}
         </div>
@@ -935,6 +1216,30 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                       </div>
                     </div>
 
+                    {/* Default video quality */}
+                    <div className="glass rounded-xl p-6">
+                      <h3 className="text-lg font-semibold text-meet-text-primary">Default video quality</h3>
+                      <p className="text-sm text-meet-text-tertiary mt-1 mb-4">
+                        Applied to every meeting unless the room was created with a per-room override.
+                        <br />
+                        <span className="text-meet-text-secondary">
+                          <strong>auto</strong>: dynamic — adaptive simulcast pushing the highest layer the network sustains (recommended).
+                        </span>
+                      </p>
+                      <select
+                        value={settings.defaultVideoQuality}
+                        onChange={(e) => handleUpdateSettings({ defaultVideoQuality: e.target.value as ServerSettings['defaultVideoQuality'] })}
+                        disabled={settingsSaving}
+                        className="bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2 text-meet-text-primary focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      >
+                        <option value="auto">auto — dynamic (recommended)</option>
+                        <option value="max">max — 4K capture, highest possible</option>
+                        <option value="high">high — 1080p</option>
+                        <option value="balanced">balanced — 720p</option>
+                        <option value="low">low — 360p, lowest bandwidth</option>
+                      </select>
+                    </div>
+
                     {/* Iframe Embedding Domains */}
                     <div className="glass rounded-xl p-6">
                       <h3 className="text-lg font-semibold text-meet-text-primary">Iframe Embedding Domains</h3>
@@ -1036,6 +1341,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                         <li>• API access is always allowed regardless of Public Access setting</li>
                         <li>• Set to 0 for unlimited (not recommended for production)</li>
                         <li>• Iframe domains control the CSP frame-ancestors header</li>
+                        <li>• Your account, passkeys, email sign-in (SMTP) and the directory (LDAP) live in the <button type="button" onClick={() => setActiveTab('security')} className="text-meet-accent hover:underline">Account &amp; Security</button> tab</li>
                       </ul>
                     </div>
                   </>
@@ -1044,6 +1350,107 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                     Failed to load settings. <button onClick={loadSettings} className="text-meet-accent hover:underline">Try again</button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Account & Security Tab */}
+            {activeTab === 'security' && (
+              <div className="space-y-6">
+                {token && <ProfileSection token={token} refreshKey={passkeyList.length} />}
+
+                {/* Passkeys */}
+                <div className="glass rounded-xl p-6">
+                  <h3 className="text-lg font-semibold text-meet-text-primary mb-2">Passkeys</h3>
+                  <p className="text-sm text-meet-text-secondary mb-4">
+                    Sign in without a password using your device's biometrics or security key. Register one passkey per device (laptop, phone, security key) — there is no limit.
+                    {!passkeyStatus.configured && ' Disabled — PUBLIC_BASE_URL not configured.'}
+                    {passkeyStatus.configured && !browserSupportsPasskeys() && ' This browser does not support WebAuthn.'}
+                  </p>
+
+                  {passkeyError && (
+                    <div className="bg-meet-error/10 border border-meet-error/30 rounded-lg px-4 py-2 text-meet-error text-sm mb-3">
+                      {passkeyError}
+                    </div>
+                  )}
+
+                  {passkeyList.length === 0 ? (
+                    <p className="text-sm text-meet-text-tertiary mb-4">No passkeys registered yet.</p>
+                  ) : (
+                    <ul className="space-y-2 mb-4">
+                      {passkeyList.map((pk) => (
+                        <li key={pk.id} className="flex items-center justify-between bg-meet-bg-tertiary border border-meet-border rounded-lg px-4 py-2">
+                          <div className="min-w-0">
+                            <div className="text-sm text-meet-text-primary truncate">{pk.label}</div>
+                            <div className="text-xs text-meet-text-tertiary">
+                              added {new Date(pk.createdAt).toLocaleDateString()}
+                              {pk.lastUsedAt ? ` · last used ${new Date(pk.lastUsedAt).toLocaleDateString()}` : ' · never used'}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!token) return;
+                              setPasskeyError('');
+                              try {
+                                await deleteRegisteredPasskey(token, pk.id);
+                                setPasskeyList((list) => list.filter((p) => p.id !== pk.id));
+                                const status = await getPasskeyStatus();
+                                setPasskeyStatus(status);
+                              } catch (e) {
+                                setPasskeyError(e instanceof Error ? e.message : 'Failed to delete passkey');
+                              }
+                            }}
+                            className="text-meet-error hover:underline text-sm"
+                          >
+                            Remove
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  {passkeyStatus.configured && browserSupportsPasskeys() && (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={newPasskeyLabel}
+                        onChange={(e) => setNewPasskeyLabel(e.target.value)}
+                        placeholder="Label (e.g. 'Work laptop')"
+                        className="flex-1 bg-meet-bg-tertiary border border-meet-border rounded-xl px-4 py-2 text-sm text-meet-text-primary placeholder-meet-text-disabled focus:border-meet-accent focus:ring-1 focus:ring-meet-accent transition-smooth outline-none"
+                      />
+                      <button
+                        type="button"
+                        disabled={isRegisteringPasskey}
+                        onClick={async () => {
+                          if (!token) return;
+                          setPasskeyError('');
+                          setIsRegisteringPasskey(true);
+                          try {
+                            await registerPasskey(token, newPasskeyLabel || 'Passkey');
+                            setNewPasskeyLabel('');
+                            const list = await listRegisteredPasskeys(token);
+                            setPasskeyList(list);
+                            const status = await getPasskeyStatus();
+                            setPasskeyStatus(status);
+                          } catch (e) {
+                            setPasskeyError(e instanceof Error ? e.message : 'Failed to register passkey');
+                          } finally {
+                            setIsRegisteringPasskey(false);
+                          }
+                        }}
+                        className="bg-meet-accent hover:bg-meet-accent-dark disabled:opacity-50 text-meet-bg font-medium px-4 py-2 rounded-xl transition-smooth text-sm whitespace-nowrap"
+                      >
+                        {isRegisteringPasskey ? 'Registering…' : 'Register passkey'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Email sign-in (SMTP) */}
+                {token && <SmtpSettingsSection token={token} passkeyCount={passkeyList.length} />}
+
+                {/* Directory (LDAP) */}
+                {token && <LdapSettingsSection token={token} />}
               </div>
             )}
 
@@ -1090,7 +1497,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                   </form>
 
                   {/* Show created key */}
-                  {createdKey && (
+                  {createdKey && !createdKey.rotated && (
                     <div className="mt-4 p-4 bg-meet-success/10 border border-meet-success/30 rounded-lg">
                       <p className="text-meet-success text-sm mb-2">API key created! Copy it now - it won't be shown again.</p>
                       <code className="block bg-meet-bg-tertiary p-3 rounded text-sm text-meet-text-primary font-mono break-all">
@@ -1112,6 +1519,26 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                 {/* API Keys List */}
                 <div className="glass rounded-xl p-6">
                   <h3 className="text-lg font-semibold text-meet-text-primary mb-4">API Keys</h3>
+                  {createdKey?.rotated && (
+                    <div className="mb-4 p-4 bg-meet-success/10 border border-meet-success/30 rounded-lg" role="status">
+                      <p className="text-meet-success text-sm mb-2">
+                        New value for “{createdKey.name}”. Copy it now - it won't be shown again. The old value no longer works;
+                        where it was used (for Nodus: Settings → MEET calls → Replace API key), enter this one.
+                      </p>
+                      <code className="block bg-meet-bg-tertiary p-3 rounded text-sm text-meet-text-primary font-mono break-all">
+                        {createdKey.key}
+                      </code>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(createdKey.key);
+                          setCreatedKey(null);
+                        }}
+                        className="mt-2 text-sm text-meet-accent hover:underline"
+                      >
+                        Copy and dismiss
+                      </button>
+                    </div>
+                  )}
                   {apiKeys.length === 0 ? (
                     <p className="text-meet-text-tertiary">No API keys created yet</p>
                   ) : (
@@ -1135,17 +1562,36 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                               ))}
                             </div>
                           </div>
-                          <button
-                            onClick={() => handleRevokeApiKey(key.id)}
-                            className="text-meet-error hover:text-meet-error/80 text-sm"
-                          >
-                            Revoke
-                          </button>
+                          <div className="flex flex-wrap items-center justify-end gap-3">
+                            {rotateConfirm === key.id ? (
+                              <>
+                                <span className="text-sm text-meet-text-secondary">New value now? The old one stops working.</span>
+                                <button onClick={() => handleRotateApiKey(key.id)} className="text-meet-accent hover:underline text-sm">
+                                  Yes, rotate
+                                </button>
+                                <button onClick={() => setRotateConfirm(null)} className="text-meet-text-tertiary hover:underline text-sm">
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button onClick={() => setRotateConfirm(key.id)} className="text-meet-accent hover:underline text-sm">
+                                Rotate
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleRevokeApiKey(key.id)}
+                              className="text-meet-error hover:text-meet-error/80 text-sm"
+                            >
+                              Revoke
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
+
+                {token && <NodusSettingsSection token={token} apiKeys={apiKeys} />}
               </div>
             )}
 
@@ -1572,9 +2018,9 @@ class MeetIntegration {
     return response.json();
   }
 
-  // Generate join URL (uses frontend URL for iframe)
+  // Generate join URL (frontend URL; embed=1 skips MEET's create/join screen)
   getJoinUrl(roomName, participantName) {
-    const params = new URLSearchParams({ room: roomName });
+    const params = new URLSearchParams({ room: roomName, embed: '1' });
     if (participantName) params.set('name', participantName);
     return \\\`\\\${this.serverUrl}/?\\\${params.toString()}\\\`;
   }
@@ -1604,7 +2050,7 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');
 \`\`\`jsx
 function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \\\`${frontendUrl}/?room=\\\${roomId}\\\${
+  const meetUrl = \\\`${frontendUrl}/?room=\\\${roomId}&embed=1\\\${
     participantName ? \\\`&name=\\\${encodeURIComponent(participantName)}\\\` : ''
   }\\\`;
 
@@ -1852,9 +2298,9 @@ ${isSubdomainDeployment ? `
     return response.json();
   }
 
-  // Generate join URL (uses frontend URL for iframe)
+  // Generate join URL (frontend URL; embed=1 skips MEET's create/join screen)
   getJoinUrl(roomName, participantName) {
-    const params = new URLSearchParams({ room: roomName });
+    const params = new URLSearchParams({ room: roomName, embed: '1' });
     if (participantName) params.set('name', participantName);
     return \`\${this.serverUrl}/?\${params.toString()}\`;
   }
@@ -1884,7 +2330,7 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
                       <div className="bg-meet-bg-tertiary rounded-lg p-4 mb-4">
                         <pre className="text-xs text-meet-text-primary overflow-x-auto"><code>{`function MeetEmbed({ roomId, participantName }) {
   const [isLoading, setIsLoading] = useState(true);
-  const meetUrl = \`${frontendUrl}/?room=\${roomId}\${
+  const meetUrl = \`${frontendUrl}/?room=\${roomId}&embed=1\${
     participantName ? \`&name=\${encodeURIComponent(participantName)}\` : ''
   }\`;
 
@@ -1902,6 +2348,19 @@ meet.embedMeeting('meeting-container', meeting.room.name, 'John');`}</code></pre
   );
 }`}</code></pre>
                       </div>
+
+                      {/* Embed messaging + lifecycle */}
+                      <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Embed messaging API &amp; keeping the call alive</h3>
+                      <p className="text-meet-text-secondary text-sm mb-3">
+                        Inside an iframe MEET posts events to your page (<code className="text-meet-accent">source: "meet"</code>) and accepts commands via <code className="text-meet-accent">iframe.contentWindow.postMessage</code>. Full reference in API.md.
+                      </p>
+                      <ul className="list-disc list-inside space-y-1 text-meet-text-secondary text-sm mb-4">
+                        <li><strong className="text-meet-text-primary">Events:</strong> <code className="text-meet-accent">meet:ready</code>, <code className="text-meet-accent">meet:joined</code> (with <code className="text-meet-accent">joinedAt</code> for your timer), <code className="text-meet-accent">meet:left</code> (<code className="text-meet-accent">reason</code>, <code className="text-meet-accent">willRejoin</code>), <code className="text-meet-accent">meet:participants</code>, <code className="text-meet-accent">meet:screenshare</code>, <code className="text-meet-accent">meet:media</code>, <code className="text-meet-accent">meet:layout</code>, <code className="text-meet-accent">meet:state</code></li>
+                        <li><strong className="text-meet-text-primary">Commands:</strong> <code className="text-meet-accent">meet:leave</code>, <code className="text-meet-accent">meet:end</code>, <code className="text-meet-accent">meet:mute</code>, <code className="text-meet-accent">meet:screenshare</code>, <code className="text-meet-accent">meet:compact</code>, <code className="text-meet-accent">meet:hideEndCall</code>, <code className="text-meet-accent">meet:pip</code>, <code className="text-meet-accent">meet:fullscreen</code>, <code className="text-meet-accent">meet:get-state</code></li>
+                        <li><strong className="text-meet-text-primary">Never move or re-mount the iframe</strong> (PiP wrappers, fullscreen containers, re-renders): that reloads it and ends the screen share. Use <code className="text-meet-accent">iframe.requestFullscreen()</code>, restyle the wrapper with CSS, and send <code className="text-meet-accent">meet:compact</code> for your PiP form.</li>
+                        <li><strong className="text-meet-text-primary">Invite links</strong> carry only <code className="text-meet-accent">room</code> — never the inviter's <code className="text-meet-accent">name</code>. Identities are per device, so one person can join from several devices.</li>
+                        <li><strong className="text-meet-text-primary">Popup mode:</strong> open MEET with <code className="text-meet-accent">window.open</code> instead of framing it and the same API applies — events go to <code className="text-meet-accent">window.opener</code>, commands to the window handle. MEET is top-level there, so its picture-in-picture button opens a real always-on-top window (a frame gets the floating video instead). Never pass <code className="text-meet-accent">noopener</code>: it severs the bridge. Phones have no popup windows, so <code className="text-meet-accent">window.open</code> gives a tab there — which still carries the bridge.</li>
+                      </ul>
 
                       {/* Troubleshooting */}
                       <h3 className="text-xl font-semibold text-meet-text-primary mt-6 mb-3">Troubleshooting</h3>

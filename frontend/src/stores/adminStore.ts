@@ -46,6 +46,9 @@ interface AdminState {
   token: string | null;
   expiresAt: string | null;
   isFirstLogin: boolean;
+  // 'local' or 'ldap:<dn>' — decides which account-management controls show.
+  principal: string;
+  displayName: string;
 
   // Data
   stats: ServerStats | null;
@@ -58,7 +61,7 @@ interface AdminState {
   error: string | null;
 
   // Actions
-  setAuth: (token: string, expiresAt: string, isFirstLogin?: boolean) => void;
+  setAuth: (token: string, expiresAt: string, isFirstLogin?: boolean, principal?: string, displayName?: string) => void;
   logout: () => void;
   setStats: (stats: ServerStats) => void;
   setApiKeys: (keys: ApiKey[]) => void;
@@ -76,6 +79,8 @@ const initialState = {
   token: null,
   expiresAt: null,
   isFirstLogin: false,
+  principal: 'local',
+  displayName: '',
   stats: null,
   apiKeys: [],
   webhooks: [],
@@ -89,12 +94,14 @@ export const useAdminStore = create<AdminState>()(
     (set, get) => ({
       ...initialState,
 
-      setAuth: (token, expiresAt, isFirstLogin = false) =>
+      setAuth: (token, expiresAt, isFirstLogin = false, principal = 'local', displayName = '') =>
         set({
           isAuthenticated: true,
           token,
           expiresAt,
           isFirstLogin,
+          principal,
+          displayName,
           error: null,
         }),
 
@@ -122,6 +129,8 @@ export const useAdminStore = create<AdminState>()(
         token: state.token,
         expiresAt: state.expiresAt,
         isAuthenticated: state.isAuthenticated,
+        principal: state.principal,
+        displayName: state.displayName,
       }),
     }
   )

@@ -32,6 +32,15 @@ services:
       - LIVEKIT_URL=http://livekit:7880
       - PORT=8080
       - CORS_ORIGIN=*
+      - MEET_DATA_DIR=/data
+      # Public URL of the SPA. WebAuthn derives its rpID + allowed origins
+      # from this; without it the admin panel reports passkeys disabled.
+      # Also used to build joinUrl for rooms created via POST /api/rooms.
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://${MEET_DOMAIN:-localhost}}
+    # Persistent state for the API (SQLite: admin account, passkeys, SMTP /
+    # email sign-in settings, API keys, webhooks). Survives `compose down`.
+    volumes:
+      - meet_api_data:/data
     depends_on:
       - livekit
     restart: unless-stopped
@@ -57,3 +66,6 @@ services:
 networks:
   meet-network:
     driver: bridge
+
+volumes:
+  meet_api_data:

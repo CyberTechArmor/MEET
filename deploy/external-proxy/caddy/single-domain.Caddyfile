@@ -1,0 +1,84 @@
+# MEET — single-domain Caddyfile for an EXTERNAL host Caddy.
+#
+# Drop this snippet into the host Caddy's config (typically
+# /etc/caddy/Caddyfile or a fragment under /etc/caddy/conf.d/). The host
+# Caddy owns TLS and ACME. The MEET stack itself ships NO TLS.
+#
+# Wiring assumed below:
+#
+#   browser ──► host Caddy (TLS, ACME) ──► <UPSTREAM_HOST>:<port> ──► MEET
+#
+# UPSTREAM_HOST is the address the host Caddy uses to reach the MEET
+# container. Examples by topology:
+#   • Incus/LXC bridge:   10.x.y.z   (the container's bridge IP)
+#   • Same host as MEET:  127.0.0.1
+#   • Remote host:        the LAN IP of the box running MEET
+# Replace the three reverse_proxy targets below before deploying.
+
+meet.example.com {
+	encode gzip zstd
+
+	# LiveKit signaling (WebSocket). Proxy strips the /livekit prefix so
+	# LiveKit sees a normal /rtc request. Long timeouts because signaling
+	# sessions outlive the default 60s read/write timeout.
+	handle_path /livekit/* {
+		reverse_proxy 127.0.0.1:7880 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			flush_interval -1
+			transport http {
+				keepalive 30s
+				keepalive_idle_conns 10
+				read_timeout 24h
+				write_timeout 24h
+			}
+		}
+	}
+
+	# API. Body limit raised to 50 MiB so avatar / future recording uploads
+	# aren't truncated by the proxy default.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	# Admin WebSocket on the API.
+	handle /ws/* {
+		reverse_proxy 127.0.0.1:8080 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			flush_interval -1
+		}
+	}
+
+	# Frontend (catch-all).
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	request_body {
+		max_size 50MB
+	}
+
+	header {
+		Content-Security-Policy "frame-ancestors *"
+		-X-Frame-Options
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}

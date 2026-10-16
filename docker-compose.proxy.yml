@@ -14,6 +14,11 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # Your own certificate (install.sh option 2 → "existing certificate"):
+      # tls/<domain>.crt + tls/<domain>.key on the host, referenced from
+      # .env as TLS_MODE="tls /certs/<domain>.crt /certs/<domain>.key".
+      # Harmless (empty dir) when Let's Encrypt is used instead.
+      - ${TLS_CERT_DIR:-./tls}:/certs:ro
     environment:
       - MEET_DOMAIN=${MEET_DOMAIN:-localhost}
       - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
@@ -50,6 +55,15 @@ services:
       - LIVEKIT_URL=http://livekit:7880
       - PORT=8080
       - CORS_ORIGIN=*
+      - MEET_DATA_DIR=/data
+      # Public URL of the SPA. WebAuthn derives its rpID + allowed origins
+      # from this; without it the admin panel reports passkeys disabled.
+      # Also used to build joinUrl for rooms created via POST /api/rooms.
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-https://${MEET_DOMAIN:-localhost}}
+    # Persistent state for the API (SQLite: admin account, passkeys, SMTP /
+    # email sign-in settings, API keys, webhooks). Survives `compose down`.
+    volumes:
+      - meet_api_data:/data
     depends_on:
       - livekit
     restart: unless-stopped
@@ -82,3 +96,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  meet_api_data:

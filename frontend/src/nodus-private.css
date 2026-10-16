@@ -1,0 +1,2 @@
+/* Only the private embed: keep reused compact media controls comfortably tappable. */
+.nodus-private-root button{min-width:44px;min-height:44px}

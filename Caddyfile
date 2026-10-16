@@ -12,9 +12,11 @@
 
 # Main site block
 {$MEET_DOMAIN:localhost} {
-    # TLS configuration:
-    # - For domains: Caddy auto-obtains Let's Encrypt certificates
-    # - For IPs: Set TLS_MODE=internal in .env for self-signed certs
+    # TLS configuration (TLS_MODE in .env):
+    # - empty                                      → Let's Encrypt (domain must resolve straight here)
+    # - "tls internal"                             → self-signed (IP address installs)
+    # - "tls /certs/<domain>.crt /certs/<domain>.key" → your own certificate from ./tls
+    #   (Cloudflare Origin cert, wildcard, corporate CA — install.sh option 2 picks it)
     # - For localhost: HTTP only (no TLS needed)
     {$TLS_MODE:}
 
