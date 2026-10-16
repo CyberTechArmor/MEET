@@ -10,11 +10,12 @@ import {exactOrigin} from './nodus-contract.js';
 import type {RequestHandler} from 'express';
 
 /** Existing credential ID only. Its value remains inside the existing MEET server store. */
-export function installNodusPrivate(input:{app:Express;db:PrivateDatabase;authenticate:RequestHandler;media:PrivateMedia;livekitUrl:string;keyId:string;nodusOrigin:string;embedOrigin:string;key:(id:string)=>{key:string;permissions:string[]}|undefined;report:()=>void}){
+/** `connection` is read on every use, so an administrator's change applies at once without a restart. */
+export function installNodusPrivate(input:{app:Express;db:PrivateDatabase;authenticate:RequestHandler;media:PrivateMedia;livekitUrl:string;connection:()=>{keyId:string;nodusOrigin:string};embedOrigin:string;key:(id:string)=>{key:string;permissions:string[]}|undefined;report:()=>void}){
  const store=privateRoomStore(input.db);
- const selected=()=>{if(!input.keyId||!input.nodusOrigin)return undefined;try{exactOrigin(input.nodusOrigin);exactOrigin(input.embedOrigin);}catch{return undefined;}const key=input.key(input.keyId);return key?.permissions.some(p=>p==='write'||p==='admin')?key:undefined;};
- const service=privateMeet(store,input.media,id=>{const key=selected();return key&&id===input.keyId?callbackBinding({id,origin:input.nodusOrigin,embedOrigin:input.embedOrigin,credential:key.key}):undefined;});
- input.app.use('/api/integrations/nodus',nodusRoutes(service,input.authenticate,()=>!!selected(),()=>selected()?{keyId:input.keyId,nodusOrigin:input.nodusOrigin,embedOrigin:input.embedOrigin}:undefined));
+ const selected=()=>{const {keyId,nodusOrigin}=input.connection();if(!keyId||!nodusOrigin)return undefined;try{exactOrigin(nodusOrigin);exactOrigin(input.embedOrigin);}catch{return undefined;}const key=input.key(keyId);return key?.permissions.some(p=>p==='write'||p==='admin')?{keyId,nodusOrigin,key}:undefined;};
+ const service=privateMeet(store,input.media,id=>{const current=selected();return current&&id===current.keyId?callbackBinding({id,origin:current.nodusOrigin,embedOrigin:input.embedOrigin,credential:current.key.key}):undefined;});
+ input.app.use('/api/integrations/nodus',nodusRoutes(service,input.authenticate,()=>!!selected(),()=>{const current=selected();return current?{keyId:current.keyId,nodusOrigin:current.nodusOrigin,embedOrigin:input.embedOrigin}:undefined;}));
  // These guards remain active even without a configured connection: a reserved private name
  // must never become public because a connection was disabled or a process restarted.
  input.app.post('/api/token',rejectPrivateLegacy);
@@ -22,5 +23,5 @@ export function installNodusPrivate(input:{app:Express;db:PrivateDatabase;authen
  input.app.put('/api/rooms/:roomName',rejectPrivateLegacy);
  input.app.post('/api/end-meeting',rejectPrivateLegacy);
  const signals=privateSignaling(service,input.livekitUrl),watchdog=privateWatchdog(service,store,input.report);
- return {upgrade:(req:IncomingMessage,socket:Duplex,head:Buffer)=>signals.upgrade(req,socket,head),stop(){watchdog.stop();signals.stop();}};
+ return {configured:()=>!!selected(),upgrade:(req:IncomingMessage,socket:Duplex,head:Buffer)=>signals.upgrade(req,socket,head),stop(){watchdog.stop();signals.stop();}};
 }

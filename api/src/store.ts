@@ -15,6 +15,7 @@ import type {
   SmtpSettings,
   LdapSettings,
   LdapAdmin,
+  NodusSettings,
   UserSession,
 } from './types.js';
 
@@ -489,6 +490,42 @@ export function saveLdapSettings(s: LdapSettings): void {
 
 export function deleteLdapSettings(): boolean {
   const r = getDb().prepare('DELETE FROM settings WHERE key = ?').run(LDAP_KEY);
+  return r.changes > 0;
+}
+
+// ─────────────────────────── nodus settings ────────────────────────────
+//
+// Which API key acts for Nodus and the Nodus address, under their own key so
+// an administrator can rotate the key without touching the server.
+
+const NODUS_KEY = 'nodus';
+
+export function loadNodusSettings(): NodusSettings | undefined {
+  const row = getDb()
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .get(NODUS_KEY) as { value: string } | undefined;
+  if (!row) return undefined;
+  const parsed = JSON.parse(row.value) as Partial<NodusSettings>;
+  if (typeof parsed.keyId !== 'string' || typeof parsed.nodusOrigin !== 'string') return undefined;
+  return {
+    keyId: parsed.keyId,
+    nodusOrigin: parsed.nodusOrigin,
+    updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+    updatedBy: typeof parsed.updatedBy === 'string' ? parsed.updatedBy : '',
+  };
+}
+
+export function saveNodusSettings(s: NodusSettings): void {
+  getDb()
+    .prepare(
+      `INSERT INTO settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    )
+    .run(NODUS_KEY, JSON.stringify(s));
+}
+
+export function deleteNodusSettings(): boolean {
+  const r = getDb().prepare('DELETE FROM settings WHERE key = ?').run(NODUS_KEY);
   return r.changes > 0;
 }
 

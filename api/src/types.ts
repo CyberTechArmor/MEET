@@ -114,6 +114,19 @@ export interface SmtpSettings {
 // uses: gate the meeting frontend behind a directory sign-in
 // (requireForFrontend), and let selected directory users into the admin
 // panel (adminsEnabled + rows in ldap_admins).
+/**
+ * Nodus calls: which API key acts for Nodus and the Nodus address MEET checks
+ * each private join with. Saved by an administrator; takes effect at once.
+ * Neither value is a secret (the key's value stays in api_keys).
+ */
+export interface NodusSettings {
+  keyId: string;
+  nodusOrigin: string;
+  updatedAt: string;
+  /** Principal that saved it: 'local', 'ldap:<dn>' or 'apikey:<id>'. */
+  updatedBy: string;
+}
+
 export interface LdapSettings {
   enabled: boolean;
   // ldap://host:389 or ldaps://host:636

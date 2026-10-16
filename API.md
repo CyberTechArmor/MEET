@@ -1709,6 +1709,20 @@ render itself:
 | Emailed one-time code | `POST /api/admin/otp/request` → `POST /api/admin/otp/verify` | Available once SMTP is configured **and verified** (see below). 6 digits, 10-minute validity, 5 attempts, one code per 30 s. |
 | Password | `POST /api/admin/login` | Accepted only while email sign-in is **not** verified. Returns `403 PASSWORD_LOGIN_DISABLED` afterwards. |
 
+### Nodus calls connection
+
+```
+GET    /api/admin/nodus             { source: settings|environment|none, keyId, keyName, nodusOrigin, configured, problem, updatedAt, updatedBy, environmentSet }
+PUT    /api/admin/nodus             { keyId, nodusOrigin } → applies at once, no restart
+DELETE /api/admin/nodus             forget the saved choice → NODUS_INTEGRATION_KEY_ID / NODUS_ORIGIN apply again, if set
+POST   /api/admin/api-keys/:id/rotate   new value, same id → Nodus stays selected; enter the new value in Nodus
+```
+
+Admin only (also in **Admin → API Keys → Nodus calls**). `keyId` must be an
+existing key with write (or admin) access and `nodusOrigin` an exact https
+origin. A key presented to MEET can learn its own ID
+(`POST /api/integrations/nodus/identity`) but can never select itself.
+
 ### SMTP configuration (email sign-in)
 
 ```
