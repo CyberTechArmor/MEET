@@ -82,6 +82,12 @@ services:
       - TURN_TLS_PORT=${TURN_TLS_PORT:-5349}
       - TURN_UDP_PORT=${TURN_UDP_PORT:-3478}
       - MEET_DATA_DIR=/data
+    # Nodus calls (docs/nodus-private-client.md): NODUS_INTEGRATION_KEY_ID names the MEET API key
+    # that acts for Nodus and NODUS_ORIGIN the Nodus address MEET checks each join with. Neither
+    # is a secret, so they live in their own optional file and setting them never touches .env.
+    env_file:
+      - path: ./nodus.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     # Persistent state for the API: SQLite at /data/meet.db. Survives

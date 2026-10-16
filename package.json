@@ -1,0 +1,17 @@
+{
+  "name": "meet-private-call-validation",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "test": "node scripts/verify-private.mjs",
+    "test:private": "vitest run --config vitest.private.config.mjs --configLoader runner"
+  },
+  "devDependencies": {
+    "supertest": "7.3.0",
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
+  }
+}

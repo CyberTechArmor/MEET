@@ -1,3 +1,5 @@
+import {privateCallContext} from '../lib/nodusPrivateContext';
+import {ownPrivateMedia} from '../lib/nodusPrivateMedia';
 import { useCallback, useRef } from 'react';
 import {
   Room,
@@ -188,6 +190,7 @@ export function useLiveKit() {
     });
 
     room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+      if(sharedRoomInstance!==room)return;
       setConnectionState(ConnectionState.Disconnected);
       // Remember why, so embed mode can decide whether to rejoin on its
       // own (transient network trouble) or show the prompt (user left,
@@ -201,13 +204,15 @@ export function useLiveKit() {
       }
       leaveRequested = false;
       setLastDisconnectReason(effective);
+      const privateOwner=privateCallContext();
+      if(privateOwner?.room===room){privateOwner.stopMedia?.();privateOwner.onDisconnected?.(effective);}
       if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
         toast.error('This meeting was opened from another window');
       } else if (reason === DisconnectReason.ROOM_DELETED || reason === DisconnectReason.ROOM_CLOSED) {
         toast('The meeting has ended', { icon: '👋' });
       }
       // Clear session and reset state, keeping the display name
-      clearSession();
+      if(!privateCallContext())clearSession();
       sharedRoomInstance = null;
       sharedMeetingToken = null;
       resetKeepingName();
@@ -236,11 +241,13 @@ export function useLiveKit() {
   // embed auto-rejoin loop, which shows its own "Reconnecting…" state
   // instead of stacking one toast per attempt.
   const connect = useCallback(async (roomCode: string, displayName: string, opts: { silent?: boolean } = {}) => {
+    const privateContext=privateCallContext();
     try {
       setConnectionState(ConnectionState.Connecting);
 
       // Get token from API
-      const tokenResponse = await getToken(roomCode, displayName);
+      const tokenResponse = privateContext?await privateContext.credentials():await getToken(roomCode, displayName);
+      if(privateContext&&privateCallContext()!==privateContext)throw Error('Private call closed.');
       const { token, isHost: hostStatus, quality, iceServers } = tokenResponse;
 
       // Server picked a quality preset for this room (per-room override or
@@ -255,7 +262,8 @@ export function useLiveKit() {
       setRoomCode(roomCode);
 
       // Create room and setup events
-      const newRoom = createRoom();
+      const newRoom = createRoom(undefined,!!privateContext);
+      if(privateContext){privateContext.room=newRoom;privateContext.stopMedia=ownPrivateMedia(newRoom);}
       roomRef.current = newRoom;
       sharedRoomInstance = newRoom; // Store in singleton for cross-component access
       setupRoomEvents(newRoom);
@@ -268,8 +276,9 @@ export function useLiveKit() {
       const connectOpts = iceServers && iceServers.length > 0
         ? { rtcConfig: { iceServers } as RTCConfiguration }
         : undefined;
-      await newRoom.connect(getLiveKitUrl(), token, connectOpts);
-      sharedMeetingToken = token;
+      await newRoom.connect(privateContext?.url??getLiveKitUrl(), token, connectOpts);
+      if(privateContext&&privateCallContext()!==privateContext){await newRoom.disconnect();throw Error('Private call closed.');}
+      sharedMeetingToken = privateContext?null:token;
 
       // livekit-client registers a 'freeze' listener that disconnects the
       // room whenever the browser freezes the page (background tab, a
@@ -304,8 +313,7 @@ export function useLiveKit() {
 
       // Save session for auto-rejoin on refresh; remember the name so an
       // embed link without `name` can reuse it next time.
-      saveSession(roomCode, displayName, hostStatus);
-      rememberDisplayName(displayName);
+      if(!privateContext){saveSession(roomCode, displayName, hostStatus);rememberDisplayName(displayName);}
       setLastDisconnectReason(null);
 
       // Fire-and-forget mic + camera. Promise.then/.catch instead of await,
@@ -327,6 +335,7 @@ export function useLiveKit() {
       );
 
     } catch (error) {
+      if(privateContext&&privateCallContext()!==privateContext)throw error;
       console.error('Failed to connect:', error);
       setConnectionState(ConnectionState.Disconnected);
 
@@ -361,14 +370,15 @@ export function useLiveKit() {
 
   // Disconnect from room
   const disconnect = useCallback(async () => {
+    privateCallContext()?.stopMedia?.();
     // Clear saved session
-    clearSession();
+    if(!privateCallContext())clearSession();
 
-    if (sharedRoomInstance) {
+    const leaving=sharedRoomInstance;
+    if (leaving) {
       leaveRequested = true;
-      await sharedRoomInstance.disconnect();
-      sharedRoomInstance = null;
-      sharedMeetingToken = null;
+      await leaving.disconnect();
+      if(sharedRoomInstance===leaving){sharedRoomInstance=null;sharedMeetingToken=null;}
     }
     if (roomRef.current) {
       roomRef.current = null;

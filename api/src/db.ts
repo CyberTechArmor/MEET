@@ -18,6 +18,7 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
+import {NODUS_PRIVATE_SCHEMA} from './nodus-private-store.js';
 
 const DATA_DIR = process.env.MEET_DATA_DIR || '/data';
 const DB_PATH = path.join(DATA_DIR, 'meet.db');
@@ -181,6 +182,8 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
       CREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);
     `);
   },
+  // v5 — private integration rooms, one-use grants and opaque signaling sessions.
+  (db) => { db.exec(NODUS_PRIVATE_SCHEMA); },
 ];
 
 function currentSchemaVersion(db: Database.Database): number {
