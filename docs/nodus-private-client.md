@@ -9,3 +9,17 @@ The browser uses the pinned SDK in dual-peer/v0 mode and a private-only WebSocke
 The parent owns Leave and End controls. Private VideoRoom does not show a public room code or suggest sharing one. Parent Leave receives an acknowledgement after the shared room disconnect completes. The local loopback fixture demonstrated ended microphone/camera tracks and closed signaling. Real screen-share and two-device TURN acceptance remain release requirements.
 
 Run API `test:nodus` only after the API is built and frontend exact dependencies installed; it now includes actual generated-protocol compatibility checks. Local evidence additionally includes full frontend TypeScript/build and actual SDK2.22.3/protocol1.50.4 in an Edge155 loopback using synthetic media. These do not replace native API SQLite tests or production activation checks. Install this with the reviewed lifecycle correction before activation; do not deploy the earlier window/device revocation behavior.
+
+## Connecting Nodus
+
+Nodus connects with only MEET's address and one MEET API key with write access, entered in Nodus Settings → Connections → MEET calls. With that key, Nodus calls `POST /api/integrations/nodus/identity`, which answers the key's ID and whether MEET selected it; only for the selected key does it also answer the Nodus address MEET checks with and MEET's public address.
+
+To select the key, set two values in `deploy/external-proxy/nodus.env` (not tracked; neither value is a secret) and recreate the API with `docker compose up -d --no-deps meet-api`:
+
+```
+NODUS_INTEGRATION_KEY_ID=<the key ID Nodus Settings shows>
+NODUS_ORIGIN=https://nodus.example.com
+```
+
+`PUBLIC_BASE_URL` must be MEET's https address. Until both values are set and the key has write or admin permission, private rooms stay unavailable and Nodus shows "Waiting for MEET".
+
