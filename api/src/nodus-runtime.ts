@@ -14,7 +14,7 @@ export function installNodusPrivate(input:{app:Express;db:PrivateDatabase;authen
  const store=privateRoomStore(input.db);
  const selected=()=>{if(!input.keyId||!input.nodusOrigin)return undefined;try{exactOrigin(input.nodusOrigin);exactOrigin(input.embedOrigin);}catch{return undefined;}const key=input.key(input.keyId);return key?.permissions.some(p=>p==='write'||p==='admin')?key:undefined;};
  const service=privateMeet(store,input.media,id=>{const key=selected();return key&&id===input.keyId?callbackBinding({id,origin:input.nodusOrigin,embedOrigin:input.embedOrigin,credential:key.key}):undefined;});
- input.app.use('/api/integrations/nodus',nodusRoutes(service,input.authenticate,()=>!!selected(),()=>selected()?{keyId:input.keyId,nodusOrigin:input.nodusOrigin}:undefined));
+ input.app.use('/api/integrations/nodus',nodusRoutes(service,input.authenticate,()=>!!selected(),()=>selected()?{keyId:input.keyId,nodusOrigin:input.nodusOrigin,embedOrigin:input.embedOrigin}:undefined));
  // These guards remain active even without a configured connection: a reserved private name
  // must never become public because a connection was disabled or a process restarted.
  input.app.post('/api/token',rejectPrivateLegacy);

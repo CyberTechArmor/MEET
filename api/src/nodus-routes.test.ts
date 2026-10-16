@@ -19,9 +19,9 @@ describe('private and legacy HTTP boundaries',()=>{
   const app=express();app.use(express.json());let configured=true;
   // Stands in for the real API-key middleware: a header names the presenting key.
   const authenticate=(req:any,_res:any,next:any)=>{const id=req.get('x-test-key');if(id)req.apiKey={id};next();};
-  app.use('/api/integrations/nodus',nodusRoutes({} as any,authenticate,()=>configured,()=>({keyId:'k-nodus',nodusOrigin:'https://nodus.example.test'})));
+  app.use('/api/integrations/nodus',nodusRoutes({} as any,authenticate,()=>configured,()=>({keyId:'k-nodus',nodusOrigin:'https://nodus.example.test',embedOrigin:'https://meet.example.test'})));
   const ask=(key?:string)=>{const r=request(app).post('/api/integrations/nodus/identity').send({});return key?r.set('x-test-key',key):r;};
-  const selected=await ask('k-nodus');expect(selected.body).toEqual({contract:'nodus-private-room-v1',integrationId:'k-nodus',selected:true,nodusOrigin:'https://nodus.example.test'});expect(selected.headers['cache-control']).toBe('no-store');
+  const selected=await ask('k-nodus');expect(selected.body).toEqual({contract:'nodus-private-room-v1',integrationId:'k-nodus',selected:true,nodusOrigin:'https://nodus.example.test',embedOrigin:'https://meet.example.test'});expect(selected.headers['cache-control']).toBe('no-store');
   expect((await ask('k-other')).body).toEqual({contract:'nodus-private-room-v1',integrationId:'k-other',selected:false});
   configured=false;expect((await ask('k-nodus')).body).toEqual({contract:'nodus-private-room-v1',integrationId:'k-nodus',selected:false});
   expect((await ask()).status).toBe(403);
