@@ -7,6 +7,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { AccessToken, RoomServiceClient, TokenVerifier } from 'livekit-server-sdk';
 import {installNodusPrivate} from './nodus-runtime.js';
+import {exactOrigin} from './nodus-contract.js';
 
 const app = express();
 const server = http.createServer(app);
@@ -46,7 +47,7 @@ const roomTokenVerifier = new TokenVerifier(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
 // login, so losing them on restart is acceptable. Room metadata is also
 // transient (display names while a room exists).
 
-import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset, SmtpSettings, LdapSettings } from './types.js';
+import type { ApiKey, Webhook, PersistedSettings, VideoQualityPreset, SmtpSettings, LdapSettings, NodusSettings } from './types.js';
 import { isValidVideoQuality, VIDEO_QUALITY_PRESET_VALUES } from './types.js';
 import * as store from './store.js';
 import { getDb } from './db.js';
@@ -181,6 +182,22 @@ function smtpVerified(): boolean {
 // 'ldap'. Old blobs are merged over the defaults so new fields pick up
 // sane values.
 let ldapSettings: LdapSettings = { ...ldap.LDAP_DEFAULTS, ...(store.loadLdapSettings() ?? {}) };
+
+// Nodus calls: which API key acts for Nodus and the Nodus address MEET checks
+// each private join with. An administrator's saved choice (settings key
+// 'nodus') wins and applies at once; NODUS_INTEGRATION_KEY_ID / NODUS_ORIGIN
+// (deploy/external-proxy/nodus.env) remain the fallback when nothing is saved.
+let nodusSettings: NodusSettings | null = store.loadNodusSettings() ?? null;
+const nodusEnvironment = {
+  keyId: (process.env.NODUS_INTEGRATION_KEY_ID || '').trim(),
+  nodusOrigin: (process.env.NODUS_ORIGIN || '').trim(),
+};
+
+function nodusConnection(): { keyId: string; nodusOrigin: string; source: 'settings' | 'environment' | 'none' } {
+  if (nodusSettings) return { keyId: nodusSettings.keyId, nodusOrigin: nodusSettings.nodusOrigin, source: 'settings' };
+  if (nodusEnvironment.keyId || nodusEnvironment.nodusOrigin) return { ...nodusEnvironment, source: 'environment' };
+  return { keyId: '', nodusOrigin: '', source: 'none' };
+}
 
 // The built-in ("local") account can be switched off by a directory
 // admin. Every local credential — password, passkeys, emailed codes —
@@ -1242,6 +1259,43 @@ Configure webhooks to receive real-time notifications for events like:
         responses: { '200': { description: '{ revoked }' } },
       },
     },
+    '/api/admin/nodus': {
+      get: {
+        tags: ['Nodus'],
+        summary: 'Get the Nodus calls connection',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: '{ source: settings|environment|none, keyId, keyName, nodusOrigin, configured, problem, updatedAt, updatedBy, environmentSet }' } },
+      },
+      put: {
+        tags: ['Nodus'],
+        summary: 'Choose the API key that acts for Nodus and the Nodus address',
+        description: 'Takes effect at once, without a restart. The key must exist and have write (or admin) permission; nodusOrigin must be an exact https origin. Overrides NODUS_INTEGRATION_KEY_ID / NODUS_ORIGIN.',
+        security: [{ bearerAuth: [] }],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                required: ['keyId', 'nodusOrigin'],
+                properties: {
+                  keyId: { type: 'string', description: 'ID of an existing API key with write access' },
+                  nodusOrigin: { type: 'string', example: 'https://nodus.example.com' },
+                },
+              },
+            },
+          },
+        },
+        responses: { '200': { description: 'Saved; same shape as GET' }, '400': { description: 'Unknown key, key without write access, or not an https origin' } },
+      },
+      delete: {
+        tags: ['Nodus'],
+        summary: 'Forget the saved Nodus connection',
+        description: 'The server settings NODUS_INTEGRATION_KEY_ID / NODUS_ORIGIN apply again, if set; otherwise private calls are off.',
+        security: [{ bearerAuth: [] }],
+        responses: { '200': { description: 'Same shape as GET' } },
+      },
+    },
     '/api/admin/ldap': {
       get: {
         tags: ['Directory'],
@@ -2082,7 +2136,7 @@ const boundedPrivateCall = <T,>(work:Promise<T>):Promise<T> => {
 };
 const nodusPrivate = installNodusPrivate({
   app, db:getDb(), authenticate:authenticateApiKeyOrAdmin,
-  keyId:process.env.NODUS_INTEGRATION_KEY_ID || '', nodusOrigin:process.env.NODUS_ORIGIN || '', embedOrigin:PUBLIC_BASE_URL,
+  connection:()=>nodusConnection(), embedOrigin:PUBLIC_BASE_URL,
   key:store.getApiKey, livekitUrl:LIVEKIT_URL, report:()=>console.warn('Private meeting verification failed'),
   media:{
     iceServers:buildIceServers,
@@ -2107,6 +2161,80 @@ const nodusPrivate = installNodusPrivate({
     end:async room=>{if((await boundedPrivateCall(roomService.listRooms([room]))).length)await boundedPrivateCall(roomService.deleteRoom(room));},
     participants:async room=>(await boundedPrivateCall(roomService.listParticipants(room))).map(p=>p.identity),
   },
+});
+
+// ───────────────────────── Nodus calls connection ─────────────────────────
+// Admin only. Selecting the key here is what lets Nodus act for private calls:
+// a key presented to MEET can learn its own ID but can never select itself.
+
+function nodusProblem(c: ReturnType<typeof nodusConnection>): string | null {
+  if (c.source === 'none') return null;
+  if (!c.keyId) return 'Choose the API key that acts for Nodus.';
+  const key = store.getApiKey(c.keyId);
+  if (!key) return 'The selected API key no longer exists. Choose another key.';
+  if (!key.permissions.some((p) => p === 'write' || p === 'admin')) return 'The selected API key needs write access.';
+  try { exactOrigin(c.nodusOrigin); } catch { return 'The Nodus address must be its https address, like https://nodus.example.com.'; }
+  try { exactOrigin(PUBLIC_BASE_URL); } catch { return "MEET's PUBLIC_BASE_URL must be its https address."; }
+  return null;
+}
+
+function nodusView() {
+  const c = nodusConnection();
+  const key = c.keyId ? store.getApiKey(c.keyId) : undefined;
+  return {
+    source: c.source,
+    keyId: c.keyId || null,
+    keyName: key?.name ?? null,
+    nodusOrigin: c.nodusOrigin || null,
+    configured: nodusPrivate.configured(),
+    problem: nodusProblem(c),
+    updatedAt: nodusSettings?.updatedAt || null,
+    updatedBy: nodusSettings?.updatedBy || null,
+    environmentSet: !!(nodusEnvironment.keyId || nodusEnvironment.nodusOrigin),
+  };
+}
+
+app.get('/api/admin/nodus', authenticateAdmin, (_req: AuthRequest, res: Response) => {
+  res.json(nodusView());
+});
+
+interface UpdateNodusRequest {
+  keyId?: unknown;
+  nodusOrigin?: unknown;
+}
+
+app.put('/api/admin/nodus', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  const body = (req.body ?? {}) as UpdateNodusRequest;
+  const keyId = typeof body.keyId === 'string' ? body.keyId.trim() : '';
+  const key = keyId ? store.getApiKey(keyId) : undefined;
+  if (!key) {
+    res.status(400).json({ error: 'Choose an existing API key' });
+    return;
+  }
+  if (!key.permissions.some((p) => p === 'write' || p === 'admin')) {
+    res.status(400).json({ error: 'The API key for Nodus needs write access' });
+    return;
+  }
+  const raw = typeof body.nodusOrigin === 'string' ? body.nodusOrigin.trim().toLowerCase().replace(/\/+$/, '') : '';
+  let nodusOrigin: string;
+  try {
+    nodusOrigin = exactOrigin(raw);
+  } catch {
+    res.status(400).json({ error: 'Enter only the Nodus https address, like https://nodus.example.com' });
+    return;
+  }
+  nodusSettings = { keyId, nodusOrigin, updatedAt: new Date().toISOString(), updatedBy: req.principal || 'admin' };
+  store.saveNodusSettings(nodusSettings);
+  console.log(`[nodus] connection saved (key=${keyId} origin=${nodusOrigin} by=${nodusSettings.updatedBy})`);
+  res.json({ success: true, ...nodusView() });
+});
+
+// Forget the saved choice; the server's NODUS_* settings apply again, if any.
+app.delete('/api/admin/nodus', authenticateAdmin, (req: AuthRequest, res: Response) => {
+  nodusSettings = null;
+  store.deleteNodusSettings();
+  console.log(`[nodus] saved connection removed by ${req.principal || 'admin'}; ${nodusEnvironment.keyId ? 'server settings apply' : 'private calls are off'}`);
+  res.json({ success: true, ...nodusView() });
 });
 
 // Token generation endpoint

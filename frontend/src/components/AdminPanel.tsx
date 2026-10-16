@@ -8,6 +8,7 @@ import {
   listApiKeys,
   createApiKey,
   revokeApiKey,
+  rotateApiKey,
   listWebhooks,
   createWebhook,
   updateWebhook,
@@ -37,6 +38,7 @@ import type { ApiKeyInfo, WebhookInfo, CreateApiKeyResponse, CreateWebhookRespon
 import type { RoomInfo } from '../stores/adminStore';
 import SmtpSettingsSection from './SmtpSettingsSection';
 import LdapSettingsSection from './LdapSettingsSection';
+import NodusSettingsSection from './NodusSettingsSection';
 import ProfileSection from './ProfileSection';
 
 type TabType = 'dashboard' | 'settings' | 'security' | 'api-keys' | 'webhooks' | 'docs';
@@ -208,7 +210,9 @@ function AdminPanel({ onClose }: AdminPanelProps) {
   // API Key creation state
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyPermissions, setNewKeyPermissions] = useState<string[]>(['read']);
-  const [createdKey, setCreatedKey] = useState<CreateApiKeyResponse | null>(null);
+  const [createdKey, setCreatedKey] = useState<(CreateApiKeyResponse & { rotated?: boolean }) | null>(null);
+  // Key whose Rotate was clicked once; the second click confirms.
+  const [rotateConfirm, setRotateConfirm] = useState<string | null>(null);
 
   // Webhook creation state
   const [showWebhookForm, setShowWebhookForm] = useState(false);
@@ -494,6 +498,19 @@ function AdminPanel({ onClose }: AdminPanelProps) {
       requestRefresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to revoke API key');
+    }
+  };
+
+  // Rotate an API key: new value, same ID, name and permissions. The old value stops working at once.
+  const handleRotateApiKey = async (keyId: string) => {
+    if (!token) return;
+    setRotateConfirm(null);
+    try {
+      const key = await rotateApiKey(token, keyId);
+      setCreatedKey({ ...key, rotated: true });
+      requestRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to rotate API key');
     }
   };
 
@@ -1480,7 +1497,7 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                   </form>
 
                   {/* Show created key */}
-                  {createdKey && (
+                  {createdKey && !createdKey.rotated && (
                     <div className="mt-4 p-4 bg-meet-success/10 border border-meet-success/30 rounded-lg">
                       <p className="text-meet-success text-sm mb-2">API key created! Copy it now - it won't be shown again.</p>
                       <code className="block bg-meet-bg-tertiary p-3 rounded text-sm text-meet-text-primary font-mono break-all">
@@ -1502,6 +1519,26 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                 {/* API Keys List */}
                 <div className="glass rounded-xl p-6">
                   <h3 className="text-lg font-semibold text-meet-text-primary mb-4">API Keys</h3>
+                  {createdKey?.rotated && (
+                    <div className="mb-4 p-4 bg-meet-success/10 border border-meet-success/30 rounded-lg" role="status">
+                      <p className="text-meet-success text-sm mb-2">
+                        New value for “{createdKey.name}”. Copy it now - it won't be shown again. The old value no longer works;
+                        where it was used (for Nodus: Settings → MEET calls → Replace API key), enter this one.
+                      </p>
+                      <code className="block bg-meet-bg-tertiary p-3 rounded text-sm text-meet-text-primary font-mono break-all">
+                        {createdKey.key}
+                      </code>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(createdKey.key);
+                          setCreatedKey(null);
+                        }}
+                        className="mt-2 text-sm text-meet-accent hover:underline"
+                      >
+                        Copy and dismiss
+                      </button>
+                    </div>
+                  )}
                   {apiKeys.length === 0 ? (
                     <p className="text-meet-text-tertiary">No API keys created yet</p>
                   ) : (
@@ -1525,17 +1562,36 @@ function AdminPanel({ onClose }: AdminPanelProps) {
                               ))}
                             </div>
                           </div>
-                          <button
-                            onClick={() => handleRevokeApiKey(key.id)}
-                            className="text-meet-error hover:text-meet-error/80 text-sm"
-                          >
-                            Revoke
-                          </button>
+                          <div className="flex flex-wrap items-center justify-end gap-3">
+                            {rotateConfirm === key.id ? (
+                              <>
+                                <span className="text-sm text-meet-text-secondary">New value now? The old one stops working.</span>
+                                <button onClick={() => handleRotateApiKey(key.id)} className="text-meet-accent hover:underline text-sm">
+                                  Yes, rotate
+                                </button>
+                                <button onClick={() => setRotateConfirm(null)} className="text-meet-text-tertiary hover:underline text-sm">
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <button onClick={() => setRotateConfirm(key.id)} className="text-meet-accent hover:underline text-sm">
+                                Rotate
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleRevokeApiKey(key.id)}
+                              className="text-meet-error hover:text-meet-error/80 text-sm"
+                            >
+                              Revoke
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
+
+                {token && <NodusSettingsSection token={token} apiKeys={apiKeys} />}
               </div>
             )}
 

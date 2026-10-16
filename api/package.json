@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "reset-admin": "node dist/reset-admin.js",
-    "test:nodus": "node --test tests/meeting-access.test.cjs tests/meeting-http.test.cjs tests/nodus-upgrade.test.cjs ../tests/nodus-private.test.mjs ../tests/nodus-private-protocol.test.mjs"
+    "test:nodus": "node --test tests/meeting-access.test.cjs tests/meeting-http.test.cjs tests/nodus-upgrade.test.cjs tests/nodus-admin.test.cjs ../tests/nodus-private.test.mjs ../tests/nodus-private-protocol.test.mjs"
   },
   "dependencies": {
     "@simplewebauthn/server": "^13.3.0",

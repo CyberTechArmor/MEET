@@ -1196,6 +1196,27 @@ export async function revokeApiKey(token: string, keyId: string): Promise<void> 
   }
 }
 
+/**
+ * Rotate an API key: a new value under the same ID, name and permissions.
+ * The previous value stops working at once.
+ */
+export async function rotateApiKey(token: string, keyId: string): Promise<CreateApiKeyResponse> {
+  const response = await fetch(`${API_URL}/api/admin/api-keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to rotate API key' }));
+    throw new Error(error.error || 'Failed to rotate API key');
+  }
+
+  return response.json();
+}
+
 // Webhook types and functions
 export interface WebhookInfo {
   id: string;
@@ -1501,6 +1522,50 @@ function authHeaders(token: string, json = false): Record<string, string> {
     'Authorization': `Bearer ${token}`,
     ...(json ? { 'Content-Type': 'application/json' } : {}),
   };
+}
+
+// ─────────────────────────── Nodus calls connection ───────────────────────────
+
+export interface NodusStatus {
+  /** Where the active values come from: saved here, the server's nodus.env, or nowhere. */
+  source: 'settings' | 'environment' | 'none';
+  keyId: string | null;
+  keyName: string | null;
+  nodusOrigin: string | null;
+  /** True while private calls can run with these values. */
+  configured: boolean;
+  problem: string | null;
+  updatedAt: string | null;
+  updatedBy: string | null;
+  environmentSet: boolean;
+}
+
+export async function getNodusSettings(token: string): Promise<NodusStatus> {
+  const response = await fetch(`${API_URL}/api/admin/nodus`, { headers: authHeaders(token) });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to load the Nodus connection'));
+  return response.json();
+}
+
+export async function updateNodusSettings(token: string, update: { keyId: string; nodusOrigin: string }): Promise<NodusStatus> {
+  const response = await fetch(`${API_URL}/api/admin/nodus`, {
+    method: 'PUT',
+    headers: authHeaders(token, true),
+    body: JSON.stringify(update),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to save the Nodus connection'));
+  return response.json();
+}
+
+export async function deleteNodusSettings(token: string): Promise<NodusStatus> {
+  const response = await fetch(`${API_URL}/api/admin/nodus`, {
+    method: 'DELETE',
+    headers: authHeaders(token),
+  });
+  notifyUnauthorizedIfNeeded(response);
+  if (!response.ok) throw new Error(await readError(response, 'Failed to remove the Nodus connection'));
+  return response.json();
 }
 
 export async function getSmtpSettings(token: string): Promise<SmtpStatus> {
